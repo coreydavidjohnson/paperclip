@@ -45,6 +45,33 @@ describe("shouldNavigateFileViewerSearch", () => {
 
     expect(shouldNavigateFileViewerSearch("", "?browse=1")).toBe(false);
   });
+
+  it("does not restore a task route after the user navigates to Inbox", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { pathname: "/PER/inbox", search: "" } },
+    });
+
+    expect(shouldNavigateFileViewerSearch("?browse=1", "?browse=1", "/PER/issues/PER-17")).toBe(false);
+  });
+
+  it("does not overwrite another task with a previous task's browse state", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { pathname: "/PER/issues/PER-20", search: "" } },
+    });
+
+    expect(shouldNavigateFileViewerSearch("?browse=1", "?browse=1", "/PER/issues/PER-17")).toBe(false);
+  });
+
+  it("allows browse state updates while the original task route is current", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: { location: { pathname: "/PER/issues/PER-17", search: "" } },
+    });
+
+    expect(shouldNavigateFileViewerSearch("?browse=1", "", "/PER/issues/PER-17")).toBe(true);
+  });
 });
 
 describe("readFileViewerStateFromSearch", () => {
