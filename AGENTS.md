@@ -224,3 +224,18 @@ A change is done when all are true:
 ## Design system
 
 `DESIGN.md` at the repo root is the source of truth for UI design decisions. The token-only rule applies to all `ui/` changes: every color, spacing, radius, type, shadow, and motion value in `ui/src/components/**` and `ui/src/pages/**` comes from the token layer in `ui/src/index.css` — no hex, raw px, arbitrary Tailwind bracket values, or raw `font-size`/`fontSize` declarations in components, outside the documented allowlist in `ui/src/index.css`. Run `pnpm check:token-gates` (`scripts/check-token-gates.mjs`) before committing UI changes — it fails on any violation not covered by that allowlist.
+
+## Luma maintained fork
+
+- Preserve the upstream rules above. `upstream` tracks `paperclipai/master`
+  (the upstream default branch); `luma` is a pinned release plus our patches.
+- Work in an isolated worktree. Keep each behavior patch and its tests in one
+  small commit. Do not mix operational configuration with upstream code.
+- Update `PATCHES.md` for each carried patch and follow `UPGRADING.md`.
+- Do not open, comment on, or propose an upstream issue or PR without a new
+  explicit instruction from Corey. This fork is maintained privately in process.
+- Use catalog capabilities, not names of external adapters, in shared UI.
+  Preserve native issue overrides, tenant boundaries and built-in behavior.
+- Run patch tests and token gates before committing. Image builds execute these
+  tests too. Run heavy builds on the approved cluster builder.
+- Homelab pins the exact `luma` SHA. No branch-head or mutable-tag deployments.
