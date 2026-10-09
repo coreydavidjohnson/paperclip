@@ -28,7 +28,21 @@ commits. There are no upstream issue or PR links by Corey's instruction.
 - Files: `Dockerfile`.
 - Removal condition: upstream ships equivalent capability.
 - Test: build `Dockerfile` target `production`; the `luma-patch-tests` stage
-  must pass both patch test files and `pnpm check:token-gates` before app copy.
+  must pass both composer test files, `ui/src/context/FileViewerContext.test.ts`
+  and `pnpm check:token-gates` before app copy.
+
+## 3. Ignore stale task file-browser navigation
+
+- Why: a task file-browser callback could redirect Inbox back to a task after
+  the user had left it. Turing authored source commit
+  `efe29176c014c961a2e1fe5681c0326be723fd8c`.
+- Files: `ui/src/components/task-side-panel/TaskSidePanel.tsx`,
+  `ui/src/context/FileViewerContext.tsx` and its test.
+- Contract: reject file-viewer search navigation when the current pathname
+  differs from the route that created the callback.
+- Removal condition: upstream ships equivalent capability.
+- Test: `pnpm --filter @paperclipai/ui exec vitest run src/context/FileViewerContext.test.ts`.
+  Covers navigation to Inbox, another task and updates on the current task.
 
 ## Earlier image modifications inventory
 

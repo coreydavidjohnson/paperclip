@@ -145,7 +145,7 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 RUN rm -rf packages/paperclip-runner/runner/target
 
 FROM build AS luma-patch-tests
-RUN pnpm --filter @paperclipai/ui exec vitest run src/components/task-chat/composer-run-settings.test.ts src/components/task-chat/ComposerRunSettingsPicker.test.tsx \
+RUN pnpm --filter @paperclipai/ui exec vitest run src/components/task-chat/composer-run-settings.test.ts src/components/task-chat/ComposerRunSettingsPicker.test.tsx src/context/FileViewerContext.test.ts \
   && pnpm check:token-gates
 
 FROM base AS production
