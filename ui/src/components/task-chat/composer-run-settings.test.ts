@@ -44,6 +44,27 @@ describe("composer run settings", () => {
     expect(composerCatalogProvider({ ...agent("opencode_local"), adapterConfig: { model: "openrouter/qwen/qwen3-coder-next" } })).toBe("openrouter");
   });
 
+  it("uses declared capabilities for any external adapter", () => {
+    const external = agent("external_test" as Agent["adapterType"]);
+    const catalog = [{ id: "provider/sonnet", label: "Sonnet", reasoningEfforts: ["low", "high"] }];
+    expect(supportsComposerModel(external, catalog)).toBe(true);
+    expect(supportsComposerModel(external, [])).toBe(false);
+    expect(composerEfforts(external, "provider/sonnet", ["provider/sonnet"], catalog)).toEqual(["low", "high"]);
+    expect(composerEfforts(external, "unknown", ["provider/sonnet"], catalog)).toEqual([]);
+    expect(composerEfforts(external, "provider/sonnet", ["provider/sonnet"], [{ id: "provider/sonnet", label: "Sonnet" }])).toEqual([]);
+  });
+
+  it("round-trips native external model and effort keys without losing unrelated overrides", () => {
+    const previous = { adapterConfig: { chrome: true, model: "old", effort: "low" }, useProjectWorkspace: true };
+    const selected = { model: "provider/sonnet", effort: "high", fast: false };
+    const merged = mergeComposerRunSettings(previous, "external_test", selected);
+    expect(merged).toEqual({ adapterConfig: { chrome: true, model: "provider/sonnet", effort: "high" }, useProjectWorkspace: true });
+    expect(readComposerRunSettings(merged, "external_test")).toEqual(selected);
+    const reset = mergeComposerRunSettings(merged, "external_test", { model: null, effort: null, fast: false });
+    expect(reset).toEqual({ adapterConfig: { chrome: true }, useProjectWorkspace: true });
+    expect(readComposerRunSettings(reset, "external_test")).toEqual({ model: null, effort: null, fast: false });
+  });
+
   it("preserves unrelated task overrides while changing or resetting run settings", () => {
     const previous = { adapterConfig: { chrome: true, model: "old", effort: "low" }, useProjectWorkspace: true };
     expect(mergeComposerRunSettings(previous, "claude_local", { model: "claude-opus", effort: "high", fast: false }))

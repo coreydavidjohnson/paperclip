@@ -4,6 +4,7 @@ import { resolvePaperclipRunnerModel } from "@paperclipai/adapter-utils";
 import { DEFAULT_GROK_LOCAL_MODEL, grokLocalReasoningEffortsForModel } from "@paperclipai/adapter-grok-local";
 import { DEFAULT_KIMI_LOCAL_MODEL, modelSupportsEffort, KIMI_SUPPORTED_EFFORTS } from "@paperclipai/adapter-kimi-local";
 import { aiConnectionBindingSchema, aiRuntimeConnectionBindingSchema, type Agent, type IssueAssigneeAdapterOverrides } from "@paperclipai/shared";
+import type { AdapterModel } from "@/api/agents";
 
 export interface ComposerRunSettings {
   model: string | null;
@@ -17,13 +18,13 @@ export const EFFORT_LABELS: Record<string, string> = {
   xhigh: "Extra High", max: "Max", ultra: "Ultra",
 };
 
-const MODEL_ADAPTERS = new Set([
+const LEGACY_MODEL_ADAPTERS = new Set([
   "claude_local", "codex_local", "opencode_local", "pi_local", "kimi_local",
   "gemini_local", "cursor", "cursor_cloud", "grok_local", "hermes_local", "paperclip_runner",
 ]);
 
-export function supportsComposerModel(agent: Agent | undefined): boolean {
-  return Boolean(agent && MODEL_ADAPTERS.has(agent.adapterType));
+export function supportsComposerModel(agent: Agent | undefined, catalog: readonly AdapterModel[] = []): boolean {
+  return Boolean(agent && (catalog.length > 0 || LEGACY_MODEL_ADAPTERS.has(agent.adapterType)));
 }
 
 /** Resolve visible defaults; host environment and a local CLI's own config are unknown. */
@@ -59,11 +60,13 @@ export function composerCatalogProvider(agent: Agent | undefined): string | unde
     ? "openrouter" : undefined;
 }
 
-export function composerEfforts(agent: Agent | undefined, model: string, catalogIds: readonly string[]): readonly string[] {
+export function composerEfforts(agent: Agent | undefined, model: string, catalogIds: readonly string[], catalog: readonly AdapterModel[] = []): readonly string[] {
   if (!agent) return [];
   const effectiveModel = model.trim() || (agent.adapterType === "grok_local" ? DEFAULT_GROK_LOCAL_MODEL
     : agent.adapterType === "kimi_local" ? DEFAULT_KIMI_LOCAL_MODEL : "");
   if (!effectiveModel) return [];
+  const declaredEfforts = catalog.find((item) => item.id === effectiveModel)?.reasoningEfforts;
+  if (declaredEfforts) return declaredEfforts;
   const pool = aiRuntimeConnectionBindingSchema.safeParse(agent.runtimeConfig?.aiConnection).data?.mode === "router";
   if (pool && agent.adapterType === "paperclip_runner") return isCodexLocalKnownModel(effectiveModel) ? codexLocalReasoningEffortsForModel(effectiveModel) : [];
   if (agent.adapterType === "codex_local" || (agent.adapterType === "paperclip_runner" && composerCatalogProvider(agent) === "codex")) {
@@ -100,7 +103,7 @@ function composerEffortKey(adapterType: string | undefined): string | null {
   if (adapterType === "grok_local") return "reasoningEffort";
   if (adapterType === "pi_local") return "thinking";
   if (adapterType === "opencode_local") return "variant";
-  return null;
+  return adapterType ? "effort" : null;
 }
 
 export function mergeComposerRunSettings(

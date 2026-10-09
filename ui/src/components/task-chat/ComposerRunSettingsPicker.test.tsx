@@ -10,6 +10,7 @@ import { agentsApi } from "@/api/agents";
 import { ComposerRunSettingsPicker } from "./ComposerRunSettingsPicker";
 import { getLastComposerEffort, rememberComposerEffort } from "@/lib/recent-composer-effort";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/dialog";
+import type { ComposerRunSettings } from "./composer-run-settings";
 
 const agent = {
   id: "a1", companyId: "company-1", name: "Clippy",
@@ -35,14 +36,14 @@ async function click(label: string) {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
-function render(onAssigneeChange: (value: string) => void, onSettingsChange: () => void, useCatalog = false, props: Partial<ComponentProps<typeof ComposerRunSettingsPicker>> = {}, insideDialog = false) {
+function render(onAssigneeChange: (value: string) => void, onSettingsChange: (settings: ComposerRunSettings) => void, useCatalog = false, props: Partial<ComponentProps<typeof ComposerRunSettingsPicker>> = {}, insideDialog = false, selectedAgent = agent, settings: ComposerRunSettings = { model: "gpt-6-sol", effort: "high", fast: true }) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const picker = <QueryClientProvider client={queryClient}>
     <ComposerRunSettingsPicker companyId="company-1" assigneeValue="agent:a1" currentAssigneeValue="agent:a1"
-      options={options} agents={agents} settings={{ model: "gpt-6-sol", effort: "high", fast: true }}
+      options={options} agents={new Map([[selectedAgent.id, selectedAgent]])} settings={settings}
       onAssigneeChange={onAssigneeChange} onSettingsChange={onSettingsChange}
       modelOptionsOverride={useCatalog ? undefined : []} {...props} />
   </QueryClientProvider>;
@@ -306,5 +307,41 @@ describe("composer assignee picker", () => {
     expect(document.querySelector('[data-testid="composer-mobile-dialog"]')).not.toBeNull();
     expect(document.querySelector('[aria-label="Search assignees"]')).not.toBeNull();
     expect(document.querySelector('[aria-label="Choose exact model"]')).toBeNull();
+  });
+});
+
+describe("external adapter composer capabilities", () => {
+  const external = { ...agent, adapterType: "external_test", adapterConfig: {} } as unknown as Agent;
+
+  it("loads an external catalog and emits native model and effort selections", async () => {
+    const loadModels = vi.spyOn(agentsApi, "adapterModels").mockResolvedValueOnce([
+      { id: "provider/sonnet", label: "Sonnet", reasoningEfforts: ["low", "high"] },
+    ]);
+    const changed = vi.fn();
+    render(vi.fn(), changed, true, {}, false, external, { model: "provider/sonnet", effort: null, fast: false });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(loadModels).toHaveBeenCalledWith("company-1", "external_test", { environmentId: null, provider: undefined });
+    await click("Select assignee, model and effort");
+    expect(document.body.textContent).not.toContain("This gateway chooses");
+    const slider = document.querySelector<HTMLInputElement>('input[aria-label="Effort"]');
+    expect(slider).not.toBeNull();
+    flushSync(() => {
+      const setValue = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value")!.set!;
+      setValue.call(slider, "2");
+      slider!.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(changed).toHaveBeenCalledWith({ model: "provider/sonnet", effort: "high", fast: false });
+    await click("Choose exact model");
+    await click("Sonnet");
+    expect(changed).toHaveBeenCalledWith({ model: "provider/sonnet", effort: null, fast: false });
+  });
+
+  it("keeps adapters without a catalog unsupported", async () => {
+    vi.spyOn(agentsApi, "adapterModels").mockResolvedValueOnce([]);
+    render(vi.fn(), vi.fn(), true, {}, false, external, { model: null, effort: null, fast: false });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    await click("Select assignee, model and effort");
+    expect(document.body.textContent).toContain("This gateway chooses");
+    expect(document.querySelector('input[aria-label="Effort"]')).toBeNull();
   });
 });
