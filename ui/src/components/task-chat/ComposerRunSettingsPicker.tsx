@@ -97,22 +97,22 @@ export function ComposerRunSettingsPicker({
   const mobile = mobileProp ?? narrow;
   const agentId = assigneeValue.startsWith("agent:") ? assigneeValue.slice(6) : "";
   const agent = agents.get(agentId);
-  const modelSupported = supportsComposerModel(agent);
   const provider = composerCatalogProvider(agent);
-  const { data: fetchedModels = [], isPending: modelsPending } = useQuery({
-    queryKey: agent && modelSupported
+  const { data: fetchedModels = [], isPending: modelsPending, isError: modelsError } = useQuery({
+    queryKey: agent
       ? queryKeys.agents.adapterModels(companyId, agent.adapterType, agent.defaultEnvironmentId ?? null, provider)
       : ["agents", "composer-models", "none"],
     queryFn: () => agentsApi.adapterModels(companyId, agent!.adapterType, {
       environmentId: agent!.defaultEnvironmentId ?? null, provider,
     }),
-    enabled: Boolean(agent && modelSupported && !modelOptionsOverride),
+    enabled: Boolean(agent && !modelOptionsOverride),
   });
   // The server resolves instance-declared models first and otherwise returns the
   // adapter's curated catalog. Do not replace a declared Codex list locally.
   const models: readonly (AdapterModel & { detail?: string })[] = modelOptionsOverride
     ?? fetchedModels;
-  const catalogPending = modelsPending && !modelOptionsOverride;
+  const modelSupported = supportsComposerModel(agent, models);
+  const catalogPending = Boolean(agent && modelsPending && !modelOptionsOverride);
   const base = assigneeValue === currentAssigneeValue
     ? readComposerRunSettings(overrides, agent?.adapterType)
     : DEFAULT_COMPOSER_RUN_SETTINGS;
@@ -120,7 +120,7 @@ export function ComposerRunSettingsPicker({
   const configuredModel = typeof agent?.adapterConfig.model === "string" ? agent.adapterConfig.model : "";
   const model = selected.model ?? configuredModel;
   const modelName = models.find((item) => item.id === model)?.label ?? model ?? "";
-  const choices = composerEfforts(agent, model, models.map((item) => item.id));
+  const choices = composerEfforts(agent, model, models.map((item) => item.id), models);
   const effort = selected.effort && choices.includes(selected.effort) ? selected.effort : null;
   const effortIndex = effort ? choices.indexOf(effort) + 1 : 0;
   const effortLabel = effort ? EFFORT_LABELS[effort] ?? effort : "Default";
@@ -200,7 +200,7 @@ export function ComposerRunSettingsPicker({
           onChange={(event) => onSettingsChange({ ...selected, effort: Number(event.target.value) === 0 ? null : choices[Number(event.target.value) - 1] })}
           className="composer-run-effort-range mt-3 w-full" style={{ "--fill": `${effortIndex / choices.length * 100}%` } as CSSProperties} />
       </div> : null}
-    </> : <div className="mt-3 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground" data-testid="model-unavailable">{unavailableModelReason(agent)}</div>}
+    </> : <div className="mt-3 rounded-md bg-muted/40 px-3 py-2 text-xs text-muted-foreground" data-testid="model-unavailable">{catalogPending ? "Loading models…" : modelsError ? "Could not load this agent's models." : unavailableModelReason(agent)}</div>}
   </div> : view === "agents" ? <div className="p-2">
     <div className="flex items-center gap-2 px-1 py-1.5"><button type="button" aria-label="Back to selection" onClick={() => setView("settings")} className="grid size-7 place-items-center rounded-md hover:bg-accent"><ArrowLeft className="size-4" /></button><span className="min-w-0 flex-1"><span className="block text-xs font-semibold">Choose assignee</span><span className="block truncate text-xs text-muted-foreground">Each agent keeps its configured harness.</span></span>{closeButton}</div>
     <div className="relative mt-2"><Search className="pointer-events-none absolute left-2.5 top-2.5 size-4 text-muted-foreground" aria-hidden /><input autoFocus type="search" aria-label="Search assignees" placeholder="Search assignees…" value={assigneeSearch} onChange={(event) => { setAssigneeSearch(event.target.value); setHighlightedAssignee(0); }} onKeyDown={(event) => {

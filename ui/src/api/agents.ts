@@ -49,6 +49,7 @@ export interface AgentKey {
 export interface AdapterModel {
   id: string;
   label: string;
+  reasoningEfforts?: string[];
 }
 
 export interface DetectedAdapterModel {
