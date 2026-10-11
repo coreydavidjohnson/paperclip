@@ -4,6 +4,20 @@ import { describe, expect, it } from "vitest";
 import { buildAssigneeAdapterOverrides } from "./issue-assignee-overrides";
 
 describe("buildAssigneeAdapterOverrides", () => {
+  it("uses native model and effort overrides only when an external adapter lists models", () => {
+    const input = {
+      adapterType: "custom_gateway", lane: "custom" as const,
+      modelOverride: "provider/alternate", thinkingEffortOverride: "high", chrome: true,
+    };
+    expect(buildAssigneeAdapterOverrides({ ...input, modelCatalog: [] })).toBeNull();
+    expect(buildAssigneeAdapterOverrides({
+      ...input, modelCatalog: [{ id: "provider/alternate" }],
+    })).toEqual({ adapterConfig: { model: "provider/alternate", effort: "high" } });
+    expect(buildAssigneeAdapterOverrides({
+      ...input, lane: "primary", modelCatalog: [{ id: "provider/alternate" }],
+    })).toBeNull();
+  });
+
   it("returns null for adapters that do not accept issue overrides", () => {
     expect(
       buildAssigneeAdapterOverrides({

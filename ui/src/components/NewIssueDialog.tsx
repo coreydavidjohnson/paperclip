@@ -84,6 +84,7 @@ import { InlineEntitySelector, type InlineEntityOption } from "./InlineEntitySel
 import { getTrustPreset } from "../lib/trust-policy-ui";
 import { ReusableExecutionWorkspaceSelect } from "./ReusableExecutionWorkspaceSelect";
 import { codexReasoningEffortOptions } from "../lib/codex-reasoning-effort";
+import { EFFORT_LABELS } from "./task-chat/composer-run-settings";
 
 const DRAFT_KEY = "paperclip:issue-draft";
 const DEBOUNCE_MS = 800;
@@ -611,9 +612,6 @@ export function NewIssueDialog() {
     ? selectedAssigneeAgent.adapterConfig.model
     : "";
   const effectiveAssigneeModel = assigneeModelOverride || assigneePrimaryModel;
-  const supportsAssigneeOverrides = Boolean(
-    assigneeAdapterType && ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType),
-  );
   const mentionOptions = useMemo<MentionOption[]>(() => {
     return buildMarkdownMentionOptions({
       agents,
@@ -623,14 +621,30 @@ export function NewIssueDialog() {
   }, [agents, companyMembers?.users, orderedProjects]);
 
   const catalogProvider = assigneeAdapterType === "paperclip_runner" ? String(normalizeLegacyRunnerProvider(selectedAssigneeAgent?.adapterConfig ?? {}).provider ?? "codex") : undefined;
-  const { data: assigneeAdapterModels } = useQuery({
+  const { data: assigneeAdapterModels, isFetching: assigneeModelsFetching } = useQuery({
     queryKey:
       effectiveCompanyId && assigneeAdapterType
         ? queryKeys.agents.adapterModels(effectiveCompanyId, assigneeAdapterType, null, catalogProvider)
         : ["agents", "none", "adapter-models", assigneeAdapterType ?? "none"],
     queryFn: () => agentsApi.adapterModels(effectiveCompanyId!, assigneeAdapterType!, { provider: catalogProvider }),
-    enabled: Boolean(effectiveCompanyId) && newIssueOpen && supportsAssigneeOverrides,
+    enabled: Boolean(effectiveCompanyId && assigneeAdapterType) && newIssueOpen,
   });
+  const supportsAssigneeOverrides = Boolean(
+    assigneeAdapterType && (ISSUE_OVERRIDE_ADAPTER_TYPES.has(assigneeAdapterType) || assigneeAdapterModels?.length),
+  );
+  const thinkingEffortOptions = useMemo(() =>
+    assigneeAdapterType === "codex_local"
+      ? codexReasoningEffortOptions(effectiveAssigneeModel)
+      : assigneeAdapterType === "opencode_local"
+        ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
+        : assigneeAdapterType === "claude_local"
+          ? ISSUE_THINKING_EFFORT_OPTIONS.claude_local
+          : [
+            { value: "", label: "Default" },
+            ...(assigneeAdapterModels?.find((model) => model.id === effectiveAssigneeModel)?.reasoningEfforts ?? [])
+              .map((value) => ({ value, label: EFFORT_LABELS[value] ?? value })),
+          ],
+  [assigneeAdapterType, effectiveAssigneeModel, assigneeAdapterModels]);
 
   const createIssue = useMutation({
     mutationFn: async ({
@@ -944,6 +958,7 @@ export function NewIssueDialog() {
   }, [newIssueOpen, newIssueDefaults, orderedProjects, selectedCompanyId, setIssueText]);
 
   useEffect(() => {
+    if (assigneeModelsFetching && !supportsAssigneeOverrides) return;
     if (!supportsAssigneeOverrides) {
       setAssigneeOptionsOpen(false);
       setAssigneeModelLane("primary");
@@ -952,19 +967,13 @@ export function NewIssueDialog() {
       setAssigneeChrome(false);
       return;
     }
-    const validThinkingValues =
-      assigneeAdapterType === "codex_local"
-        ? codexReasoningEffortOptions(effectiveAssigneeModel)
-        : assigneeAdapterType === "opencode_local"
-          ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
-          : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
-    if (!validThinkingValues.some((option) => option.value === assigneeThinkingEffort)) {
+    if (!thinkingEffortOptions.some((option) => option.value === assigneeThinkingEffort)) {
       setAssigneeThinkingEffort("");
     }
   }, [
     supportsAssigneeOverrides,
-    assigneeAdapterType,
-    effectiveAssigneeModel,
+    assigneeModelsFetching,
+    thinkingEffortOptions,
     assigneeThinkingEffort,
   ]);
 
@@ -1045,6 +1054,7 @@ export function NewIssueDialog() {
       modelOverride: assigneeModelOverride,
       thinkingEffortOverride: assigneeThinkingEffort,
       chrome: assigneeChrome,
+      modelCatalog: assigneeAdapterModels,
     });
     const selectedProject = orderedProjects.find((project) => project.id === projectId);
     // Hidden selectors must not submit a restored draft over the managed default.
@@ -1217,12 +1227,6 @@ export function NewIssueDialog() {
         : assigneeAdapterType === "opencode_local"
           ? "OpenCode options"
         : "Agent options";
-  const thinkingEffortOptions =
-    assigneeAdapterType === "codex_local"
-      ? codexReasoningEffortOptions(effectiveAssigneeModel)
-      : assigneeAdapterType === "opencode_local"
-        ? ISSUE_THINKING_EFFORT_OPTIONS.opencode_local
-      : ISSUE_THINKING_EFFORT_OPTIONS.claude_local;
   const recentAssigneeIds = useMemo(() => getRecentAssigneeIds(), [newIssueOpen]);
   const recentAssigneeOptionIds = useMemo(
     () => recentAssigneeIds.map((id) => assigneeValueFromSelection({ assigneeAgentId: id })),

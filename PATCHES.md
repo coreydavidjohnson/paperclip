@@ -44,6 +44,28 @@ commits. There are no upstream issue or PR links by Corey's instruction.
 - Test: `pnpm --filter @paperclipai/ui exec vitest run src/context/FileViewerContext.test.ts`.
   Covers navigation to Inbox, another task and updates on the current task.
 
+## 4. External adapter create-task options
+
+- Why: `NewIssueDialog` has its own three-adapter allowlist, independent of the
+  chat composer. It disabled catalog fetching and discarded external overrides.
+  `modelsCount` is adapter-manager display metadata, not a dialog capability.
+- Files: `ui/src/components/NewIssueDialog.tsx`,
+  `ui/src/lib/issue-assignee-overrides.ts`, their tests and `Dockerfile`.
+- Contract: fetch the company-scoped dynamic catalog for the selected adapter.
+  A nonempty catalog enables the existing model-lane controls; declared
+  `reasoningEfforts` supplies external effort choices. Submit native
+  `assigneeAdapterOverrides.adapterConfig.model` and `effort`. Primary lane
+  sends no override; empty catalogs stay unsupported. Built-in mappings remain
+  unchanged. Pending catalog fetches must not reset external draft settings.
+- Removal condition: the pinned release's create dialog supports catalog-backed
+  external overrides; re-evaluate on the next fork upgrade.
+- Test: `pnpm --filter @paperclipai/ui exec vitest run
+  src/components/NewIssueDialog.test.tsx src/lib/issue-assignee-overrides.test.ts`.
+  An arbitrarily named external adapter exercises catalog fetching, model and
+  effort selection, and the issue-create payload. Serializer tests cover empty
+  catalogs, default lane and unchanged built-in keys. Include these tests in
+  the lightweight homelab `Fork.Dockerfile` UI-rebuild gate too.
+
 ## Earlier image modifications inventory
 
 Before this fork, homelab used the unmodified upstream release image and added

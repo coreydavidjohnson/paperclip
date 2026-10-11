@@ -12,6 +12,7 @@ export interface BuildAssigneeAdapterOverridesInput {
   modelOverride: string;
   thinkingEffortOverride: string;
   chrome: boolean;
+  modelCatalog?: readonly { id: string }[];
 }
 
 /**
@@ -26,7 +27,7 @@ export function buildAssigneeAdapterOverrides(
   input: BuildAssigneeAdapterOverridesInput,
 ): Record<string, unknown> | null {
   const adapterType = input.adapterType ?? null;
-  if (!adapterType || !ISSUE_OVERRIDE_ADAPTER_TYPES.has(adapterType)) {
+  if (!adapterType || (!ISSUE_OVERRIDE_ADAPTER_TYPES.has(adapterType) && !input.modelCatalog?.length)) {
     return null;
   }
 
@@ -41,7 +42,7 @@ export function buildAssigneeAdapterOverrides(
       adapterConfig.modelReasoningEffort = input.thinkingEffortOverride;
     } else if (adapterType === "opencode_local") {
       adapterConfig.variant = input.thinkingEffortOverride;
-    } else if (adapterType === "claude_local") {
+    } else {
       adapterConfig.effort = input.thinkingEffortOverride;
     }
   }

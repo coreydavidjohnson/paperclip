@@ -189,11 +189,14 @@ vi.mock("./InlineEntitySelector", async () => {
         placeholder?: string;
         className?: string;
         triggerDataSlot?: string;
+        options?: { id: string; label: string }[];
+        onChange?: (value: string) => void;
         renderTriggerValue?: (option: { id: string; label: string } | null) => ReactNode;
       }
-    >(function InlineEntitySelectorMock({ value, placeholder, className, triggerDataSlot, renderTriggerValue }, ref) {
+    >(function InlineEntitySelectorMock({ value, placeholder, className, triggerDataSlot, options, onChange, renderTriggerValue }, ref) {
       return (
-        <button ref={ref} type="button" className={className} data-slot={triggerDataSlot}>
+        <button ref={ref} type="button" className={className} data-slot={triggerDataSlot}
+          onClick={() => placeholder === "Default model" && onChange?.(options?.[0]?.id ?? "")}>
           {(renderTriggerValue?.(value ? { id: value, label: value } : null) ?? value) || placeholder}
         </button>
       );
@@ -383,6 +386,51 @@ describe("NewIssueDialog", () => {
       Reflect.deleteProperty(window, "innerHeight");
     }
     document.body.innerHTML = "";
+  });
+
+  it("loads an external catalog and submits the selected task model and declared effort", async () => {
+    dialogState.newIssueDefaults = { assigneeAgentId: "agent-1" };
+    mockAgentsApi.list.mockResolvedValue([{
+      id: "agent-1", companyId: "company-1", name: "External agent",
+      adapterType: "custom_gateway", adapterConfig: { model: "provider/default" },
+      runtimeConfig: {}, status: "idle",
+    }]);
+    mockAgentsApi.adapterModels.mockClear();
+    mockAgentsApi.adapterModels.mockResolvedValue([
+      { id: "provider/alternate", label: "Alternate", reasoningEfforts: ["low", "high"] },
+      { id: "provider/default", label: "Default", reasoningEfforts: ["low"] },
+    ]);
+    const { root } = renderDialog(container);
+    await waitForAssertion(() => {
+      expect(mockAgentsApi.adapterModels).toHaveBeenCalledWith("company-1", "custom_gateway", { provider: undefined });
+      expect(container.textContent).toContain("Agent options");
+    });
+    async function clickButton(label: string) {
+      const button = Array.from(container.querySelectorAll("button"))
+        .find((element) => element.textContent?.trim() === label);
+      expect(button).not.toBeUndefined();
+      await act(async () => {
+        button!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+      await flush();
+    }
+    await clickButton("Agent options");
+    await clickButton("Custom");
+    await clickButton("Default model");
+    expect(container.textContent).toContain("Thinking effort");
+    expect(container.textContent).not.toContain("Max");
+    await clickButton("High");
+    const titleInput = container.querySelector('textarea[placeholder="Task title (optional)"]') as HTMLTextAreaElement;
+    await typeTextareaValue(titleInput, "External task override");
+    await clickButton("Create Task");
+    await waitForAssertion(() => expect(mockIssuesApi.create).toHaveBeenCalledWith(
+      "company-1",
+      expect.objectContaining({
+        assigneeAgentId: "agent-1",
+        assigneeAdapterOverrides: { adapterConfig: { model: "provider/alternate", effort: "high" } },
+      }),
+    ));
+    act(() => root.unmount());
   });
 
   it("shows sub-issue context only when opened from a sub-issue action", async () => {
