@@ -41,3 +41,26 @@
 
 Keep the deployment receipt with CI, image, fork and homelab SHAs, hook results,
 browser screenshots and the acceptance session ID.
+
+## Current homelab image build boundary
+
+Check services/paperclip/Fork.Dockerfile in the pinned homelab source before
+planning a server or database change. The current lightweight build starts
+from the upstream dependency image. It copies fork ui/ and
+packages/adapter-utils/src/ into the UI build stage, runs the UI patch tests
+and token gate, and builds the UI. Its production stage copies only ui/dist.
+It does not copy fork server/, packages/db/ or migrations into production.
+
+A fork server change or migration cannot ship through that Dockerfile unchanged.
+Extending the build boundary needs an explicitly approved, tested source change
+and a new immutable image with both server and migration verification. Do not
+claim the fork root Dockerfile is the deployed build route without checking
+scripts/build-paperclip-image.sh and its selected Dockerfile in homelab.
+Documentation-only ledger changes do not require a runtime image rebuild or
+an update of the deployed fork pin. Keep the image pin on its verified commit.
+
+The indexes listed in PATCHES.md are homelab PostSync operations, not source
+patches or migrations in this fork. On every upgrade, compare the release's
+exact predicates and migrations with these definitions. Do not infer merge
+from a closed proposal. A release upgrade that retains the same expensive
+JSON projection is not itself a measured performance repair.

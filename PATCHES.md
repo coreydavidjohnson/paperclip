@@ -73,3 +73,33 @@ its own OmniGenT adapter plus `register-adapter.sh` entrypoint. These remain
 homelab-owned integration files, not carried patches to Paperclip source.
 The old held `omnigent-task-chat-picker.patch` was never applied or deployed;
 it is superseded by patch 1, not part of the fork build.
+
+## Homelab-owned database indexes (not fork server patches)
+
+The deployment source is coreydavidjohnson/luma-homelab. Production
+k8s/paperclip/70-db-indexes.yaml and its paperclip-staging copy own concurrent,
+idempotent PostSync index builds. These indexes change no API or ownership rule.
+
+- heartbeat_runs_company_ctx_paperclip_issue_idx: company ID and
+  ((context_snapshot -> 'paperclipIssue') ->> 'id'), for secret-redaction issue
+  lookups. Retire when an upstream migration supplies equivalent coverage.
+- heartbeat_runs_company_effective_issue_idx: company ID,
+  coalesce(native_issue_id::text, context_snapshot->>'issueId'), created_at DESC,
+  id DESC. Covers the unchanged conversation ownership check. Homelab release
+  f25c3ecdae58b827ead57a1fc588faff06df5271; retirement requires equivalent
+  upstream coverage or all callers using existing native/context indexes.
+- heartbeat_runs_company_creation_source_idx: company ID and
+  coalesce(native_issue_id::text, nullif(context_snapshot->>'issueId', ''),
+  nullif(context_snapshot->>'taskId', ''), nullif(context_snapshot->>'taskKey', '')).
+  Covers creation provenance matching source UUID or identifier, preserving
+  native-ID precedence and empty-string fallback. Homelab candidate/release
+  source 69986e5739b0588abca8dfd5ddd4c9f05ba8312f. Deployment must be established
+  from the owning Argo hook, live validity/readiness and unchanged query plan;
+  this ledger entry alone is not deployment evidence. Retire only when upstream
+  supplies equivalent coverage or no longer needs this predicate.
+
+Before removing any carried index, compare exact definitions and live plans.
+Jobs repair invalid builds only and retain working indexes. The regression
+check is homelab tests/test_paperclip_ownership_index.py. Database query speed
+is not proof of browser or phone performance. None of these indexes is copied
+into the current fork image or supplied by a fork migration.
