@@ -1,3 +1,4 @@
+import { runListContextColumns, runListContextJoin } from "./run-history-query.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
 import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
@@ -3380,37 +3381,6 @@ const heartbeatRunSummaryListColumns = {
   processPid: sql<number | null>`NULL`.as("processPid"),
   processGroupId: sql<number | null>`NULL`.as("processGroupId"),
   resultJson: sql<Record<string, unknown> | null>`NULL`.as("resultJson"),
-} as const;
-
-const heartbeatRunListContextColumns = {
-  contextIssueId: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("contextIssueId"),
-  contextTaskId: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'taskId'`.as("contextTaskId"),
-  contextTaskKey: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'taskKey'`.as("contextTaskKey"),
-  contextCommentId: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'commentId'`.as("contextCommentId"),
-  contextWakeCommentId: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`.as(
-    "contextWakeCommentId",
-  ),
-  contextWakeReason: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'wakeReason'`.as("contextWakeReason"),
-  contextWakeSource: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'wakeSource'`.as("contextWakeSource"),
-  contextWakeTriggerDetail: sql<
-    string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'wakeTriggerDetail'`.as(
-    "contextWakeTriggerDetail",
-  ),
 } as const;
 
 const heartbeatRunListResultColumns = {
@@ -29797,21 +29767,22 @@ export function heartbeatService(
           summary
             ? {
                 ...heartbeatRunSummaryListColumns,
-                ...heartbeatRunListContextColumns,
+                ...runListContextColumns,
               }
             : safeForLegacyEncoding
               ? {
                   ...heartbeatRunListColumns,
                   error: sql<string | null>`NULL`.as("error"),
-                  ...heartbeatRunListContextColumns,
+                  ...runListContextColumns,
                 }
               : {
                   ...heartbeatRunListColumns,
-                  ...heartbeatRunListContextColumns,
+                  ...runListContextColumns,
                   ...heartbeatRunListResultColumns,
                 },
         )
         .from(heartbeatRuns)
+        .leftJoin(runListContextJoin, sql`true`)
         .where(
           agentId
             ? and(

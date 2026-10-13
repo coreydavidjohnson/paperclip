@@ -44,20 +44,15 @@ browser screenshots and the acceptance session ID.
 
 ## Current homelab image build boundary
 
-Check services/paperclip/Fork.Dockerfile in the pinned homelab source before
-planning a server or database change. The current lightweight build starts
-from the upstream dependency image. It copies fork ui/ and
-packages/adapter-utils/src/ into the UI build stage, runs the UI patch tests
-and token gate, and builds the UI. Its production stage copies only ui/dist.
-It does not copy fork server/, packages/db/ or migrations into production.
-
-A fork server change or migration cannot ship through that Dockerfile unchanged.
-Extending the build boundary needs an explicitly approved, tested source change
-and a new immutable image with both server and migration verification. Do not
-claim the fork root Dockerfile is the deployed build route without checking
-scripts/build-paperclip-image.sh and its selected Dockerfile in homelab.
-Documentation-only ledger changes do not require a runtime image rebuild or
-an update of the deployed fork pin. Keep the image pin on its verified commit.
+Check services/paperclip/Fork.Dockerfile in the pinned homelab source.
+The approved PER-218 build extends the lightweight upstream dependency image
+with a narrowly compiled server overlay: activity.js, heartbeat.js and
+run-history-query.js. The image build checks lockfile equality and gates the
+overlay with five run-history/regression test files and server typecheck.
+It ships upstream DB packages/migrations unchanged; do not silently ship
+schema/dependency changes. Pin fork source and immutable image together.
+Broader changes need build-boundary review; do not assume every fork file
+ships. UI source, adapter-utils and token gates are still tested.
 
 The indexes listed in PATCHES.md are homelab PostSync operations, not source
 patches or migrations in this fork. On every upgrade, compare the release's

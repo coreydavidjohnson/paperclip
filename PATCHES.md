@@ -103,3 +103,33 @@ Jobs repair invalid builds only and retain working indexes. The regression
 check is homelab tests/test_paperclip_ownership_index.py. Database query speed
 is not proof of browser or phone performance. None of these indexes is copied
 into the current fork image or supplied by a fork migration.
+
+## Run-history query repair (PER-218)
+
+- Approved by Corey in PER-218 comment fcba4d07-2918-457f-9203-9c157defdc0d.
+  Local fork only: do not submit this patch upstream.
+- Files: server/src/services/run-history-query.ts, activity.ts, heartbeat.ts,
+  and run-history-query*.test.ts. No schema change or migration.
+- Task membership uses the union of company-scoped context and activity run
+  IDs. Outer company checks, agent join, ordering, projections, liveness and
+  route authorization remain unchanged. Duplicate activity cannot duplicate results.
+- Company list uses one lateral jsonb_to_record extraction for the same eight
+  allowlisted text fields. Non-object context yields null fields. Existing
+  bounded results, response assembly and secret redaction stay intact.
+- Database-only option: existing company-created/context/activity indexes
+  already serve these queries. Another index cannot remove repeated context
+  detoasting. Read-only lateral comparison returned identical full projections,
+  200 rows, 402–415 ms versus 102–111 ms.
+- Released upstream: inspected v2026.1012.0 and deployed v2026.1005.0;
+  their company context extraction and task OR/EXISTS remain. Closed proposals
+  #6975/#7003/#7311 do not prove a shipped equivalent. No rebase.
+- Tests: run-history-query.test.ts, run-history-query-db.test.ts,
+  heartbeat-list.test.ts, activity-service.test.ts,
+  heartbeat-context-summary.test.ts: 62 passing; server tsc --noEmit passes
+  against the pinned dependency image. Fixtures cover non-object/null/scalar
+  JSON, text compatibility, allowlist exclusion, duplicate paths, ordering,
+  cross-company membership. Query-shape tests failed on baseline.
+- Build: homelab Fork.Dockerfile must compile these three server sources and
+  copy emitted JS. Base DB packages/migrations stay unchanged; lockfile
+  equality mandatory. Remove when a released upstream equivalent passes
+  these tests and comparable measurements, not when a proposal closes.
