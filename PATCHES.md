@@ -283,3 +283,67 @@ into the current fork image or supplied by a fork migration.
   or fixture shared-DB reads as provider/production API acceptance.
 - Remove when released upstream ships equivalent behavior and passes these
   two-controller and actual provider recovery gates, not on proposal closure.
+## Cross-instance ephemeral UI events (PER282)
+
+- Authorized fork-only overlapping-pod patch. Exact base:
+  `1270c9f1e53f64e450f82cc977a11b16b2791c36`. No schema, migration, new
+  dependency, external broker, production deployment, or uncertain write replay.
+- Rechecked stable `v2026.1012.0` (`bba6a45f0d364cfd962ac59b3bdf2426a8222adb`)
+  and upstream master `e0f30a4c7186498b71b2637f253b3399997dac7d`: both still
+  use the same process-local EventEmitter. Retire when released upstream
+  provides equivalent isolated cross-instance UI hints and reconnect semantics.
+- `packages/db/src/index.ts` exposes the existing postgres.js driver.
+  `server/src/services/live-events-transport.ts` uses one dedicated session
+  per process, shared-database LISTEN/NOTIFY, no table/migration. Reuses the
+  Db client resolved connection/TLS/multi-host configuration. Direct PostgreSQL
+  (or session-mode pooling) is required; transaction-mode poolers cannot LISTEN.
+- `publishLiveEvent`/`publishGlobalLiveEvent` remain synchronous, return numeric
+  origin-local IDs, and immediately notify existing business observers.
+  Remote hints use separate UI-only subscriptions: they never re-enter the
+  all-company chat completion observer or plugin session/business observers.
+  Public company/global subscriptions are not conflated. WebSocket delivery
+  IDs remain numeric and monotonic per receiving process, not replay cursors.
+- Both origin and peers deliver UI hints through the same ordered PostgreSQL
+  stream (no local echo duplicate). Sender UUID/sequence dedupe is bounded to
+  1024 origins per connection generation. Payloads are bounded to 7500 UTF-8
+  bytes, queued sends to 128 hints; oversized/nonserializable payload or queue
+  overflow sends a tiny reset hint causing every peer to close/refetch, never
+  truncating log chunks. Slow WebSocket readers terminate after 1 MiB buffered.
+- Startup is not ready until LISTEN succeeds. One-second same-session probes,
+  three-second query deadlines and socket-close callbacks fail readiness
+  closed; pending hints are discarded, never replayed after ambiguous writes.
+  Retry starts a fresh generation after one second. WebSockets close (1013)
+  on loss/reset, reject upgrades (503) until ready, and reconnect using the
+  existing UI active-query refetch. `%2A` company subscriptions are rejected.
+- Global `plugin.ui.updated` reaches authorized company WebSockets and refreshes
+  UI plugin queries without passing into company-specific component handlers.
+  No company data is published onto the global stream.
+- **Controller integration required (index owned by PER281/parent):** call
+  `const liveEvents = startLiveEventTransport(db)` after database setup and
+  before listening; include `liveEvents.isReady()` in application readiness;
+  `await liveEvents.stop()` before DB pool shutdown. This commit intentionally
+  does not edit `server/src/index.ts`. Once enabled, there is no local-only
+  fallback on DB loss. Startup can wait for readiness or expose 503 while
+  probes retry; startup failure must call stop before disposing DB resources.
+- **Image integration required:** compile/copy the changed DB index export,
+  live-events.js, new live-events-transport.js and live-events-ws.js, plus
+  controller index and rebuilt UI. Existing Fork.Dockerfile only overlays
+  PER218 server files, so cherry-picking alone does not update its image.
+- Exercised on a bounded, digest-pinned disposable cluster runner (Node
+  24.21.0/pnpm 9.15.4) and synthetic ephemeral PostgreSQL, no production
+  credentials or storage: 19 focused server tests and 61 UI tests passed;
+  server `tsc --noEmit` and token gates passed. Two real forked Node processes
+  plus native WebSockets verified company isolation, global events, origin-only
+  side effects, ordered IDs/events, dedupe, oversized UTF-8 payload, queue
+  overflow, backend termination, login-denial DB loss (503), and controller
+  destruction/recreation of synthetic DB with recovery/no stale replay.
+- Tests: `server/src/__tests__/live-events-transport.integration.test.ts`,
+  `live-events-process-fixture.ts`, existing live-events-ws/chat publication
+  tests, `ui/src/context/LiveUpdatesProvider.test.ts`. Integration suite is
+  opt-in via `LIVE_EVENTS_TEST_DATABASE_URL`; it refuses anything lacking the
+  synthetic fixture marker, intentionally terminates DB backends, and restores
+  the role even on failure. Controller DB destruction is opt-in separately.
+- Deliberate ceiling: ephemeral invalidations, not durable business dispatch
+  or replay; no cross-restart total ID ordering. Internal plugin session
+  observers stay origin-local. Full fork/image/exact-SHA acceptance remains
+  the parent acceptance lane, not this focused transport exercise.

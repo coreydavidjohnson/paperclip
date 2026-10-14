@@ -1628,3 +1628,21 @@ describe("task subtree notification context", () => {
     expect(__liveUpdatesTestUtils.shouldSuppressRunStatusToastForVisibleIssue(queryClient as never, "/PAP/agents/alex/runs/child-run", { runId: "child-run" }, { isForegrounded: true })).toBe(true);
   });
 });
+
+describe("global UI hints", () => {
+  it("refreshes plugins without leaking company events or dispatching global hints to company components", () => {
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const event = { id: 1, companyId: "*", type: "plugin.ui.updated" as const, createdAt: new Date().toISOString(), payload: {} };
+    const gate = { cooldownHits: new Map(), suppressUntil: 0, observedRunOutcomes: new Set<string>() };
+    const handler = vi.fn();
+    __liveUpdatesTestUtils.handleLiveEvent(client, "a", "/", event, vi.fn(), gate, { userId: null, agentId: null });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.plugins.all });
+    __liveUpdatesTestUtils.dispatchLiveEventToSubscribers(new Set([handler]), "a", event);
+    expect(handler).not.toHaveBeenCalled();
+    invalidate.mockClear();
+    __liveUpdatesTestUtils.handleLiveEvent(client, "a", "/", { ...event, companyId: "b", type: "activity.logged" }, vi.fn(), gate, { userId: null, agentId: null });
+    expect(invalidate).not.toHaveBeenCalled();
+    client.clear();
+  });
+});
