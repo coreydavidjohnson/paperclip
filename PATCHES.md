@@ -192,3 +192,5 @@ into the current fork image or supplied by a fork migration.
 - Packaging must compile/copy both postgres.js and reconciled-release.js;
   fork pin alone does not deliver these through the narrow homelab overlay.
 - This commit is a candidate, not a deployed or full-CI-verified repair.
+
+PER-286 review hardening: the ownerless legacy pre-drain exception permits only not_performed outcomes and an absent continuationDelivery field. Completed/mixed outcomes and every outbox state remain with native outcome-aware delivery; null/malformed states fail closed.

@@ -416,7 +416,7 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(wake.status).toBe("deferred_issue_execution");
   });
 
-  it.each(["exact", "wrong_run", "unknown_outcome", "replay_blocked", "active", "missing", "pending_owner", "delegated_owner"])(
+  it.each(["exact", "wrong_run", "unknown_outcome", "replay_blocked", "active", "missing", "pending_owner", "delegated_owner", "delivered_owner", "invalidated_owner", "malformed_owner", "completed_outcome", "mixed_outcome"])(
     "releases a failed legacy deferred wake only for exact validated reconciliation (%s)", async (scenario) => {
       const companyId = await seedCompany();
       const agentId = await seedAgent({ companyId });
@@ -430,9 +430,9 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
         companyId, sourceIssueId: issueId, kind: "active_run_watchdog", ownerType: "board",
         cause: "legacy_execution_requires_reconciliation", status: scenario === "active" ? "active" : "resolved",
         fingerprint: runId, returnOwnerAgentId: agentId, nextAction: "Continue only after observed reconciliation.",
-        evidence: { runId, ...(scenario === "pending_owner" ? { continuationDelivery: "pending" } : {}), ...(scenario === "delegated_owner" ? { continuationDelivery: "delegated" } : {}), executionReconciliation: {
+        evidence: { runId, ...(scenario === "pending_owner" ? { continuationDelivery: "pending" } : {}), ...(scenario === "delegated_owner" ? { continuationDelivery: "delegated" } : {}), ...(scenario === "delivered_owner" ? { continuationDelivery: "delivered" } : {}), ...(scenario === "invalidated_owner" ? { continuationDelivery: "invalidated" } : {}), ...(scenario === "malformed_owner" ? { continuationDelivery: null } : {}), executionReconciliation: {
           runId: scenario === "wrong_run" ? randomUUID() : runId,
-          providerStopped: true, actionOutcome: scenario === "unknown_outcome" ? "unknown" : "not_performed",
+          providerStopped: true, actionOutcome: scenario === "unknown_outcome" ? "unknown" : scenario === "completed_outcome" ? "completed" : scenario === "mixed_outcome" ? "mixed" : "not_performed",
           outcomeEvidence: "Isolated fixture proves provider stopped before actions were performed.",
         }, ...(scenario === "replay_blocked" ? { automaticRecovery: { replay: "blocked" } } : {}) },
       });

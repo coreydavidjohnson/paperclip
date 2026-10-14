@@ -1,5 +1,5 @@
 // A resolved notice is bookkeeping, not evidence that uncertain actions are safe.
-// Pending/delegated reconciliation delivery retains its single durable owner.
+// Only ownerless not_performed decisions can use this legacy release path.
 export function permitsReconciledRelease(input: {
   companyId: string; issueId: string; agentId: string; runId: string;
   workspaceRestoreFailure?: unknown;
@@ -15,9 +15,9 @@ export function permitsReconciledRelease(input: {
   const evidence = action.evidence;
   const decision = record(evidence.executionReconciliation);
   if (record(evidence.automaticRecovery).replay === "blocked" ||
-      ["pending", "delegated"].includes(String(evidence.continuationDelivery))) return false;
+      evidence.continuationDelivery !== undefined) return false;
   if (decision.runId !== input.runId || decision.providerStopped !== true ||
-      !["completed", "not_performed", "mixed"].includes(String(decision.actionOutcome)) ||
+      decision.actionOutcome !== "not_performed" ||
       typeof decision.outcomeEvidence !== "string" || decision.outcomeEvidence.trim().length < 20) return false;
   return !input.workspaceRestoreFailure ||
     (typeof decision.workspaceRepairEvidence === "string" && decision.workspaceRepairEvidence.trim().length >= 20);
