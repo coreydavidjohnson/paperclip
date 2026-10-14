@@ -233,3 +233,8 @@ into the current fork image or supplied by a fork migration.
   or replay; no cross-restart total ID ordering. Internal plugin session
   observers stay origin-local. Full fork/image/exact-SHA acceptance remains
   the parent acceptance lane, not this focused transport exercise.
+
+## PER-282 integrated startup and teardown
+
+- Start UI transport before traffic, require it for readiness, stop before normal and startup-error DB cleanup.
+- No production deploy; image/typecheck/provider handover gates remain.
