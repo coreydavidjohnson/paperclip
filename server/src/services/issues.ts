@@ -9224,163 +9224,163 @@ export function issueService(db: Db) {
 
     createChild: async (parentIssueId: string, data: IssueChildCreateInput, dbOrTx: Db | DbTransaction = db) => {
       const persistChild = async (dbOrTx: Db | DbTransaction) => {
-      if (data.homeLabDelegationActor) {
-        if (!await authorizeHomeLabChild(dbOrTx as unknown as Db, parentIssueId, data.homeLabDelegationActor, data, true)) {
-          throw forbidden("Home Lab delegation target changed before child creation");
+        if (data.homeLabDelegationActor) {
+          if (!await authorizeHomeLabChild(dbOrTx as unknown as Db, parentIssueId, data.homeLabDelegationActor, data, true)) {
+            throw forbidden("Home Lab delegation target changed before child creation");
+          }
         }
-      }
-      const parent = await dbOrTx
-        .select()
-        .from(issues)
-        .where(eq(issues.id, parentIssueId))
-        .then((rows) => rows[0] ?? null);
-      if (!parent) throw notFound("Parent issue not found");
-      await assertExecutionTaskParent(dbOrTx as unknown as Db, parent.companyId, parent.id);
+        const parent = await dbOrTx
+          .select()
+          .from(issues)
+          .where(eq(issues.id, parentIssueId))
+          .then((rows) => rows[0] ?? null);
+        if (!parent) throw notFound("Parent issue not found");
+        await assertExecutionTaskParent(dbOrTx as unknown as Db, parent.companyId, parent.id);
 
-      const idempotencyKey = data.idempotencyKey?.trim();
-      if (idempotencyKey) {
-        const existingChild = await dbOrTx
-          .select({ issue: issues })
-          .from(issueCreateIdempotencyKeys)
-          .innerJoin(issues, eq(issueCreateIdempotencyKeys.issueId, issues.id))
+        const idempotencyKey = data.idempotencyKey?.trim();
+        if (idempotencyKey) {
+          const existingChild = await dbOrTx
+            .select({ issue: issues })
+            .from(issueCreateIdempotencyKeys)
+            .innerJoin(issues, eq(issueCreateIdempotencyKeys.issueId, issues.id))
+            .where(
+              and(
+                eq(issueCreateIdempotencyKeys.companyId, parent.companyId),
+                eq(issueCreateIdempotencyKeys.idempotencyKey, idempotencyKey),
+              ),
+            )
+            .limit(1)
+            .then((rows) => rows[0]?.issue ?? null);
+          if (existingChild) {
+            if (existingChild.parentId !== parent.id) {
+              throw conflict(
+                "Child creation idempotency key belongs to another parent issue",
+              );
+            }
+            data.onDeduplicated?.("idempotency_key");
+            const [enriched] = await withIssueLabels(dbOrTx, [existingChild]);
+            const [withRelations] = await withIssueRelationSummaries(
+              parent.companyId,
+              [enriched],
+              dbOrTx,
+            );
+            return {
+              issue: withRelations,
+              parentBlockerAdded: false,
+            };
+          }
+        }
+
+        const [{ childCount }] = await dbOrTx
+          .select({ childCount: sql<number>`count(*)::int` })
+          .from(issues)
           .where(
             and(
-              eq(issueCreateIdempotencyKeys.companyId, parent.companyId),
-              eq(issueCreateIdempotencyKeys.idempotencyKey, idempotencyKey),
+              eq(issues.companyId, parent.companyId),
+              eq(issues.parentId, parent.id),
             ),
-          )
-          .limit(1)
-          .then((rows) => rows[0]?.issue ?? null);
-        if (existingChild) {
-          if (existingChild.parentId !== parent.id) {
-            throw conflict(
-              "Child creation idempotency key belongs to another parent issue",
+          );
+        if (childCount >= MAX_CHILD_ISSUES_CREATED_BY_HELPER) {
+          throw unprocessable(
+            `Parent issue already has the maximum ${MAX_CHILD_ISSUES_CREATED_BY_HELPER} child issues for this helper`,
+          );
+        }
+
+        const {
+          homeLabDelegationActor,
+          acceptanceCriteria,
+          blockParentUntilDone,
+          executionWorkspaceInheritanceMode = "linkage",
+          actorAgentId,
+          actorUserId,
+          ...issueData
+        } = data;
+
+        const inheritStrategyOnly =
+          executionWorkspaceInheritanceMode === "strategy_only";
+        // A child may target another project. Parent workspace identity is only
+        // valid inside the parent's project, so do not forward it across that
+        // boundary; create() then resolves the target project's own workspaces.
+        const childProjectId = issueData.projectId ?? parent.projectId;
+        const childInheritsParentProject = childProjectId === parent.projectId;
+        const hasExplicitExecutionWorkspaceOverride =
+          issueData.executionWorkspaceId !== undefined ||
+          issueData.executionWorkspacePreference !== undefined ||
+          issueData.executionWorkspaceSettings !== undefined;
+        const inheritedPreRealizationWorkspaceSettings =
+          inheritStrategyOnly && !hasExplicitExecutionWorkspaceOverride
+            ? buildPreRealizationExecutionWorkspaceSettings(
+                parent.executionWorkspaceSettings,
+              )
+            : null;
+        let child = await issueService(db).create(parent.companyId, {
+          ...issueData,
+          parentId: parent.id,
+          projectId: childProjectId,
+          projectWorkspaceId:
+            issueData.projectWorkspaceId ??
+            (inheritStrategyOnly && childInheritsParentProject
+              ? parent.projectWorkspaceId
+              : undefined),
+          goalId: issueData.goalId ?? parent.goalId,
+          actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
+          trustExplicitResponsibleUserId:
+            issueData.trustExplicitResponsibleUserId === true,
+          requestDepth: clampIssueRequestDepth(
+            Math.max(
+              clampIssueRequestDepth(parent.requestDepth) + 1,
+              issueData.requestDepth ?? 0,
+            ),
+          ),
+          description: appendAcceptanceCriteriaToDescription(
+            issueData.description,
+            acceptanceCriteria,
+          ),
+          ...(inheritedPreRealizationWorkspaceSettings
+            ? {
+                executionWorkspaceSettings:
+                  inheritedPreRealizationWorkspaceSettings,
+              }
+            : {}),
+          ...(inheritStrategyOnly
+            ? { skipExecutionWorkspaceInheritance: true }
+            : { inheritExecutionWorkspaceFromIssueId: parent.id }),
+        }, dbOrTx);
+
+        if (blockParentUntilDone) {
+          const existingBlockers = await dbOrTx
+            .select({ blockerIssueId: issueRelations.issueId })
+            .from(issueRelations)
+            .where(
+              and(
+                eq(issueRelations.companyId, parent.companyId),
+                eq(issueRelations.relatedIssueId, parent.id),
+                eq(issueRelations.type, "blocks"),
+              ),
             );
-          }
-          data.onDeduplicated?.("idempotency_key");
-          const [enriched] = await withIssueLabels(dbOrTx, [existingChild]);
-          const [withRelations] = await withIssueRelationSummaries(
+          await syncBlockedByIssueIds(
+            parent.id,
             parent.companyId,
-            [enriched],
+            [
+              ...new Set([
+                ...existingBlockers.map((row) => row.blockerIssueId),
+                child.id,
+              ]),
+            ],
+            { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
             dbOrTx,
           );
-          return {
-            issue: withRelations,
-            parentBlockerAdded: false,
-          };
-        }
-      }
-
-      const [{ childCount }] = await dbOrTx
-        .select({ childCount: sql<number>`count(*)::int` })
-        .from(issues)
-        .where(
-          and(
-            eq(issues.companyId, parent.companyId),
-            eq(issues.parentId, parent.id),
-          ),
-        );
-      if (childCount >= MAX_CHILD_ISSUES_CREATED_BY_HELPER) {
-        throw unprocessable(
-          `Parent issue already has the maximum ${MAX_CHILD_ISSUES_CREATED_BY_HELPER} child issues for this helper`,
-        );
-      }
-
-      const {
-        homeLabDelegationActor,
-        acceptanceCriteria,
-        blockParentUntilDone,
-        executionWorkspaceInheritanceMode = "linkage",
-        actorAgentId,
-        actorUserId,
-        ...issueData
-      } = data;
-
-      const inheritStrategyOnly =
-        executionWorkspaceInheritanceMode === "strategy_only";
-      // A child may target another project. Parent workspace identity is only
-      // valid inside the parent's project, so do not forward it across that
-      // boundary; create() then resolves the target project's own workspaces.
-      const childProjectId = issueData.projectId ?? parent.projectId;
-      const childInheritsParentProject = childProjectId === parent.projectId;
-      const hasExplicitExecutionWorkspaceOverride =
-        issueData.executionWorkspaceId !== undefined ||
-        issueData.executionWorkspacePreference !== undefined ||
-        issueData.executionWorkspaceSettings !== undefined;
-      const inheritedPreRealizationWorkspaceSettings =
-        inheritStrategyOnly && !hasExplicitExecutionWorkspaceOverride
-          ? buildPreRealizationExecutionWorkspaceSettings(
-              parent.executionWorkspaceSettings,
-            )
-          : null;
-      let child = await issueService(db).create(parent.companyId, {
-        ...issueData,
-        parentId: parent.id,
-        projectId: childProjectId,
-        projectWorkspaceId:
-          issueData.projectWorkspaceId ??
-          (inheritStrategyOnly && childInheritsParentProject
-            ? parent.projectWorkspaceId
-            : undefined),
-        goalId: issueData.goalId ?? parent.goalId,
-        actorResponsibleUserId: issueData.actorResponsibleUserId ?? null,
-        trustExplicitResponsibleUserId:
-          issueData.trustExplicitResponsibleUserId === true,
-        requestDepth: clampIssueRequestDepth(
-          Math.max(
-            clampIssueRequestDepth(parent.requestDepth) + 1,
-            issueData.requestDepth ?? 0,
-          ),
-        ),
-        description: appendAcceptanceCriteriaToDescription(
-          issueData.description,
-          acceptanceCriteria,
-        ),
-        ...(inheritedPreRealizationWorkspaceSettings
-          ? {
-              executionWorkspaceSettings:
-                inheritedPreRealizationWorkspaceSettings,
-            }
-          : {}),
-        ...(inheritStrategyOnly
-          ? { skipExecutionWorkspaceInheritance: true }
-          : { inheritExecutionWorkspaceFromIssueId: parent.id }),
-      }, dbOrTx);
-
-      if (blockParentUntilDone) {
-        const existingBlockers = await dbOrTx
-          .select({ blockerIssueId: issueRelations.issueId })
-          .from(issueRelations)
-          .where(
-            and(
-              eq(issueRelations.companyId, parent.companyId),
-              eq(issueRelations.relatedIssueId, parent.id),
-              eq(issueRelations.type, "blocks"),
-            ),
+          [child] = await withIssueRelationSummaries(
+            parent.companyId,
+            [child],
+            dbOrTx,
           );
-        await syncBlockedByIssueIds(
-          parent.id,
-          parent.companyId,
-          [
-            ...new Set([
-              ...existingBlockers.map((row) => row.blockerIssueId),
-              child.id,
-            ]),
-          ],
-          { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
-          dbOrTx,
-        );
-        [child] = await withIssueRelationSummaries(
-          parent.companyId,
-          [child],
-          dbOrTx,
-        );
-      }
+        }
 
-      return {
-        issue: child,
-        parentBlockerAdded: Boolean(blockParentUntilDone),
-      };
+        return {
+          issue: child,
+          parentBlockerAdded: Boolean(blockParentUntilDone),
+        };
       };
       return data.homeLabDelegationActor && dbOrTx === db
         ? db.transaction(persistChild)
