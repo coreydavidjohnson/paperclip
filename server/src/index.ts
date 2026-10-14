@@ -1137,6 +1137,7 @@ async function startServerWithDatabaseTeardown(
     runIds?: readonly string[] | null,
   ) => Promise<unknown>) | null = null;
   let drainHeartbeatExecutionFinalizers: (() => Promise<void>) | null = null;
+  let checkpointOmnigentRunsForShutdown: (() => Promise<unknown>) | null = null;
   let prepareHotRestartShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<{
     skipDrain: boolean;
     drainRunIds?: string[];
@@ -1316,6 +1317,7 @@ async function startServerWithDatabaseTeardown(
     drainHeartbeatRunsForShutdown = (signal, runIds) => (
       heartbeat.drainRunningRunsForShutdown(signal, new Date(), runIds)
     );
+    checkpointOmnigentRunsForShutdown = () => heartbeat.checkpointOmnigentRunsForShutdown();
     drainHeartbeatExecutionFinalizers = () =>
       heartbeat.drainActiveRunExecutions();
     prepareHotRestartShutdown = heartbeat.prepareHotRestartShutdown;
@@ -1952,9 +1954,11 @@ async function startServerWithDatabaseTeardown(
     const completed = await completeControllerTurnsForShutdown({
       signal, waitForSchedulerIdle: waitForHeartbeatSchedulerIdle,
       drain: drainHeartbeatExecutionFinalizers, log: logger,
+      checkpoint: checkpointOmnigentRunsForShutdown ?? undefined,
     });
-    if (completed !== "drained") {
+    if (completed === "timed_out") {
       logger.warn({ signal }, "controller drain deadline reached; unfinished runs retained, no replacement dispatched");
+      if (exitProcess) await new Promise<never>(() => {});      throw new Error("controller_shutdown_not_settled");
     }
     const telemetryClient = getTelemetryClient();
     if (telemetryClient) { telemetryClient.stop(); await telemetryClient.flush(); }
