@@ -1,0 +1,4 @@
+src/index.ts(121,3): error TS2305: Module '"./shutdown.js"' has no exported member 'completeControllerTurnsForShutdown'.
+src/routes/agents.ts(6832,59): error TS2345: Argument of type '{ contextSnapshot: Record<string, unknown> | null; resultJson: Record<string, unknown> | null; }[]' is not assignable to parameter of type '{ id: string; }[]'.
+  Property 'id' is missing in type '{ contextSnapshot: Record<string, unknown> | null; resultJson: Record<string, unknown> | null; }' but required in type '{ id: string; }'.
+src/services/heartbeat.ts(1,59): error TS2307: Cannot find module './run-history-query.js' or its corresponding type declarations.
