@@ -22,7 +22,7 @@ suite("Home Lab delegation real transaction fence", () => {
     ]);
     await db.insert(issues).values({ id: parentId, companyId, title: "[test] caller-owned foreign root", assigneeAgentId: caller, createdByAgentId: target, status: "in_progress" });
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: caller, status: "running", contextSnapshot: { issueId: parentId }, responsibleUserId: "board-user" });
-    const actor: Express.Request["actor"] = { type: "agent", source: "agent_key", agentId: caller, companyId, runId, keyScope: { kind: "standard" } };
+    const actor: Express.Request["actor"] = { type: "agent", source: "agent_key", agentId: caller, companyId, runId, onBehalfOfUserId: "board-user", keyScope: { kind: "standard" } };
     const child = { title: "[test] native platform child", status: "todo", assigneeAgentId: target, blockParentUntilDone: true,
       actorAgentId: caller, createdByAgentId: caller, actorRunId: runId, homeLabDelegationActor: actor };
     return { companyId, caller, target, parentId, runId, actor, child };

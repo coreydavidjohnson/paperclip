@@ -34,20 +34,22 @@ export async function authorizeHomeLabChild(
   const active = (status: string | undefined) => ["idle", "running", "error"].includes(status ?? "");
   if (targets.length !== 1 || targets[0].id !== body.assigneeAgentId
       || !active(targets[0].status) || !active(caller?.status)) deny();
+  const parentQuery = db.select().from(issues).where(and(
+    eq(issues.id, parentId), eq(issues.companyId, actor.companyId!),
+  ));
+  const [parent] = await (lock ? parentQuery.for("update") : parentQuery);
   const runQuery = db.select().from(heartbeatRuns).where(and(
     eq(heartbeatRuns.id, actor.runId!), eq(heartbeatRuns.companyId, actor.companyId!),
     eq(heartbeatRuns.agentId, actor.agentId!),
   ));
   const [run] = await (lock ? runQuery.for("share") : runQuery);
-  const parentQuery = db.select().from(issues).where(and(
-    eq(issues.id, parentId), eq(issues.companyId, actor.companyId!),
-  ));
-  const [parent] = await (lock ? parentQuery.for("update") : parentQuery);
   const contextIssue = run?.contextSnapshot?.issueId ?? run?.contextSnapshot?.taskId;
   if (!run || run.status !== "running" || agentRunWritesRevoked(run)
       || (run.nativeIssueId ?? contextIssue) !== parentId
       || (contextIssue != null && contextIssue !== parentId)
-      || (run.activeIdentityContextId ?? null) !== (actor.identityContextId ?? null)
+      || run.responsibleUserId !== actor.onBehalfOfUserId
+      || (actor.source === "agent_jwt" &&
+          (run.activeIdentityContextId ?? null) !== (actor.identityContextId ?? null))
       || !parent || parent.assigneeAgentId !== actor.agentId || parent.assigneeUserId
       || ["done", "cancelled"].includes(parent.status)) deny();
   return true;
