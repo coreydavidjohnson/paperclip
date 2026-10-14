@@ -417,24 +417,6 @@ into the current fork image or supplied by a fork migration.
   `scripts/smoke/per282-events/README.md` for fixture scope and receipts.
 
 - Integrated same-run checkpoint hook. Timed-out shutdown keeps DB/HTTP alive until bounded process exit; checkpointed finalizers permit normal teardown.
-## Self-assigned decomposition (PER-258 / PER-135)
-
-- Corey requested this repair in PER-258 on 2026-10-13; publish only to our fork.
-- Adopt only the self-assignment delegation-guard hunk from upstream
-  4039d4f06b4dfb4d12bd59831a0aabf2401053dc, not unrelated low-trust policy edits.
-- Pass actorAgentId from both create routes; skip ancestor-delegator lookup
-  only when assigneeAgentId equals the same actor. Company, ownership,
-  assignment, approval and dependency-cycle checks remain unchanged.
-- Regression: issue-assignee-invokability-routes.test.ts covers self-decomposition
-  with an open actor-created ancestor and retains rejection of returning work
-  to another open ancestor creator.
-- Companion source-owned MCP repair in coreydavidjohnson/luma-homelab makes
-  the existing direct-manager allowance independent of the subtree branch.
-  It grants no peer, sibling or non-direct-ancestor assignment.
-- Retirement: drop this hunk on a released upstream upgrade containing the
-  same fix and passing this regression.
-- Packaging must compile and copy server/dist/routes/issues.js; a fork pin
-  alone cannot deliver this behavior through the current narrow overlay.
 
 ## PER282 admitted-turn observation after issue completion
 
