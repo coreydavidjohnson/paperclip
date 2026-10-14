@@ -1,0 +1,28 @@
+
+ RUN  v4.1.11 /app/server
+
+ ✓ src/services/chat-publication-reconciliation.test.ts (12 tests) 20ms
+stdout | src/__tests__/live-events-transport.integration.test.ts > two-process PostgreSQL UI live events (synthetic DB only) > isolates companies/business observers, orders/dedupes hints, resyncs oversize/reconnect/DB loss
+bounded send queue overflow forces both peers to resync
+two native processes: companies/global/order/dedupe/oversize/reconnect/DB loss/recovery/origin-only business observers verified
+
+ ✓ src/__tests__/live-events-transport.integration.test.ts (1 test) 8728ms
+     ✓ isolates companies/business observers, orders/dedupes hints, resyncs oversize/reconnect/DB loss  8727ms
+stdout | src/__tests__/live-events-faults.integration.test.ts > real TCP blackhole / paused WebSocket reader (synthetic DB only) > fails readiness within probe deadline, resyncs without replay, bounds reader queues and stops before DB
+TCP blackhole deadline, readiness 503, websocket resync, epoch recovery and no replay verified
+
+stdout | src/__tests__/live-events-faults.integration.test.ts > real TCP blackhole / paused WebSocket reader (synthetic DB only) > fails readiness within probe deadline, resyncs without replay, bounds reader queues and stops before DB
+real paused reader terminated; buffered high-water=901350; healthy peer continued without duplicate observers
+
+stdout | src/__tests__/live-events-faults.integration.test.ts > real TCP blackhole / paused WebSocket reader (synthetic DB only) > fails readiness within probe deadline, resyncs without replay, bounds reader queues and stops before DB
+startup-in-flight cleanup, stop idempotence, fail-closed HTTP/websocket shutdown verified
+
+ ✓ src/__tests__/live-events-faults.integration.test.ts (1 test) 14546ms
+     ✓ fails readiness within probe deadline, resyncs without replay, bounds reader queues and stops before DB  14544ms
+ ✓ src/__tests__/live-events-ws.test.ts (6 tests) 24ms
+ ✓ src/__tests__/live-events-transport.test.ts (4 tests) 14ms
+
+ Test Files  5 passed (5)
+      Tests  24 passed (24)
+   Start at  02:42:04
+   Duration  30.70s (transform 1.64s, setup 369ms, import 6.30s, tests 23.33s, environment 1ms)
