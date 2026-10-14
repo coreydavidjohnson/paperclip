@@ -9342,7 +9342,6 @@ export function issueService(db: Db) {
           description: appendAcceptanceCriteriaToDescription(
             issueData.description,
             acceptanceCriteria,
-          childPurpose = "implementation",
           ),
           ...(inheritedPreRealizationWorkspaceSettings
             ? {
