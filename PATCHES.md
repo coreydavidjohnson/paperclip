@@ -759,3 +759,37 @@ execution/liveness decoration are unchanged. Malformed/non-object contexts
 retain one row with null fields. The database contract test compares all four
 fields and unusual JSON types. Dependency lockfile is unchanged. Endpoint
 benefit, packaging and deployment gates remain pending; do not label this live.
+
+## 14. Indexed comment attribution membership (PER-382 candidate)
+
+- Status: committed candidate only, not deployed. PER-378 owns combined
+  pre-ship review, image overlay/CI/staging and main-first full Argo rollout.
+- Why: comment attribution's company-scoped context OR correlated activity
+  membership repeatedly detoasted unrelated run context. Reuse the existing
+  PER-218 `issueRunIdsCondition` indexed UNION; do not invent another index.
+- Files: `server/src/services/issues.ts` and the two
+  `comment-attribution-query*.test.ts` tests. No dependency, lockfile, schema,
+  secret-registry, log-reading or Slack liveness change.
+- Contract: same context/activity membership, outer company scope, inclusive
+  coalesced timestamp bounds, unconditional explicit own-run IDs and descending
+  creation-time order. No widening to taskId/native issue membership. Genuine
+  human exclusion, lossless log attribution and redaction remain unchanged.
+- Evidence: production REPEATABLE READ READ ONLY exact JavaScript millisecond
+  bounds returned 78 vs 78 rows, zero bidirectional eight-field differences and
+  identical full ordered arrays. Three SQL pairs were 306.815/314.211/381.003 ms
+  original versus 3.273/3.145/3.586 ms candidate. These are SQL timings, not
+  endpoint benefit. Generic-plan checks retain indexed membership; both IDs
+  are UUID. Statistics were not reset.
+- Tests: pinned upstream dependency image, nine focused/tenant/order/redaction/
+  blocker/review/Slack test files (106 passed), fifteen selected actual
+  issue-service attribution/run-ID/order tests passed and full server noEmit
+  typecheck passed. The shape test failed before the source change. Full
+  repository build/test and staging endpoint benefit are not claimed.
+- Cross-review: Fable accepted semantic equivalence as a candidate, requiring
+  bidirectional diff, index/type and generic-plan evidence; these SQL checks
+  were completed. This is not combined release approval.
+- Upstream observation: master `2c17d3ca` and released `v2026.1012.0` unchanged
+  from the exact search recorded in PER-378. Private fork authorization only;
+  no upstream communication.
+- Removal condition: a released equivalent preserves these membership,
+  attribution, tenant/order/redaction contracts with comparable measurements.
