@@ -1,0 +1,109 @@
+tdout | src/__tests__/heartbeat-queued-run-claim-isolation.test.ts > heartbeat queued-run claim isolation > keeps processing other agents' queued runs after one agent's run is rejected
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '00000',
+  message: 'truncate cascades to table "email_sends"',
+  file: 'tablecmds.c',
+  line: '2020',
+  routine: 'ExecuteTruncateGuts'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '00000',
+  message: 'truncate cascades to table "chat_github_configurations"',
+  file: 'tablecmds.c',
+  line: '2020',
+  routine: 'ExecuteTruncateGuts'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '00000',
+  message: 'truncate cascades to table "chat_github_registrations"',
+  file: 'tablecmds.c',
+  line: '2020',
+  routine: 'ExecuteTruncateGuts'
+}
+
+stdout | src/__tests__/heartbeat-queued-run-claim-isolation.test.ts > heartbeat queued-run claim isolation > keeps processing other agents' queued runs after one agent's run is rejected
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '00000',
+  message: 'truncate cascades to table "chat_github_reviews"',
+  file: 'tablecmds.c',
+  line: '2020',
+  routine: 'ExecuteTruncateGuts'
+}
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '00000',
+  message: 'truncate cascades to table "agent_instruction_revisions"',
+  file: 'tablecmds.c',
+  line: '2020',
+  routine: 'ExecuteTruncateGuts'
+}
+
+stdout | src/__tests__/heartbeat-queued-run-claim-isolation.test.ts > heartbeat queued-run claim isolation > keeps processing other agents' queued runs after one agent's run is rejected
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '00000',
+  message: 'truncate cascades to table "agent_instruction_working_copies"',
+  file: 'tablecmds.c',
+  line: '2020',
+  routine: 'ExecuteTruncateGuts'
+}
+
+stdout | src/__tests__/heartbeat-queued-run-claim-isolation.test.ts > heartbeat queued-run claim isolation > keeps processing other agents' queued runs after one agent's run is rejected
+{
+  severity_local: 'NOTICE',
+  severity: 'NOTICE',
+  code: '00000',
+  message: 'truncate cascades to table "agent_instruction_heads"',
+  file: 'tablecmds.c',
+  line: '2020',
+  routine: 'ExecuteTruncateGuts'
+}
+
+ ✓ src/__tests__/heartbeat-queued-run-claim-isolation.test.ts (4 tests) 12861ms
+     ✓ cancels a queued run whose claim is rejected instead of failing recovery  509ms
+     ✓ claims the agent's next queued run after a rejected one  877ms
+     ✓ keeps a recoverable rejection queued without blocking the runs behind it  785ms
+     ✓ keeps processing other agents' queued runs after one agent's run is rejected  825ms
+[01:09:36] WARN: local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY {"companyId":"9448a4a0-8f75-4a2e-888f-80e6847bc3b4","agentId":"7ac0eae1-0401-45d3-87a9-45a5b37fe966","runId":"e6ff8fdb-cbe2-447c-9b88-af5039812875","adapterType":"process"}
+[01:09:36] WARN: runtime connection tools could not be delivered {"companyId":"9448a4a0-8f75-4a2e-888f-80e6847bc3b4","agentId":"7ac0eae1-0401-45d3-87a9-45a5b37fe966","runId":"e6ff8fdb-cbe2-447c-9b88-af5039812875"}
+[01:09:37] WARN: local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY {"companyId":"9448a4a0-8f75-4a2e-888f-80e6847bc3b4","agentId":"7ac0eae1-0401-45d3-87a9-45a5b37fe966","runId":"8822e109-e3fd-4758-a524-26ff62cca8dc","adapterType":"process"}
+[01:09:37] WARN: runtime connection tools could not be delivered {"companyId":"9448a4a0-8f75-4a2e-888f-80e6847bc3b4","agentId":"7ac0eae1-0401-45d3-87a9-45a5b37fe966","runId":"8822e109-e3fd-4758-a524-26ff62cca8dc"}
+[01:09:38] WARN: local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY {"companyId":"9d975d9b-29e6-4705-a707-d0bd760f111e","agentId":"fd7c5dc5-5617-4ed9-8148-1726b3235885","runId":"d4f6ef02-832a-43d7-bb1e-8d3b2f927bd5","adapterType":"process"}
+[01:09:38] WARN: runtime connection tools could not be delivered {"companyId":"9d975d9b-29e6-4705-a707-d0bd760f111e","agentId":"fd7c5dc5-5617-4ed9-8148-1726b3235885","runId":"d4f6ef02-832a-43d7-bb1e-8d3b2f927bd5"}
+[01:09:39] WARN: local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY {"companyId":"9d975d9b-29e6-4705-a707-d0bd760f111e","agentId":"fd7c5dc5-5617-4ed9-8148-1726b3235885","runId":"e62494c7-477f-4cd3-961f-63d096bb82fc","adapterType":"process"}
+[01:09:39] WARN: runtime connection tools could not be delivered {"companyId":"9d975d9b-29e6-4705-a707-d0bd760f111e","agentId":"fd7c5dc5-5617-4ed9-8148-1726b3235885","runId":"e62494c7-477f-4cd3-961f-63d096bb82fc"}
+[01:09:39] ERROR: failed to release run claimed just before task-drain suppression; the run row stays running, and the orphan reaper finalizes it and releases the issue lock on its next cycle {"runId":"3bf0e304-2612-4621-bbe1-a56afd2e83d9"}
+    err: {
+      "type": "Error",
+      "message": "simulated transactional write failure",
+      "stack":
+          Error: simulated transactional write failure
+              at Proxy.<anonymous> (/app/server/src/__tests__/heartbeat-task-drain-admission-release.test.ts:315:29)
+              at /app/server/src/services/heartbeat.ts:17924:12
+              at processTicksAndRejections (node:internal/process/task_queues:104:5)
+              at scope (file:///app/node_modules/.pnpm/postgres@3.4.9_patch_hash=sryle6qd5qfmnxvoebal4gashi/node_modules/postgres/src/index.js:279:18)
+              at sql.begin (file:///app/node_modules/.pnpm/postgres@3.4.9_patch_hash=sryle6qd5qfmnxvoebal4gashi/node_modules/postgres/src/index.js:257:14)
+              at releaseRunClaimedJustBeforeSuppression (/app/server/src/services/heartbeat.ts:17890:5)
+              at executeRun (/app/server/src/services/heartbeat.ts:20196:9)
+    }
+[01:09:39] WARN: reaped orphaned heartbeat runs {"reapedCount":1,"runIds":["3bf0e304-2612-4621-bbe1-a56afd2e83d9"]}
+ ✓ src/__tests__/heartbeat-task-drain-admission-release.test.ts (3 tests) 14784ms
+     ✓ releases the run, wakeup, and issue lock when a task drain trips right after the run is claimed  1951ms
+     ✓ keeps a wake that arrives during a task drain queued and runs it once the drain lifts  1673ms
+     ✓ leaves the run row running for the orphan reaper when the atomic release fails  387ms
+ ✓ src/services/legacy-controller-lease.test.ts (12 tests) 11227ms
+
+ Test Files  3 passed (3)
+      Tests  19 passed (19)
+   Start at  01:08:40
+   Duration  93.50s (transform 7.26s, setup 157ms, import 54.16s, tests 38.87s, environment 0ms)

@@ -1,3 +1,4 @@
+import { beginControllerDrain, controllerDrainRemainingMs } from "./controller-drain.js";
 type HotRestartShutdownPreparation = {
   skipDrain: boolean;
 };
@@ -21,7 +22,6 @@ export async function drainRunExecutionFinalizersForShutdown(input: {
       input.drain().then(() => "drained" as const),
       new Promise<"timed_out">((resolve) => {
         timer = setTimeout(() => resolve("timed_out"), timeoutMs);
-        timer.unref?.();
       }),
     ]);
     if (result === "timed_out") {
@@ -31,9 +31,27 @@ export async function drainRunExecutionFinalizersForShutdown(input: {
       );
     }
     return result;
+  } catch (err) {
+    input.log.error({ err, signal: input.signal }, "heartbeat drain failed; refusing to claim quiescence");
+    return "timed_out";
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+/** Grace starts at preStop, not SIGTERM. HTTP and DB remain alive through
+ * finalizers; timeout never authorizes replacement/replay of a remote turn. */
+export async function completeControllerTurnsForShutdown(input: {
+  signal: "SIGINT" | "SIGTERM";
+  waitForSchedulerIdle: () => Promise<void>;
+  drain: (() => Promise<void>) | null;
+  log: ShutdownLogger;
+}) {
+  beginControllerDrain();
+  return drainRunExecutionFinalizersForShutdown({ ...input,
+    timeoutMs: controllerDrainRemainingMs(),
+    drain: async () => { await input.waitForSchedulerIdle(); await input.drain?.(); },
+  });
 }
 
 type ShutdownHttpListener = {

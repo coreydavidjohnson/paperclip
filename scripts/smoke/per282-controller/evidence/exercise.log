@@ -1,0 +1,37 @@
+namespace/per282-controller-1791940462-327493 created
+pod/controller-a created
+pod/controller-b created
+pod/database created
+pod/controller-a condition met
+pod/controller-b condition met
+pod/database condition met
+fixture migrations applied
+PASS simultaneous timer schedulers: exactly one durable due claim/wake
+PASS real PostgreSQL locked renewal aborts at lease deadline: {"aborted":true,"message":"Error: Legacy controller lease lost","elapsedMs":1908}
+PASS expired OmniGenT owner retains original run/session/response/turn and blocks replacement (no provider dispatch)
+PASS real unreachable PostgreSQL connection fences executor by deadline: {"aborted":true,"message":"Error: Failed query: update \"heartbeat_runs\" set \"controller_lease_expires_at\" = clock_timestamp() + interval '60 seconds' where (\"heartbeat_runs\".\"id\" = $1 and \"heartbeat_runs\".\"company_id\" = $2 and \"heartbeat_runs\".\"runtime_mode\" = $3 and \"heartbeat_runs\".\"status\" = $4 and \"heartbeat_runs\".\"controller_boot_id\" = $5 and \"heartbeat_runs\".\"controller_lease_expires_at\" > clock_timestamp()) returning \"id\"\nparams: c9c9c6b4-461c-4988-9ab2-c94be15d0609,39c0f921-32c4-4faa-bc7d-470b2d274077,legacy,running,268e5e57-d9c2-4204-986c-a10021ef158e"}
+PASS simultaneous cross-pod admission: distinct boots, exactly one running, one queued
+PASS overlapping startup reaper preserves live foreign owner
+PASS 12-second real process turn completes on original run; drain finalization cannot dispatch successor
+PASS readiness fails during one-way drain; both pods serve shared run reads
+PASS bounded drain timeout retains unfinished original run, no retry
+PASS preStop drain denies nonloopback and preserves first deadline on loopback
+
+ RUN  v4.1.11 /app/server
+
+ ✓ src/shutdown.test.ts (18 tests) 132ms
+ ✓ src/__tests__/heartbeat-scheduling-suppression.test.ts (8 tests) 6ms
+stdout | src/controller-drain.test.ts > drain is one-way, preserves the first preStop deadline, bounds scheduler DB hangs
+{ signal: 'SIGTERM', timeoutMs: 30 } bounded heartbeat execution finalizer drain timed out
+
+ ✓ src/controller-drain.test.ts (1 test) 34ms
+
+ Test Files  3 passed (3)
+      Tests  27 passed (27)
+   Start at  01:16:07
+   Duration  11.49s (transform 7.71s, setup 180ms, import 10.80s, tests 173ms, environment 0ms)
+
+Warning: deleting cluster-scoped resources, not scoped to the provided namespace
+namespace "per282-controller-1791940462-327493" deleted
+Error from server (NotFound): namespaces "per282-controller-1791940462-327493" not found
+CLEANUP: namespace absent: per282-controller-1791940462-327493

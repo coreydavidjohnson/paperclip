@@ -9,6 +9,7 @@ export async function claimQueuedNativeReviewRun(db: Db, input: {
   agentNameKey: string | null;
   claimedAt: Date;
   claimValues: PgUpdateSetSource<typeof heartbeatRuns>;
+  admit?: (tx: Db) => Promise<boolean>;
 }): Promise<typeof heartbeatRuns.$inferSelect | null> {
   const context = input.run.contextSnapshot as Record<string, unknown> | null;
   const issueId = context?.issueId;
@@ -33,6 +34,7 @@ export async function claimQueuedNativeReviewRun(db: Db, input: {
     )).for("update");
     if (!run || run.status !== "queued" || run.wakeupRequestId !== input.run.wakeupRequestId) return null;
     if ((run.contextSnapshot as Record<string, unknown> | null)?.issueId !== issueId) return null;
+    if (input.admit && !await input.admit(tx as unknown as Db)) return null;
     const locked = await claimNativeReviewExecutionLock(tx as unknown as Db, {
       companyId: run.companyId, issueId, agentId: run.agentId, runId: run.id,
       contextSnapshot: context, agentNameKey: input.agentNameKey, claimedAt: input.claimedAt,

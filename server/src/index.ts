@@ -1,3 +1,4 @@
+import { beginControllerDrain, controllerDrainRemainingMs, isControllerDraining } from "./controller-drain.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
 /// <reference path="./types/express.d.ts" />
@@ -117,8 +118,7 @@ import { ensureDecisionSigningSecret } from "./services/decision-signing.js";
 import { createDecisionRetentionNotifyOriginAgent, createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
 import {
   closeHttpListenerForShutdown,
-  coordinateHeartbeatSchedulerShutdown,
-  drainRunExecutionFinalizersForShutdown,
+  completeControllerTurnsForShutdown,
   finalizeServerShutdown,
   loadWithoutCoordinatedShutdownSignalHooks,
 } from "./shutdown.js";
@@ -1165,7 +1165,7 @@ async function startServerWithDatabaseTeardown(
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
   ] as const;
   const sweepExecutionControl = () => {
-    if (heartbeatSchedulerStopped) return;
+    if (heartbeatSchedulerStopped || isControllerDraining()) return;
     // Independent durable queues must not block one another. Each queue remains
     // single-flight; a later sweep observes committed transitions from its peers.
     for (const [queue, work] of executionControlSweeps) {
@@ -1188,7 +1188,7 @@ async function startServerWithDatabaseTeardown(
     enabled: async () => (await instanceSettingsService(db).getExperimental()).enableExternalObjects === true,
   });
   const scheduleExternalObjectRefreshSweep = (now = new Date()) => {
-    if (heartbeatSchedulerStopped) return;
+    if (heartbeatSchedulerStopped || isControllerDraining()) return;
     trackHeartbeatSchedulerWork(externalObjects
       .refreshDueObjectsForActiveCompanies(50, now)
       .then((result) => {
@@ -1229,7 +1229,7 @@ async function startServerWithDatabaseTeardown(
   // Activity publication happens after the status transaction commits. This is
   // a best-effort fast path; the durable outbox and sweeps remain authoritative.
   const unsubscribeChatCompletions = subscribeAllCompanyLiveEvents(event => {
-    if (heartbeatSchedulerStopped || event.type !== "activity.logged" ||
+    if (heartbeatSchedulerStopped || isControllerDraining() || event.type !== "activity.logged" ||
       event.payload.action !== "issue.updated" || typeof event.payload.entityId !== "string") return;
     trackHeartbeatSchedulerWork(chatCompletionDeliveries.sweepPending({ companyId: event.companyId, taskId: event.payload.entityId })
       .catch(err => logger.error({ err }, "post-commit chat completion delivery failed")));
@@ -1252,7 +1252,7 @@ async function startServerWithDatabaseTeardown(
         logger.error({ err }, "environment lease cleanup sweep failed");
       });
   const scheduleEnvironmentLeaseCleanupSweep = () => {
-    if (heartbeatSchedulerStopped) return;
+    if (heartbeatSchedulerStopped || isControllerDraining()) return;
     trackHeartbeatSchedulerWork(runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS));
   };
   const githubConnectionEvents = githubConnectionEventService(db as any, {
@@ -1266,7 +1266,7 @@ async function startServerWithDatabaseTeardown(
       ?? null,
   });
   const scheduleGitHubConnectionEventPoll = () => {
-    if (heartbeatSchedulerStopped) return;
+    if (heartbeatSchedulerStopped || isControllerDraining()) return;
     trackHeartbeatSchedulerWork(githubConnectionEvents.pollOnce()
       .then((result) => {
         if (result.leased > 0 || result.failed > 0) {
@@ -1278,7 +1278,7 @@ async function startServerWithDatabaseTeardown(
       }));
   };
   const scheduleGitHubConnectionContinuitySweep = () => {
-    if (heartbeatSchedulerStopped) return;
+    if (heartbeatSchedulerStopped || isControllerDraining()) return;
     trackHeartbeatSchedulerWork(tools.sweepGitHubConnectionContinuity()
       .then((result) => {
         if (result.due > 0 || result.failed > 0) {
@@ -1327,7 +1327,7 @@ async function startServerWithDatabaseTeardown(
       workspaceReaperCooldownDays: config.workspaceReaperCooldownDays,
     });
     const scheduleMergedPullRequestConfirmationSweep = () => {
-      if (heartbeatSchedulerStopped) return;
+      if (heartbeatSchedulerStopped || isControllerDraining()) return;
       trackHeartbeatSchedulerWork(mergedPullRequestConfirmations
         .sweepMergedPullRequestConfirmations()
         .then((result) => {
@@ -1345,7 +1345,7 @@ async function startServerWithDatabaseTeardown(
     let lastTerminalWorkspaceSkipLogAt = 0;
     const terminalWorkspaceSkipLogIntervalMs = 10 * 60 * 1000;
     const scheduleTerminalWorkspaceSweep = () => {
-      if (heartbeatSchedulerStopped) return;
+      if (heartbeatSchedulerStopped || isControllerDraining()) return;
       trackHeartbeatSchedulerWork(terminalWorkspaces
         .sweepTerminalWorkspaces()
         .then((result) => {
@@ -1396,7 +1396,7 @@ async function startServerWithDatabaseTeardown(
       }
     };
     const scheduleAdapterLoginReaperSweep = () => {
-      if (heartbeatSchedulerStopped) return;
+      if (heartbeatSchedulerStopped || isControllerDraining()) return;
       trackHeartbeatSchedulerWork(adapterLoginReaper
         .sweep()
         .then(logAdapterLoginReaperResult)
@@ -1422,7 +1422,7 @@ async function startServerWithDatabaseTeardown(
       }
     };
     const scheduleSetupTokenReaperSweep = () => {
-      if (heartbeatSchedulerStopped) return;
+      if (heartbeatSchedulerStopped || isControllerDraining()) return;
       trackHeartbeatSchedulerWork(setupTokenReaper
         .sweep()
         .then(logSetupTokenReaperResult)
@@ -1641,7 +1641,7 @@ async function startServerWithDatabaseTeardown(
       // can then wait through an already-running suppression check before it
       // captures the authoritative set of running heartbeat rows.
       trackHeartbeatSchedulerWork((async () => {
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         trackHeartbeatSchedulerWork(decisionExecutor.sweepExpired().catch((err: unknown) => {
           logger.error({ err }, "decision expiry sweep failed");
         }));
@@ -1669,10 +1669,10 @@ async function startServerWithDatabaseTeardown(
             }));
         }
 
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         scheduleExternalObjectRefreshSweep(new Date());
 
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         scheduleMergedPullRequestConfirmationSweep();
         scheduleGitHubConnectionEventPoll();
         scheduleGitHubConnectionContinuitySweep();
@@ -1681,7 +1681,7 @@ async function startServerWithDatabaseTeardown(
         scheduleSetupTokenReaperSweep();
         scheduleEnvironmentLeaseCleanupSweep();
 
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         trackHeartbeatSchedulerWork(routines
           .tickScheduledTriggers(new Date())
           .then((result) => {
@@ -1693,7 +1693,7 @@ async function startServerWithDatabaseTeardown(
             logger.error({ err }, "routine scheduler tick failed");
           }));
 
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         trackHeartbeatSchedulerWork((async () => {
           const experimental = await instanceSettingsService(db).getExperimental();
           if (experimental.enableStatusCards !== true) return;
@@ -1722,7 +1722,7 @@ async function startServerWithDatabaseTeardown(
           logger.error({ err }, "status-card scheduler tick failed");
         }));
 
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         trackHeartbeatSchedulerWork(environmentCustomImages
           .cleanupExpiredSetupSessions()
           .then((result) => {
@@ -1734,7 +1734,7 @@ async function startServerWithDatabaseTeardown(
             logger.error({ err }, "environment customImage setup cleanup failed");
           }));
 
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         trackHeartbeatSchedulerWork(tools
           .sweepConnectionHealth()
           .then((swept) => {
@@ -1768,7 +1768,7 @@ async function startServerWithDatabaseTeardown(
             logger.error({ err }, "periodic question-response delivery sweep failed");
           }));
 
-        if (heartbeatSchedulerStopped) return;
+        if (heartbeatSchedulerStopped || isControllerDraining()) return;
         if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
           // Periodically reap orphaned runs (5-min staleness threshold) and make sure
           // persisted queued work is still being driven forward.
@@ -1930,8 +1930,15 @@ async function startServerWithDatabaseTeardown(
     signal: "SIGINT" | "SIGTERM",
     exitProcess: boolean,
   ) => {
-    await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
+    beginControllerDrain();
+    // Bound all teardown, including telemetry/HTTP/DB hangs after turn drain.
+    // No adapter cancellation or replacement is authorized by this deadline.
+    const forceExit = exitProcess ? setTimeout(() => {
+      logger.error({ signal }, "controller shutdown deadline reached; exiting with unfinished work retained");
+      process.exit(1);
+    }, controllerDrainRemainingMs() + 10_000) : null;
     heartbeatSchedulerStopped = true;
+    await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     unsubscribeChatCompletions();
     clearInterval(executionControlInterval);
     if (heartbeatSchedulerInterval) {
@@ -1939,50 +1946,18 @@ async function startServerWithDatabaseTeardown(
       heartbeatSchedulerInterval = null;
     }
 
-    const heartbeatShutdown = await coordinateHeartbeatSchedulerShutdown({
-      signal,
-      prepareHotRestartShutdown,
-      waitForHeartbeatSchedulerIdle,
+    const completed = await completeControllerTurnsForShutdown({
+      signal, waitForSchedulerIdle: waitForHeartbeatSchedulerIdle,
+      drain: drainHeartbeatExecutionFinalizers, log: logger,
     });
-    const skipHeartbeatDrain = heartbeatShutdown.hotRestart?.skipDrain === true;
-    const selectiveDrainRunIds = heartbeatShutdown.hotRestart?.drainRunIds ?? null;
-    if (skipHeartbeatDrain) {
-      logger.info(
-        { signal, hotRestart: heartbeatShutdown.hotRestart },
-        "hot-restart shutdown prepared after scheduler quiescence; skipping graceful run drain",
-      );
-    } else if (heartbeatShutdown.preparationError) {
-      logger.error(
-        { err: heartbeatShutdown.preparationError, signal },
-        "hot-restart shutdown preparation failed; falling back to graceful heartbeat run drain",
-      );
+    if (completed !== "drained") {
+      logger.warn({ signal }, "controller drain deadline reached; unfinished runs retained, no replacement dispatched");
     }
-
     const telemetryClient = getTelemetryClient();
-    if (telemetryClient) {
-      telemetryClient.stop();
-      await telemetryClient.flush();
-    }
+    if (telemetryClient) { telemetryClient.stop(); await telemetryClient.flush(); }
 
-    if (!skipHeartbeatDrain && drainHeartbeatRunsForShutdown) {
-      try {
-        const drain = await drainHeartbeatRunsForShutdown(signal, selectiveDrainRunIds);
-        logger.info({ signal, drain }, "graceful heartbeat run drain complete");
-      } catch (err) {
-        logger.error({ err, signal }, "graceful heartbeat run drain failed");
-      }
-    }
-
-    if (!skipHeartbeatDrain) {
-      await drainRunExecutionFinalizersForShutdown({
-        signal,
-        drain: drainHeartbeatExecutionFinalizers,
-        log: logger,
-      });
-    }
-
-    // Whatever the drain did not finalize (timed-out runs, the hot-restart
-    // skip path) still has a local-only tail when the in-flight run-log
+    // Whatever the bounded drain did not finalize still has a local-only
+    // tail when the in-flight run-log
     // mirror is enabled; upload those tails now so an orderly restart
     // never loses run output. No-op when the mirror is off.
     try {
@@ -2027,6 +2002,7 @@ async function startServerWithDatabaseTeardown(
       });
     }
 
+    if (forceExit) clearTimeout(forceExit);
     if (exitProcess) process.exit(0);
   };
 
