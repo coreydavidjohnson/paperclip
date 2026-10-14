@@ -1,3 +1,4 @@
+import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
 import { parseObject } from "../adapters/utils.js";
 import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
 import { enqueueFastResponse } from "../services/fast-responses.js";
@@ -12723,7 +12724,10 @@ export function issueRoutes(
           sanitizedBody.assigneeAgentId as string | null | undefined,
           { actorType: req.actor.type },
         );
-      await assertNoAgentDelegationCycle({
+      const homeLabDelegation = await authorizeHomeLabChild(db, parent.id, req.actor, {
+        ...sanitizedBody, assigneeAgentId: normalizedAssigneeAgentId,
+      });
+      if (!homeLabDelegation) await assertNoAgentDelegationCycle({
         actorType: req.actor.type,
         actorAgentId: req.actor.agentId,
         parentIssueId: parent.id,
@@ -12747,9 +12751,11 @@ export function issueRoutes(
         childAssignmentScope,
       );
       if (
-        req.actor.type === "agent" ||
-        sanitizedBody.assigneeAgentId ||
-        sanitizedBody.assigneeUserId
+        !homeLabDelegation && (
+          req.actor.type === "agent" ||
+          sanitizedBody.assigneeAgentId ||
+          sanitizedBody.assigneeUserId
+        )
       ) {
         await assertCanAssignTasks(req, parent.companyId, childAssignmentScope);
       }
@@ -12794,6 +12800,7 @@ export function issueRoutes(
         ...createBody,
         workspaceSelectionActor: req.actor,
         projectId: childAssignmentScope.projectId,
+        ...(homeLabDelegation ? { homeLabDelegationActor: req.actor } : {}),
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
         executionPolicy,

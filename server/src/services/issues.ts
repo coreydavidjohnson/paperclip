@@ -1,3 +1,4 @@
+import { authorizeHomeLabChild } from "./home-lab-delegation.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
 import { measureRunPhase } from "./execution-preparation-timing.js";
 import { automaticReadRecoveryCleanupCondition, touchedByUserCondition } from "./issue-participation.js";
@@ -1974,6 +1975,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
 };
 type IssueChildCreateInput = IssueCreateInput & {
+  homeLabDelegationActor?: Express.Request["actor"];
   acceptanceCriteria?: string[];
   blockParentUntilDone?: boolean;
   executionWorkspaceInheritanceMode?: "linkage" | "strategy_only";
@@ -9344,18 +9346,24 @@ export function issueService(db: Db) {
       };
     },
 
-    createChild: async (parentIssueId: string, data: IssueChildCreateInput) => {
-      const parent = await db
+    createChild: async (parentIssueId: string, data: IssueChildCreateInput, dbOrTx: Db | DbTransaction = db) => {
+      const persistChild = async (dbOrTx: Db | DbTransaction) => {
+      if (data.homeLabDelegationActor) {
+        if (!await authorizeHomeLabChild(dbOrTx as unknown as Db, parentIssueId, data.homeLabDelegationActor, data, true)) {
+          throw forbidden("Home Lab delegation target changed before child creation");
+        }
+      }
+      const parent = await dbOrTx
         .select()
         .from(issues)
         .where(eq(issues.id, parentIssueId))
         .then((rows) => rows[0] ?? null);
       if (!parent) throw notFound("Parent issue not found");
-      await assertExecutionTaskParent(db, parent.companyId, parent.id);
+      await assertExecutionTaskParent(dbOrTx as unknown as Db, parent.companyId, parent.id);
 
       const idempotencyKey = data.idempotencyKey?.trim();
       if (idempotencyKey) {
-        const existingChild = await db
+        const existingChild = await dbOrTx
           .select({ issue: issues })
           .from(issueCreateIdempotencyKeys)
           .innerJoin(issues, eq(issueCreateIdempotencyKeys.issueId, issues.id))
@@ -9375,11 +9383,11 @@ export function issueService(db: Db) {
           }
           await data.assertCanReuseIssue?.(existingChild);
           data.onDeduplicated?.("idempotency_key");
-          const [enriched] = await withIssueLabels(db, [existingChild]);
+          const [enriched] = await withIssueLabels(dbOrTx, [existingChild]);
           const [withRelations] = await withIssueRelationSummaries(
             parent.companyId,
             [enriched],
-            db,
+            dbOrTx,
           );
           return {
             issue: withRelations,
@@ -9388,7 +9396,7 @@ export function issueService(db: Db) {
         }
       }
 
-      const [{ childCount }] = await db
+      const [{ childCount }] = await dbOrTx
         .select({ childCount: sql<number>`count(*)::int` })
         .from(issues)
         .where(
@@ -9405,6 +9413,7 @@ export function issueService(db: Db) {
       }
 
       const {
+        homeLabDelegationActor,
         acceptanceCriteria,
         blockParentUntilDone,
         executionWorkspaceInheritanceMode = "linkage",
@@ -9464,10 +9473,10 @@ export function issueService(db: Db) {
         ...(inheritStrategyOnly
           ? { skipExecutionWorkspaceInheritance: true }
           : { inheritExecutionWorkspaceFromIssueId: parent.id }),
-      });
+      }, dbOrTx);
 
       if (blockParentUntilDone) {
-        const existingBlockers = await db
+        const existingBlockers = await dbOrTx
           .select({ blockerIssueId: issueRelations.issueId })
           .from(issueRelations)
           .where(
@@ -9487,11 +9496,12 @@ export function issueService(db: Db) {
             ]),
           ],
           { agentId: actorAgentId ?? null, userId: actorUserId ?? null },
+          dbOrTx,
         );
         [child] = await withIssueRelationSummaries(
           parent.companyId,
           [child],
-          db,
+          dbOrTx,
         );
       }
 
@@ -9499,6 +9509,10 @@ export function issueService(db: Db) {
         issue: child,
         parentBlockerAdded: Boolean(blockParentUntilDone),
       };
+      };
+      return data.homeLabDelegationActor && dbOrTx === db
+        ? db.transaction(persistChild)
+        : persistChild(dbOrTx);
     },
 
     decomposeAcceptedPlan: async (
