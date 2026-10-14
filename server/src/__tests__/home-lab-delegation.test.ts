@@ -34,6 +34,10 @@ describe("bounded native Home Lab child delegation", () => {
     expect(await authorizeHomeLabChild(f.db, f.parentId, f.actor, f.body, true)).toBe(true);
     expect(f.locks).toEqual(["identity-table", "share", "update"]);
   });
+  it("accepts the existing MCP agent key plus exact run binding", async () => {
+    const f = fixture(); f.actor.source = "agent_key";
+    expect(await authorizeHomeLabChild(f.db, f.parentId, f.actor, f.body, true)).toBe(true);
+  });
   it("leaves other targets on ordinary authorization", async () => {
     const f = fixture(); f.target.name = "Other";
     expect(await authorizeHomeLabChild(f.db, f.parentId, f.actor, f.body)).toBe(false);
@@ -44,7 +48,7 @@ describe("bounded native Home Lab child delegation", () => {
   });
   const mutations: [string, (f: ReturnType<typeof fixture>) => void][] = [
     ["no run", f => { delete f.actor.runId; }],
-    ["key instead of run JWT", f => { f.actor.source = "agent_key"; }],
+    ["unauthenticated source", f => { f.actor.source = "none"; }],
     ["scoped key", f => { f.actor.keyScope = { kind: "skill_test", issueId: f.parentId } as any; }],
     ["wrong status", f => { f.body.status = "in_progress"; }],
     ["no parent blocker", f => { f.body.blockParentUntilDone = false; }],
