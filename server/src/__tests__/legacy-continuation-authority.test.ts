@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
 import { heartbeatService } from "../services/heartbeat.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -175,7 +175,7 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("escalated");
     expect(await f.runs()).toHaveLength(1);
   });
-  it.each(["done", "cancelled", "blocked", "in_review"])("honors durable %s instead of the final summary", async status => {
+  it.each(["done", "cancelled", "in_review"])("honors durable %s instead of the final summary", async status => {
     const f = await fixture();
     await db.update(issues).set({ status }).where(eq(issues.id, f.issueId));
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
@@ -243,6 +243,44 @@ describe("legacy continuation persisted authority", () => {
     await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, f.issueId));
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
     expect(await f.runs()).toHaveLength(1);
+  });
+  it("PER-404 returns a bare-blocked task within one sweep without board action", async () => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    const result = await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(result.dispositionRepairRequeued).toBeGreaterThanOrEqual(1);
+    expect(await f.runs()).toHaveLength(2);
+    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(repair.agentId).toBe(f.agentId);
+    expect(repair.contextSnapshot).toMatchObject({ legacyDispositionEpisode: { id: f.runId, attempt: 1, maxAttempts: 2 } });
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(await f.runs()).toHaveLength(2);
+    expect((await f.actions())[0]).toMatchObject({ ownerType: "agent", attemptCount: 1 });
+  });
+  it("PER-404 retains a named credential unblock action", async () => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: { owner: { agentId: f.agentId }, action: "Obtain the required credential through its approved owner" } }).where(eq(issues.id, f.issueId));
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it("PER-404 retains an unresolved blocker while the source is blocked", async () => {
+    const f = await fixture();
+    const blockerId = randomUUID();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.insert(issues).values({ id: blockerId, companyId: f.companyId, title: "Real dependency", status: "todo", responsibleUserId: "fixture-owner" });
+    await db.insert(issueRelations).values({ companyId: f.companyId, issueId: blockerId, relatedIssueId: f.issueId, type: "blocks" });
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it.each(["ask_user_questions", "request_confirmation"] as const)("PER-404 keeps blocked pending %s", async kind => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId, kind, status: "pending", payload: { version: 1, prompt: "Human input required" } });
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
   });
   it("the delayed sweep ignores old diagnostic labels and uses the same repair path", async () => {
     const f = await fixture();

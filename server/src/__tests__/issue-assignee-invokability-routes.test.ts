@@ -309,6 +309,25 @@ describe("agent delegation cycle guard", () => {
     expect(mockIssueService.findOpenAncestorCreatedByAgent).toHaveBeenCalledWith(parent.id, IDLE_AGENT_ID);
   });
 
+  it("allows self-assigned decomposition with an open actor-created ancestor", async () => {
+    const parent = makeIssue({ createdByAgentId: AGENT_ACTOR_ID });
+    mockIssueService.getById.mockResolvedValue(parent);
+    mockIssueService.findOpenAncestorCreatedByAgent.mockResolvedValue({
+      id: parent.id, identifier: parent.identifier, parentId: null,
+      createdByAgentId: AGENT_ACTOR_ID, status: "in_progress",
+    });
+    mockIssueService.createChild.mockResolvedValue({
+      issue: makeIssue({ id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", parentId: parent.id }),
+      parentBlockerAdded: false,
+    });
+    const res = await request(createApp(agentActor()))
+      .post(`/api/issues/${parent.id}/children`)
+      .send({ title: "Own follow-up", assigneeAgentId: AGENT_ACTOR_ID });
+    expect(res.status).toBe(201);
+    expect(mockIssueService.createChild).toHaveBeenCalled();
+    expect(mockIssueService.findOpenAncestorCreatedByAgent).not.toHaveBeenCalled();
+  });
+
   it("allows the same child when no open ancestor was created by the assignee", async () => {
     const parent = makeIssue();
     mockIssueService.getById.mockResolvedValue(parent);

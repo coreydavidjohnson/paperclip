@@ -3718,7 +3718,7 @@ export function recoveryService(
       gates: {
         stopped: stop.kind !== "clear" || isOperatorCancelledRun(run, run.agentId),
         paused: pause, budgetBlocked: budget,
-        pendingWait: state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
+        pendingWait: Boolean(issue.unblockDescriptor) || state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
         activeExecution: state.hasActiveExecutionPath || latest?.id !== (dispatchRunId ?? run.id),
         ownedLifecycle: run.issueCommentStatus === "retry_queued" || run.issueCommentStatus === "retry_exhausted" ||
           Boolean(readNonEmptyString(context.goalControlRequestId)) || context.resumeSessionGoalHeartbeat === true ||
@@ -4330,7 +4330,7 @@ export function recoveryService(
       .where(
         and(
           isNull(issues.assigneeUserId),
-          inArray(issues.status, ["todo", "in_progress", "in_review"]),
+          inArray(issues.status, ["todo", "in_progress", "in_review", "blocked"]),
           or(
             sql`${issues.assigneeAgentId} is not null`,
             eq(issues.status, "in_review"),
@@ -4389,6 +4389,24 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      // Blocked is a supported wait only with durable evidence. Route only a
+      // successful legacy owner's unsupported disposition through the existing
+      // bounded repair; never let other blocked cases fall into generic replay.
+      if (issue.status === "blocked") {
+        const source = await getLatestIssueRun(issue.companyId, issue.id);
+        if (source?.status === "succeeded") {
+          const outcome = await reconcileLegacyContinuation(source.id);
+          if (outcome === "queued") {
+            result.continuationRequeued += 1;
+            result.dispositionRepairRequeued += 1;
+            result.issueIds.push(issue.id);
+          } else if (outcome === "escalated") {
+            result.escalated += 1;
+            result.issueIds.push(issue.id);
+          } else result.skipped += 1;
+        } else result.skipped += 1;
+        continue;
+      }
       if (issue.originKind === "chat_channel") {
         await settleSlackConversation(db, issue.companyId, issue.id);
         const [current] = await db.select({ externalConversationState: externalConversationStateSql() })

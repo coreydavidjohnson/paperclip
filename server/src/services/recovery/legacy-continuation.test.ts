@@ -11,8 +11,17 @@ describe("legacy continuation authority", () => {
   it("requests agent repair for a successful process without a task disposition", () => {
     expect(decideLegacyContinuation(input)).toMatchObject({ kind: "enqueue", nextAttempt: 1 });
   });
-  it.each(["done", "cancelled", "blocked", "in_review"])("respects persisted %s disposition", status => {
+  it.each(["done", "cancelled", "in_review"])("respects persisted %s disposition", status => {
     expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, status } }).kind).toBe("skip");
+  });
+  it("returns unsupported blocked to the same bounded owner repair", () => {
+    const blocked = { ...input, issue: { ...input.issue!, status: "blocked" } };
+    expect(decideLegacyContinuation(blocked)).toMatchObject({ kind: "enqueue", nextAttempt: 1 });
+    expect(decideLegacyContinuation(blocked)).toEqual(decideLegacyContinuation(blocked));
+    expect(decideLegacyContinuation({ ...blocked, episode: { ...input.episode, attempt: 2 } }).kind).toBe("exhausted");
+  });
+  it.each(["stopped", "paused", "budgetBlocked", "pendingWait", "activeExecution", "ownedLifecycle", "conversation"] as const)("blocked preserves %s", gate => {
+    expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, status: "blocked" }, gates: { ...input.gates, [gate]: true } })).toMatchObject({ kind: "skip" });
   });
   it.each(["failed", "cancelled", "interrupted", "timed_out", "running"])("does not convert a %s process into repair", status => {
     expect(decideLegacyContinuation({ ...input, run: { ...input.run, status } }).kind).toBe("skip");
