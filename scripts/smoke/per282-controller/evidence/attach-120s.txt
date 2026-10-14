@@ -1,0 +1,29 @@
+Command (authorized desktop; cluster via ssh agents only):
+DRAIN_GRACE_MS=120000 ADAPTER_SOURCE=<home-owned services/paperclip/adapter> bash scripts/smoke/per282-controller/attach.sh
+
+Namespace: per282-attach-1791947100-439642
+Application/dependency image: 100.81.86.49:5050/luma-paperclip@sha256:1d35419bafb8771b01e32aae45b0c7cc3072e0e74bba67cb2e6254fcac60dc79
+PostgreSQL: postgres:17.9-alpine@sha256:c7526c0f6c3f30260a563d7bcf8ad778effac59a44f8ffa86678c35418338609
+Ephemeral DB, no production secrets/services/PVCs, bounded CPU/memory and activeDeadlineSeconds.
+
+CHECKPOINT elapsedMs=120032 graceMs=120000
+PASS actual heartbeat + home-owned adapter HTTP integration: same run/session/user/response/turn after bounded checkpoint and controller handover
+PASS original JWT through both production auth/API routers: agent self, issue reads, comments before/after drain and on new owner
+PASS exactly one prompt, zero interrupts/approval replays, one original run succeeds; no replacement/recovery run
+Adapter: 143 tests, 143 pass, 0 fail.
+Original JWT also PATCHed issue status done on controller B; joined exact finalizers and asserted no successor after settling.
+Fork: 3 focused test files, 22 tests passed.
+Esbuild: heartbeat.ts, omnigent-attachment.ts, shutdown.ts transpiled, Done in 75ms.
+CLEANUP: namespace absent: per282-attach-1791947100-439642
+
+Not real OmniGenT/PER285 acceptance. No immutable rebuilt app image or full tsc claimed.
+
+Baseline exercise also passed: 29 shutdown/drain/scheduling tests; simultaneous timer/admission, locked/unreachable DB renewal fences, in-grace process completion and readiness. Namespace per282-controller-1791946177-436903 deleted and verified absent.
+
+Production adapter trace (read-only): deployment image matches pinned digest above.
+/opt/paperclip-adapter-omnigent/dist/server/execute.js SHA256:
+d280cb3d7adea0c6ddff8bb4298a7f03e92128f491ba299d51897e139312a8d2
+Baked implementation contains recoverySnapshot/controllerOwnershipLost and coldStartRetries,
+no omnigentDispatchReceipt. Source base luma-homelab 5f560e85b2b72c928f1bd928ec6437bf58e9abd4;
+last adapter execute commit 750c4c6da39ebf1a160e616371e63b3721fdf7d7.
+No deployment/main/origin-luma changes made by follow-up.
