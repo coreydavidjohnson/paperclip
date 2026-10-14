@@ -1,6 +1,8 @@
 import type { Db } from "@paperclipai/db";
 import { createLiveEventTransport } from "./live-events-transport.js";
 import { EventEmitter } from "node:events";
+import { performance } from "node:perf_hooks";
+import { logger } from "../middleware/logger.js";
 import type { LiveEvent, LiveEventType } from "@paperclipai/shared";
 
 type LiveEventPayload = Record<string, unknown>;
@@ -13,6 +15,9 @@ uiEmitter.setMaxListeners(0);
 const transportState = Symbol("transport-state");
 let transport: ReturnType<typeof createLiveEventTransport> | undefined;
 let transportReady = true;
+let transportHasSucceeded = false;
+let reconnectDeadline: number | null = null;
+const API_RECONNECT_GRACE_MS = 10_000;
 
 const allCompanyEvents = Symbol("all-company-live-events");
 
@@ -91,6 +96,12 @@ export function subscribeGlobalUiLiveEvents(listener: LiveEventListener) {
 
 export function isLiveEventTransportReady() { return transportReady; }
 
+// API traffic can survive a brief LISTEN reconnect; WebSockets cannot. Never
+// grant startup/stop grace, and use monotonic time so clock changes cannot extend it.
+export function isLiveEventTransportReadyForApi() {
+  return transportReady || (reconnectDeadline !== null && performance.now() < reconnectDeadline);
+}
+
 export function subscribeLiveEventTransportState(listener: (ready: boolean) => void) {
   uiEmitter.on(transportState, listener);
   return () => uiEmitter.off(transportState, listener);
@@ -99,6 +110,8 @@ export function subscribeLiveEventTransportState(listener: (ready: boolean) => v
 /** Start before accepting traffic; caller owns stop before closing DB pools. */
 export function startLiveEventTransport(db: Db) {
   if (transport) throw new Error("live_event_transport_already_started");
+  transportHasSucceeded = false;
+  reconnectDeadline = null;
   transport = createLiveEventTransport(db, event => {
     // Numeric IDs are delivery-local, monotonic hints, never replay cursors.
     const delivered = { ...event, id: ++nextEventId };
@@ -106,12 +119,18 @@ export function startLiveEventTransport(db: Db) {
   }, ready => {
     if (ready === transportReady) return;
     transportReady = ready;
+    if (ready) transportHasSucceeded = true;
+    reconnectDeadline = !ready && transportHasSucceeded ? performance.now() + API_RECONNECT_GRACE_MS : null;
+    logger.info({ ready }, "live_event_transport_readiness_changed");
     uiEmitter.emit(transportState, ready);
   });
   const owned = transport;
   return {
     isReady: isLiveEventTransportReady,
     async stop() {
+      if (transport !== owned) return;
+      transportHasSucceeded = false;
+      reconnectDeadline = null;
       await owned.stop();
       if (transport === owned) transport = undefined;
       // Remain fail closed after stop; a new start is needed to serve traffic.
