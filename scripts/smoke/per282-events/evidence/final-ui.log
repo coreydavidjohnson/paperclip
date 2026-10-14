@@ -1,0 +1,12 @@
+(!) Your Vite config uses features that are unsupported by `configLoader: 'native'`, which is planned to become the default in a future major version of Vite:
+  - `__dirname` (vitest.config.ts:7:25). Use `import.meta.dirname` instead
+Set `VITE_CONFIG_NATIVE_IGNORE_WARNING=true` to suppress this warning.
+
+ RUN  v4.1.11 /app/ui
+
+ ✓ src/context/LiveUpdatesProvider.test.ts (61 tests) 39ms
+
+ Test Files  1 passed (1)
+      Tests  61 passed (61)
+   Start at  02:43:21
+   Duration  2.43s (transform 1.09s, setup 25ms, import 2.23s, tests 39ms, environment 0ms)
