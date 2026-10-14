@@ -6,16 +6,16 @@ function fixture() {
   const callerId = randomUUID(), targetId = randomUUID(), companyId = randomUUID();
   const parentId = randomUUID(), runId = randomUUID();
   const actor: Express.Request["actor"] = { type: "agent", source: "agent_jwt",
-    agentId: callerId, companyId, runId, keyScope: { kind: "standard" } };
+    agentId: callerId, companyId, runId, onBehalfOfUserId: "board-user", keyScope: { kind: "standard" } };
   const caller = { id: callerId, companyId, name: "Client", status: "idle" };
   const target = { id: targetId, companyId, name: "Home Lab", status: "idle" };
   const parent = { id: parentId, companyId, assigneeAgentId: callerId,
     assigneeUserId: null, status: "in_progress", createdByAgentId: targetId };
   const run = { id: runId, companyId, agentId: callerId, status: "running",
-    contextSnapshot: { issueId: parentId }, resultJson: null,
+    responsibleUserId: "board-user", contextSnapshot: { issueId: parentId }, resultJson: null,
     nativeIssueId: null, activeIdentityContextId: null };
   const body = { assigneeAgentId: targetId, status: "todo", blockParentUntilDone: true };
-  const rows: unknown[][] = [[target], [caller, target], [run], [parent]];
+  const rows: unknown[][] = [[target], [caller, target], [parent], [run]];
   const locks: string[] = [];
   const db = {
     select: () => ({ from: () => ({ where: () => {
@@ -32,7 +32,7 @@ describe("bounded native Home Lab child delegation", () => {
   it.each(["North Labs", "Personal", "Huron", "Client"])("accepts %s beneath a Home Lab-created parent", async (name) => {
     const f = fixture(); f.caller.name = name;
     expect(await authorizeHomeLabChild(f.db, f.parentId, f.actor, f.body, true)).toBe(true);
-    expect(f.locks).toEqual(["identity-table", "share", "update"]);
+    expect(f.locks).toEqual(["identity-table", "update", "share"]);
   });
   it("accepts the existing MCP agent key plus exact run binding", async () => {
     const f = fixture(); f.actor.source = "agent_key";
@@ -60,6 +60,7 @@ describe("bounded native Home Lab child delegation", () => {
     ["native issue mismatch", f => { Object.assign(f.run, { nativeIssueId: randomUUID() }); }],
     ["stopped run", f => { f.run.status = "cancelled"; }],
     ["stop requested before executor settles", f => { Object.assign(f.run, { resultJson: { executionCancellation: { state: "requested" } } }); }],
+    ["responsible identity changed", f => { f.run.responsibleUserId = "another-user"; }],
     ["identity changed", f => { Object.assign(f.run, { activeIdentityContextId: randomUUID() }); }],
     ["target paused", f => { f.target.status = "paused"; }],
     ["target unknown", f => { f.target.status = "unknown"; }],
@@ -67,8 +68,8 @@ describe("bounded native Home Lab child delegation", () => {
     ["duplicate target", f => { (f.rows[1] as unknown[]).push({ ...f.target, id: randomUUID() }); }],
     ["missing caller", f => { f.rows[1] = [f.target]; }],
     ["foreign-company target", f => { f.rows[1] = [f.caller]; }],
-    ["foreign-company parent", f => { f.rows[3] = []; }],
-    ["wrong-company or wrong-agent run", f => { f.rows[2] = []; }],
+    ["foreign-company parent", f => { f.rows[2] = []; }],
+    ["wrong-company or wrong-agent run", f => { f.rows[3] = []; }],
   ];
   it.each(mutations)("rejects %s", async (_label, mutate) => {
     const f = fixture(); mutate(f);
