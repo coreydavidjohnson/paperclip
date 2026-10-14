@@ -230,3 +230,21 @@ into the current fork image or supplied by a fork migration.
 - This review is after deployment, not satisfaction of the missed pre-ship
   gate. Saved exact page API measurements still fail p50 <200ms; browser full
   render <1 second remains unmeasured. No acceptance is claimed.
+
+## Native Home Lab child delegation (PER-309 / PER-327)
+
+- Why: platform work uses the existing child-create route even outside the
+  caller's report tree or beneath an open Home Lab-created ancestor. The MCP
+  board bridge had a parent-ownership race and must not be deployed.
+- Contract: only authenticated standard agent-run JWTs can create a todo child
+  for the unique active same-company Home Lab, from their own exact running
+  parent run, with a native parent blocker. Admission is repeated under locks
+  in the child-plus-blocker transaction, including cancellation and run identity.
+  Ordinary assignment, standalone creation, reassignment, low-trust, watchdog,
+  environment and monitor checks are unchanged. No new endpoint or grant.
+- Files: server/src/services/home-lab-delegation.ts, services/issues.ts,
+  routes/issues.ts and focused delegation tests.
+- Removal condition: the pinned upstream implements equivalent shared-target
+  child delegation with atomic ownership/run/cancellation enforcement; or
+  Home Lab no longer serves as the shared platform delegation target.
+- Local-only fork patch by Corey's decision; do not propose upstream.
