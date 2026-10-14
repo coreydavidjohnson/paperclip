@@ -34,7 +34,8 @@ export const runListContextColumns = {
   contextWakeTriggerDetail: sql<string | null>`run_list_context."wakeTriggerDetail"`.as("contextWakeTriggerDetail"),
 } as const;
 
-// Preserve -> JSON and ->> text types while decoding issue-run context once.
+// Preserve driver JSON/text values; do not tighten record fields to UUIDs.
+// JSON null and SQL NULL both deserialize to JS null; no SQL consumes these fields.
 export const issueRunContextJoin = sql`lateral jsonb_to_record(
   case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
     then ${heartbeatRuns.contextSnapshot} end
