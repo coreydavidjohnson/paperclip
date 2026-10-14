@@ -471,3 +471,57 @@ into the current fork image or supplied by a fork migration.
   The fixture never connects to production; teardown closes fixture clients.
 - Removal: a released upstream equivalent preserves all admission and delivery
   contracts and passes the constrained-pool regression.
+## Brief live-event reconnect API readiness grace (PER-507)
+
+- Why: on a singleton, a brief dedicated LISTEN session reconnect withdrew the
+  otherwise usable API from service. Eight readiness 503s were reported within
+  roughly ten seconds while health and the main pool's select 1 worked. The
+  historical transition sequence is unknown; this patch does not diagnose it.
+- Upstream check: latest stable `v2026.1012.0`
+  (`bba6a45f0d364cfd962ac59b3bdf2426a8222adb`) and observed master
+  `35b3345033c994458dada29023caaebadfce893b` still have process-local events,
+  not our dedicated transport or an equivalent readiness policy. Inspected
+  master readiness/reconnect/transport history (bounded 80-commit fetch).
+- Files: `server/src/services/live-events.ts`, `server/src/routes/health.ts`,
+  `server/src/__tests__/live-events-readiness.test.ts`,
+  `server/src/__tests__/health-reconnect-readiness.test.ts`, this ledger.
+- API readiness alone allows less than ten seconds of continuous transport loss
+  after a successful LISTEN in the current lifecycle. This covers two
+  one-second reconnect delays plus two three-second query budgets (eight
+  seconds), not an unbounded outage. Repeated false callbacks cannot extend
+  the monotonic deadline. Recovery establishes a fresh window for a later loss.
+  No probe threshold/configuration, schema, dependency or heartbeat changes.
+- Startup before initial success, transport stop, controller drain, startup
+  recovery, missing authentication/database and failed/timed-out database
+  probes remain fail closed. Both sides of the bounded select 1 recheck the
+  grace deadline, drain and recovery. An old stopped handle cannot cancel a
+  replacement lifecycle's grace.
+- Raw transport readiness, generation fencing, PostgreSQL distribution,
+  business observers and WebSocket disconnect/503/refetch semantics are
+  unchanged. During grace the API is available but UI hints are degraded;
+  this is not evidence of successful event delivery. Long loss is still 503
+  at the ten-second boundary, even if the API database is healthy.
+- Exactly one info log per actual transport boolean transition:
+  `logger.info({ ready }, "live_event_transport_readiness_changed")`.
+  Production Pino JSON includes stable `msg` and boolean `ready` (plus its
+  standard level/time/pid/hostname fields); no error text, credential or payload.
+  Initial true-to-false startup, recovery, loss and stop transitions are logged;
+  repeated same-value probes are not. Grace expiration is not a transport
+  transition and adds no misleading duplicate. Parent owns the Loki alert.
+- Focused command in an installed workspace:
+  `pnpm --filter @paperclipai/server exec vitest run src/__tests__/live-events-readiness.test.ts src/__tests__/health-reconnect-readiness.test.ts src/__tests__/live-events-transport.test.ts`.
+- Verified here: 20 tests passed across those three files with Vitest 4.1.11
+  in an isolated task-local runner. New tests first reproduced unavailable API
+  on brief loss and absent transition logs; the stale-stop regression also
+  failed before its guard. The runner aliases the DB package to inert table
+  exports/explicitly mocked driver and shared constants to their real source;
+  unrelated health modules are mocked in the committed route tests. No live
+  database, production data, browser or cluster mutation was used.
+- All three token-gate scripts passed (1115 UI files scanned). Full workspace
+  typecheck/build/test and real PostgreSQL fault/cluster checks were not run:
+  the desktop has Node 22.23.1 rather than required 24.11+, no pnpm/workspace
+  dependency installation. Parent owns build-overlay inclusion, normal CI,
+  staging and full Argo/live acceptance before deployment. In particular ship
+  both changed runtime modules, not just health.ts.
+- Removal: retire/adapt with released upstream cross-instance hints and bounded
+  reconnect readiness; retain startup/drain/database/subscriber regressions.
