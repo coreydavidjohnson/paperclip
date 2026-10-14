@@ -11,11 +11,12 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
 import { activityToastIdentity } from "./activity-toast-identity.js";
 import { taskToastEligible } from "./task-toast-eligibility.js";
-import { subscribeCompanyLiveEvents } from "../services/live-events.js";
+import { subscribeCompanyUiLiveEvents, subscribeGlobalUiLiveEvents, subscribeLiveEventTransportState, isLiveEventTransportReady } from "../services/live-events.js";
 import { trackIdleWork } from "../services/task-admission.js";
 
 interface WsSocket {
   readyState: number;
+  bufferedAmount: number;
   ping(): void;
   send(data: string): void;
   terminate(): void;
@@ -26,6 +27,7 @@ interface WsSocket {
 }
 
 interface WsServer {
+  close(): void;
   clients: Set<WsSocket>;
   on(event: "connection", listener: (socket: WsSocket, req: IncomingMessage) => void): void;
   on(event: "close", listener: () => void): void;
@@ -339,8 +341,10 @@ export function setupLiveEventsWebSocketServer(
     }
     let delivery = Promise.resolve();
     let pending = 0;
-    const unsubscribe = subscribeCompanyLiveEvents(context.companyId, (event) => {
+    const deliver = (event: LiveEvent) => {
       if (socket.readyState !== WebSocket.OPEN) return;
+      // Slow readers reconnect and refetch instead of growing an unbounded queue.
+      if (socket.bufferedAmount > 1024 * 1024) { socket.terminate(); return; }
       if (++pending > 1000) { socket.close(1013, "event backlog"); return; }
       delivery = delivery.then(async () => {
         if (socket.readyState !== WebSocket.OPEN) return;
@@ -361,7 +365,10 @@ export function setupLiveEventsWebSocketServer(
         }
       }).catch(err => logger.warn({ err, companyId: context.companyId }, "live event authorization failed"))
         .finally(() => { pending -= 1; });
-    });
+    };
+    const companyCleanup = subscribeCompanyUiLiveEvents(context.companyId, deliver);
+    const globalCleanup = subscribeGlobalUiLiveEvents(deliver);
+    const unsubscribe = () => { companyCleanup(); globalCleanup(); };
 
     cleanupByClient.set(socket, unsubscribe);
     aliveByClient.set(socket, true);
@@ -382,7 +389,14 @@ export function setupLiveEventsWebSocketServer(
     });
   });
 
+  const stateCleanup = subscribeLiveEventTransportState(ready => {
+    if (!ready) for (const socket of wss.clients) socket.close(1013, "live events resync");
+  });
+
   wss.on("close", () => {
+    stateCleanup();
+    for (const cleanup of cleanupByClient.values()) cleanup();
+    cleanupByClient.clear();
     clearInterval(pingInterval);
   });
 
@@ -409,8 +423,13 @@ export function setupLiveEventsWebSocketServer(
 
     const url = new URL(req.url, "http://localhost");
     const companyId = parseCompanyId(url.pathname);
-    if (!companyId) {
+    if (!companyId || companyId === "*") {
       closeUpgradeSocket(socket);
+      return;
+    }
+
+    if (!isLiveEventTransportReady()) {
+      rejectUpgrade(socket, "503 Service Unavailable", "live events unavailable");
       return;
     }
 
@@ -422,6 +441,10 @@ export function setupLiveEventsWebSocketServer(
       resolveCloudActor: opts.resolveCloudActor,
     })
       .then((context) => {
+        if (!isLiveEventTransportReady()) {
+          rejectUpgrade(socket, "503 Service Unavailable", "live events unavailable");
+          return;
+        }
         if (!context) {
           rejectUpgrade(socket, "403 Forbidden", "forbidden");
           return;
@@ -444,6 +467,11 @@ export function setupLiveEventsWebSocketServer(
         logger.error({ err, path: req.url }, "failed websocket upgrade authorization");
         rejectUpgrade(socket, "500 Internal Server Error", "upgrade failed");
       }));
+  });
+
+  server.once("close", () => {
+    for (const socket of wss.clients) socket.terminate();
+    wss.close();
   });
 
   return wss;

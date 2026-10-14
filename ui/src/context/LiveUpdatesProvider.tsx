@@ -1707,6 +1707,10 @@ function handleLiveEvent(
   gate: ToastGate,
   currentActor: { userId: string | null; agentId: string | null },
 ) {
+  if (event.companyId === "*" && event.type === "plugin.ui.updated") {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all });
+    return;
+  }
   if (event.companyId !== expectedCompanyId) return;
 
   const nameOf = (id: string) =>
@@ -1868,6 +1872,7 @@ function closeSocketQuietly(
 
 export const __liveUpdatesTestUtils = {
   buildActivityToast,
+  handleLiveEvent,
   applyRunLifecycleToCompanyLiveRuns,
   buildAgentStatusToast,
   buildRunStatusToast,

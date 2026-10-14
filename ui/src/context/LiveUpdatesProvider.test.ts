@@ -1699,5 +1699,20 @@ describe("activity toast attribution", () => {
     const toast = build(new QueryClient(), "company", { ...payload, actorType: "system", actorName: undefined }, { userId: "user-1", agentId: null });
     expect(toast?.title).toBe("System created Task task-1");
     expect(toast?.actor).toBeUndefined();
+describe("global UI hints", () => {
+  it("refreshes plugins without leaking company events or dispatching global hints to company components", () => {
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const event = { id: 1, companyId: "*", type: "plugin.ui.updated" as const, createdAt: new Date().toISOString(), payload: {} };
+    const gate = { cooldownHits: new Map(), suppressUntil: 0, observedRunOutcomes: new Set<string>() };
+    const handler = vi.fn();
+    __liveUpdatesTestUtils.handleLiveEvent(client, "a", "/", event, vi.fn(), gate, { userId: null, agentId: null });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.plugins.all });
+    __liveUpdatesTestUtils.dispatchLiveEventToSubscribers(new Set([handler]), "a", event);
+    expect(handler).not.toHaveBeenCalled();
+    invalidate.mockClear();
+    __liveUpdatesTestUtils.handleLiveEvent(client, "a", "/", { ...event, companyId: "b", type: "activity.logged" }, vi.fn(), gate, { userId: null, agentId: null });
+    expect(invalidate).not.toHaveBeenCalled();
+    client.clear();
   });
 });
