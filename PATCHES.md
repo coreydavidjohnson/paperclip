@@ -230,3 +230,25 @@ into the current fork image or supplied by a fork migration.
 - This review is after deployment, not satisfaction of the missed pre-ship
   gate. Saved exact page API measurements still fail p50 <200ms; browser full
   render <1 second remains unmeasured. No acceptance is claimed.
+
+## Unsupported blocked owner disposition (PER-404 / PER-270)
+
+- Corey explicitly authorized minimal fork patches in board comment
+  c84b473b-87bc-4c5a-9afc-77948134163c. Publish only to this fork, never upstream.
+- A successful legacy run with blocked but no durable wait evidence enters the
+  existing owner repair. Pending questions/approvals, unresolved blockers,
+  monitors/review stages, pause/Stop/budget, changed ownership, native finalizers
+  and active recovery/replay holds still prevent admission.
+- Include blocked candidates in the stranded sweep, but route them only through
+  successful legacy disposition repair. Failed/unknown side effects never use
+  the generic replay paths. Keep the original episode's two-attempt budget,
+  idempotent successor keys and deduplicated exhausted-board alert.
+- Tests: legacy-continuation.test.ts and legacy-continuation-authority.test.ts
+  cover bare-blocked one-sweep admission, replay deduplication, bounded attempts
+  and retained pending human gates. Upstream and deployed classifier repro both
+  failed before this patch. No database or API schema change.
+- Packaging must compile/copy recovery/service.js and legacy-continuation.js;
+  changing the fork pin without emitted server overlays does not deploy the fix.
+- Retirement: remove this carry only after a released upstream equivalent
+  passes these regressions. Restart-card repair remains a separate acceptance
+  requirement; this patch does not answer human approval or clear replay holds.

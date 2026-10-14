@@ -68,7 +68,7 @@ export function decideLegacyContinuation(input: LegacyContinuationInput):
   if (run.status !== "succeeded") return { kind: "skip", reason: "run_not_successful" };
   if (!issue || !agent || issue.companyId !== run.companyId || agent.companyId !== run.companyId || agent.id !== run.agentId) return { kind: "skip", reason: "invalid_binding" };
   if (issue.assigneeAgentId !== run.agentId || issue.assigneeUserId) return { kind: "skip", reason: "owner_changed" };
-  if (!["todo", "in_progress"].includes(issue.status)) return { kind: "skip", reason: "recorded_disposition" };
+  if (!["todo", "in_progress", "blocked"].includes(issue.status)) return { kind: "skip", reason: "recorded_disposition" };
   for (const [blocked, reason] of [
     [gates.stopped, "stopped"], [gates.paused, "paused"],
     [gates.budgetBlocked, "budget_blocked"], [gates.pendingWait, "durable_wait"],
