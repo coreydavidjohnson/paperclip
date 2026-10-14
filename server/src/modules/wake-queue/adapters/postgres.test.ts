@@ -416,6 +416,52 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(wake.status).toBe("deferred_issue_execution");
   });
 
+  it.each(["exact", "wrong_run", "unknown_outcome", "replay_blocked", "active", "missing", "pending_owner", "delegated_owner"])(
+    "releases a failed legacy deferred wake only for exact validated reconciliation (%s)", async (scenario) => {
+      const companyId = await seedCompany();
+      const agentId = await seedAgent({ companyId });
+      const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "todo" });
+      const runId = await seedRun({ companyId, agentId, status: "failed", contextSnapshot: { issueId } });
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy", errorCode: "omnigent_session_failed" }).where(eq(heartbeatRuns.id, runId));
+      const wakeId = await seedDeferredWake({ companyId, agentId, issueId });
+      const actionId = randomUUID();
+      if (scenario !== "missing") await db.insert(issueRecoveryActions).values({
+        id: actionId,
+        companyId, sourceIssueId: issueId, kind: "active_run_watchdog", ownerType: "board",
+        cause: "legacy_execution_requires_reconciliation", status: scenario === "active" ? "active" : "resolved",
+        fingerprint: runId, returnOwnerAgentId: agentId, nextAction: "Continue only after observed reconciliation.",
+        evidence: { runId, ...(scenario === "pending_owner" ? { continuationDelivery: "pending" } : {}), ...(scenario === "delegated_owner" ? { continuationDelivery: "delegated" } : {}), executionReconciliation: {
+          runId: scenario === "wrong_run" ? randomUUID() : runId,
+          providerStopped: true, actionOutcome: scenario === "unknown_outcome" ? "unknown" : "not_performed",
+          outcomeEvidence: "Isolated fixture proves provider stopped before actions were performed.",
+        }, ...(scenario === "replay_blocked" ? { automaticRecovery: { replay: "blocked" } } : {}) },
+      });
+      await db.update(agentWakeupRequests).set({ payload: {
+        issueId, executionWait: { recoveryActionId: actionId, runId },
+      } }).where(eq(agentWakeupRequests.id, wakeId));
+      let drained = false;
+      const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+      await adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async () => {
+        drained = true;
+        return { outcome: { kind: "released" as const }, postCommitEffects: [] };
+      });
+      expect(drained).toBe(scenario === "exact");
+      expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0].status)
+        .toBe("deferred_issue_execution");
+      if (scenario === "exact") {
+        const release = createReleaseIssueExecution({ issueLock: adapter,
+          recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
+        });
+        expect((await release({ companyId, runId, now: new Date() })).outcome.kind).toBe("promoted");
+        const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId));
+        expect(wake.runId).not.toBeNull();
+        expect(wake.status).not.toBe("deferred_issue_execution");
+        await release({ companyId, runId, now: new Date() });
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(2);
+      }
+    },
+  );
+
   it("leaves deferred work untouched until the effective execution hold clears", async () => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });

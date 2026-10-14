@@ -20,6 +20,7 @@ import {
 } from "@paperclipai/db";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { legacyExecutionNeedsReconciliation } from "../../../services/legacy-execution-recovery.js";
+import { permitsReconciledRelease } from "../domain/reconciled-release.js";
 import {
   authorizeFailedChatRunRetryWake,
   FailedChatRunRetryAuthorizationError,
@@ -1096,6 +1097,20 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
               sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
             )).limit(1)
           : [];
+        let requiresReconciliation = legacyExecutionNeedsReconciliation(run);
+        if (requiresReconciliation && issueRow?.assigneeAgentId === run.agentId) {
+          const resolved = await tx.select().from(issueRecoveryActions).where(and(
+            eq(issueRecoveryActions.companyId, run.companyId),
+            eq(issueRecoveryActions.sourceIssueId, issueRow.id),
+            eq(issueRecoveryActions.returnOwnerAgentId, run.agentId),
+            eq(issueRecoveryActions.status, "resolved"),
+            sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+          ));
+          requiresReconciliation = !resolved.some(action => permitsReconciledRelease({
+            companyId: run.companyId, issueId: issueRow.id, agentId: run.agentId, runId: run.id,
+            workspaceRestoreFailure: run.resultJson?.workspaceRestoreFailure,
+          }, action));
+        }
         const preDrainFacts: PreDrainFacts = {
           issueRowPresent: issueRow !== null,
           executionRunIdMatchesRun: !issueRow || !issueRow.executionRunId || issueRow.executionRunId === run.id,
@@ -1104,7 +1119,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           issueStatus: issueRow?.status ?? "",
           hasAssigneeUser: Boolean(issueRow?.assigneeUserId),
           assigneeAgentMatchesRunAgent: issueRow?.assigneeAgentId === run.agentId,
-          legacyExecutionNeedsReconciliation: legacyExecutionNeedsReconciliation(run),
+          legacyExecutionNeedsReconciliation: requiresReconciliation,
           // An operator stop never promotes old queued work by itself. The
           // next explicit wake adopts those messages atomically when it
           // queues a run.

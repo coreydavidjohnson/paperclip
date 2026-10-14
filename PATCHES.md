@@ -152,3 +152,26 @@ into the current fork image or supplied by a fork migration.
   same fix and passing this regression.
 - Packaging must compile and copy server/dist/routes/issues.js; a fork pin
   alone cannot deliver this behavior through the current narrow overlay.
+
+
+## Exact reconciled deferred wake release (PER-286 / PER-270)
+
+- Corey requested the server root-cause repair and regression in PER-270.
+- The pinned release returns from wake-queue pre-drain for failed legacy runs
+  before consulting observed, exact-source reconciliation. Resolved status
+  alone is not sufficient: unknown outcomes and replay-blocked holds remain.
+- Add a company/issue/owner/run-scoped reconciliation guard at the queue's
+  transaction boundary. Keep pending/delegated outbox delivery as sole owner.
+  Existing successor, execution blocker, pause, invocation and Stop checks
+  are not bypassed. No schema, credential, grant or actor-label change.
+- Sources: wake-queue/adapters/postgres.ts; domain/reconciled-release.ts.
+- Tests: postgres.test.ts exact reconciliation and seven negative scenarios;
+  domain/reconciled-release.check.mjs is a dependency-free Node check.
+- Upstream review: v2026.1012.0 bba6a45f retains the conservative classifier.
+  Its new WithEvidence path exempts verified pre-dispatch review waits only
+  (9ae3d8db3), not reconciled failed legacy deferred wakes. Do not adopt that
+  unrelated review-wait change as permission to replay uncertain actions.
+- Remove when a released equivalent passes the same queue regressions.
+- Packaging must compile/copy both postgres.js and reconciled-release.js;
+  fork pin alone does not deliver these through the narrow homelab overlay.
+- This commit is a candidate, not a deployed or full-CI-verified repair.
