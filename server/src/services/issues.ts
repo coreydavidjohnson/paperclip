@@ -7409,7 +7409,7 @@ export function issueService(db: Db) {
             ORDER BY ${issues.id}
             FOR UPDATE`,
       );
-      const relatedIssues = await dbOrTx
+      const relatedIssues: Pick<typeof issues.$inferSelect, "id" | "parentId" | "originKind">[] = await dbOrTx
         .select({ id: issues.id, parentId: issues.parentId, originKind: issues.originKind })
         .from(issues)
         .where(

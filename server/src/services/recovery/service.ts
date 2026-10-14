@@ -1379,7 +1379,7 @@ export function recoveryService(
         eq(issueRelations.companyId, issue.companyId), eq(issueRelations.relatedIssueId, issue.id),
         eq(issueRelations.type, "blocks"), inArray(issueRelations.issueId, children.map(child => child.id)),
       )).returning({id: issueRelations.issueId});
-      if (removed.length) await logActivity(tx, {
+      if (removed.length) await logActivity(tx as unknown as Db, {
         companyId: issue.companyId, actorType: "system", actorId: "recovery", agentId: null,
         action: "issue.routing_child_blocker_removed", entityType: "issue", entityId: issue.id,
         details: {routingChildIds: removed.map(child => child.id)},
