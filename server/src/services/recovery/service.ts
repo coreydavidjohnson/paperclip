@@ -3159,6 +3159,11 @@ export function recoveryService(
     const sourceRun = input.latestRun?.id ? await db.select()
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.latestRun.id), eq(heartbeatRuns.companyId, input.issue.companyId)))
       .limit(1).then(rows => rows[0]) : null;
+    const routingParentHandback = Boolean(await db.select({id: issues.id}).from(issues).where(and(
+      eq(issues.companyId, input.issue.companyId), eq(issues.parentId, input.issue.id),
+      inArray(issues.originKind, ["routing_child", "coordination_child"]),
+    )).limit(1).then(rows => rows[0]));
+    const wakeReason = routingParentHandback ? "issue_blockers_resolved" : ISSUE_DISPOSITION_REPAIR_RETRY_REASON;
     const timing = dispositionRepairDelayMs(input.attempt, input.fingerprint);
     const now = new Date();
     const retryAt = new Date(now.getTime() + timing.delayMs);
@@ -3167,7 +3172,8 @@ export function recoveryService(
       {
         issueId: input.issue.id,
         taskId: input.issue.id,
-        wakeReason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
+        wakeReason,
+        ...(routingParentHandback ? {routingParentHandback: true} : {}),
         retryReason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
         source: "issue.deliberate_wait_disposition_repair",
         executionRetryAccounting: executionRetryAccounting(sourceRun ?? {}),
@@ -3213,11 +3219,12 @@ export function recoveryService(
           const enqueuedRun = await deps.enqueueWakeup(agentId, {
             source: "automation",
             triggerDetail: "system",
-            reason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
+            reason: wakeReason,
             idempotencyKey,
             payload: withRecoveryContext(
               {
                 issueId: input.issue.id,
+                ...(routingParentHandback ? {routingParentHandback: true} : {}),
                 retryOfRunId: input.latestRun?.id ?? null,
                 recoveryActionId: input.action.id,
                 dispositionRepairFingerprint: input.fingerprint,
