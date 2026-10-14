@@ -8,10 +8,11 @@ import { agentApiKeys, companyMemberships, instanceUserRoles } from "@paperclipa
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
-import { subscribeCompanyLiveEvents } from "../services/live-events.js";
+import { subscribeCompanyUiLiveEvents, subscribeGlobalUiLiveEvents, subscribeLiveEventTransportState, isLiveEventTransportReady } from "../services/live-events.js";
 
 interface WsSocket {
   readyState: number;
+  bufferedAmount: number;
   ping(): void;
   send(data: string): void;
   terminate(): void;
@@ -22,6 +23,7 @@ interface WsSocket {
 }
 
 interface WsServer {
+  close(): void;
   clients: Set<WsSocket>;
   on(event: "connection", listener: (socket: WsSocket, req: IncomingMessage) => void): void;
   on(event: "close", listener: () => void): void;
@@ -260,10 +262,17 @@ export function setupLiveEventsWebSocketServer(
       return;
     }
 
-    const unsubscribe = subscribeCompanyLiveEvents(context.companyId, (event) => {
+    const send = (event: import("@paperclipai/shared").LiveEvent) => {
       if (socket.readyState !== WebSocket.OPEN) return;
+      if (socket.bufferedAmount > 1024 * 1024) {
+        socket.terminate(); // Slow readers reconnect/refetch rather than grow an unbounded queue.
+        return;
+      }
       socket.send(JSON.stringify(event));
-    });
+    };
+    const companyCleanup = subscribeCompanyUiLiveEvents(context.companyId, send);
+    const globalCleanup = subscribeGlobalUiLiveEvents(send);
+    const unsubscribe = () => { companyCleanup(); globalCleanup(); };
 
     cleanupByClient.set(socket, unsubscribe);
     aliveByClient.set(socket, true);
@@ -284,7 +293,14 @@ export function setupLiveEventsWebSocketServer(
     });
   });
 
+  const stateCleanup = subscribeLiveEventTransportState(ready => {
+    if (!ready) for (const socket of wss.clients) socket.close(1013, "live events resync");
+  });
+
   wss.on("close", () => {
+    stateCleanup();
+    for (const cleanup of cleanupByClient.values()) cleanup();
+    cleanupByClient.clear();
     clearInterval(pingInterval);
   });
 
@@ -311,8 +327,13 @@ export function setupLiveEventsWebSocketServer(
 
     const url = new URL(req.url, "http://localhost");
     const companyId = parseCompanyId(url.pathname);
-    if (!companyId) {
+    if (!companyId || companyId === "*") {
       closeUpgradeSocket(socket);
+      return;
+    }
+
+    if (!isLiveEventTransportReady()) {
+      rejectUpgrade(socket, "503 Service Unavailable", "live events unavailable");
       return;
     }
 
@@ -322,6 +343,10 @@ export function setupLiveEventsWebSocketServer(
       resolveCloudActor: opts.resolveCloudActor,
     })
       .then((context) => {
+        if (!isLiveEventTransportReady()) {
+          rejectUpgrade(socket, "503 Service Unavailable", "live events unavailable");
+          return;
+        }
         if (!context) {
           rejectUpgrade(socket, "403 Forbidden", "forbidden");
           return;
@@ -344,6 +369,11 @@ export function setupLiveEventsWebSocketServer(
         logger.error({ err, path: req.url }, "failed websocket upgrade authorization");
         rejectUpgrade(socket, "500 Internal Server Error", "upgrade failed");
       });
+  });
+
+  server.once("close", () => {
+    for (const socket of wss.clients) socket.terminate();
+    wss.close();
   });
 
   return wss;
