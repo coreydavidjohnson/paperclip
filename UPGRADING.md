@@ -79,3 +79,11 @@ performance repairs. Do not infer origins from shallow-boundary blame.
 Released equivalent source, preserved contracts and comparable measurements
 are retirement evidence; closed proposals or master-only code are not enough.
 The PER-289 review is after deployment, not retroactive release approval.
+
+PER-358's execution-run-context candidate is prepared but not deployed. Its
+PATCHES.md entry records SQL-only equivalence/performance and unfinished exact
+API/render acceptance. Do not mistake a task-branch SHA for image provenance;
+compile and copy both execution-projection and execution-run-context together
+and retain the embedded database/tenant tests. Broad tsc previously OOMKilled
+both BuildKit lanes; a 1536 MiB Node heap passed the focused verification.
+The lasting source-owned build limit and repeated canaries belong to PER-377.
