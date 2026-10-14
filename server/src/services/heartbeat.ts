@@ -27,7 +27,7 @@ import { getConversationConfirmationContext, type ConversationConfirmationContex
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { isControllerDraining } from "../controller-drain.js";
-import { saveOmnigentDispatchReceipt, claimOmnigentAttachment, releaseOmnigentAttachment } from "./omnigent-attachment.js";
+import { saveOmnigentDispatchReceipt, claimOmnigentAttachment, releaseOmnigentAttachment, loadOwnedOmnigentObservation, finalizeOwnedOmnigentObservation } from "./omnigent-attachment.js";
 import { admitAgentRun } from "./run-admission.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
@@ -20386,6 +20386,78 @@ export function heartbeatService(
       const selectedAdapter = claimedAdapterType(run);
       if (selectedAdapter && selectedAdapter !== agent.adapterType) {
         throw new Error("Agent adapter changed during startup; start a new turn with the updated agent.");
+      }
+
+      if (runOptions.legacyOmnigentResume) {
+        // Existing provider work needs no new identity, prompt, workspace,
+        // session resolution, tools, token or dispatch-authority envelope.
+        legacyOwnershipHeld = true;
+        let receipt = await loadOwnedOmnigentObservation(db, run);
+        if (!receipt || selectedAdapter !== "omnigent" || agent.adapterType !== "omnigent") return;
+        const issueId = readNonEmptyString(run.contextSnapshot?.issueId);
+        const assertObservation = async () => {
+          await controllerLease.assertOwned();
+          if (!await loadOwnedOmnigentObservation(db, run)) {
+            executionControl.controller.abort(new Error("Legacy controller lease lost"));
+            executionControl.controller.signal.throwIfAborted();
+          }
+        };
+        const result = await getServerAdapter("omnigent").execute({
+          runId: run.id, agent, config: { ...parseObject(agent.adapterConfig), timeoutSec: 0 },
+          runtime: { taskKey: issueId, sessionId: receipt.omnigentSessionId as string,
+            sessionDisplayId: receipt.omnigentSessionId as string,
+            sessionParams: { omnigentSessionId: receipt.omnigentSessionId } },
+          context: { issueId, taskId: issueId, wakeReason: "paperclip_rollout_resume",
+            omnigentObservationOnly: true, omnigentDispatchReceipt: receipt },
+          executionContinuation: null, signal: executionControl.controller.signal,
+          onLog: async (stream, chunk) => {
+            await appendRunEvent(run, { eventType: "log", stream, level: "info", message: chunk });
+          },
+          onMeta: async meta => {
+            const next = parseObject((meta as unknown as { context?: Record<string, unknown> }).context).omnigentDispatchReceipt;
+            if (next) {
+              await assertObservation();
+              await saveOmnigentDispatchReceipt(db, run, next);
+              receipt = next as Record<string, unknown>;
+            }
+          },
+          onCancellationReady: async () => {
+            await registerAdapterExecutionControl(run.id, executionControl);
+            const current = await getRun(run.id);
+            if (!current || isHeartbeatRunTerminalStatus(current.status)) {
+              executionControl.controller.abort(new Error("Run stopped before observer readiness"));
+            }
+          },
+        });
+        // Stop owns cancellation settlement; unavailable evidence grants no
+        // terminalization, replacement or replay authority.
+        if (executionControl.controller.signal.aborted || result.errorCode === "omnigent_controller_detached" ||
+            ["omnigent_recovery_evidence_missing", "omnigent_unreachable", "omnigent_adapter_error",
+             "omnigent_auth_failed", "omnigent_not_found", "omnigent_upstream_error"].includes(result.errorCode ?? "")) return;
+        await assertObservation();
+        const status = (result.exitCode ?? 0) === 0 && !result.errorMessage && !result.signal ? "succeeded" : "failed";
+        const finalized = await finalizeOwnedOmnigentObservation(db, run, receipt, status, {
+          finishedAt: new Date(), exitCode: result.exitCode, signal: result.signal,
+          error: result.errorMessage ?? null, errorCode: result.errorCode ?? null,
+          resultJson: mergeHeartbeatRunResultJson(parseObject(result.resultJson), result.summary ?? null),
+          sessionIdAfter: receipt.omnigentSessionId as string, executionStatusDeliveryId: randomUUID(),
+        });
+        if (!finalized) return;
+        legacyOwnershipHeld = false;
+        publishLiveEvent({ companyId: run.companyId, type: "heartbeat.run.status",
+          payload: buildHeartbeatRunStatusLiveEventPayload(finalized) });
+        publishRunLifecyclePluginEvent(finalized);
+        emitTerminalAgentTaskRun(finalized, "running");
+        await setWakeupStatus(run.wakeupRequestId, status === "succeeded" ? "completed" : "failed", { finishedAt: new Date() });
+        await appendRunEvent(finalized, { eventType: "lifecycle", stream: "system", level: "info", message: `run ${status}` });
+        await updateRuntimeState(agent, finalized, result, { legacySessionId: receipt.omnigentSessionId as string });
+        await finalizeIssueCommentPolicy(finalized, agent);
+        await releaseIssueExecutionAndPromote(finalized, { suppressImmediateRecovery: true });
+        await finalizeAgentStatus(agent.id, status, result.errorMessage);
+        if (issueId && status === "succeeded") await recovery.reconcileResolvedDependencyWakeBackstop({
+          runId: run.id, companyId: run.companyId, blockerIssueId: issueId, source: "workspace.finalize",
+        });
+        return;
       }
 
       const dispatchIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);

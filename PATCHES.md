@@ -321,3 +321,20 @@ into the current fork image or supplied by a fork migration.
   same fix and passing this regression.
 - Packaging must compile and copy server/dist/routes/issues.js; a fork pin
   alone cannot deliver this behavior through the current narrow overlay.
+
+## PER282 admitted-turn observation after issue completion
+
+- Source: saved fork 5eb12cd3ae6016b4ac8a002c6a029f8eb2a04a61.
+- Actual-image handover rebuilt dispatch authority and rejected the done issue
+  before observing the existing provider turn.
+- Recovery now enters server-owned receipt/boot-lease-bound observation before
+  dispatch identity/context/workspace preparation. No prompt, token, tools or
+  new continuation envelope. Terminal CAS fences receipt, company/agent/run,
+  live boot lease and current non-cancelled task ownership.
+- Ordinary buildExecutionContinuation and new-dispatch guards are unchanged.
+  Stop, reassignment, receipt mismatch and expired/foreign lease fail closed.
+- Regression: services/omnigent-observation.test.ts and actual-image full-app
+  done-before-finish fixture. Home-owned adapter skips label/approval writes
+  during observation and verifies original turn identity.
+- Retirement: drop when upstream supplies equivalently fenced admitted-turn
+  observation/finalization; never relax the new-dispatch security guard.

@@ -1,5 +1,5 @@
 import { and, eq, gt, lte, sql } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
 type Run = typeof heartbeatRuns.$inferSelect;
 
@@ -48,4 +48,44 @@ export async function releaseOmnigentAttachment(db: Db, run: Run) {
     executionStage: "awaiting_external_evidence", controllerLeaseExpiresAt: sql`clock_timestamp()`,
   }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, legacyControllerBootId)));
+}
+
+/** Already admitted work is observed, not dispatched. Never trust wake context. */
+export async function loadOwnedOmnigentObservation(db: Db, run: Pick<Run, "id" | "companyId" | "agentId">) {
+  const [owned] = await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+    eq(heartbeatRuns.agentId, run.agentId), eq(heartbeatRuns.status, "running"),
+    eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+    gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
+    sql`${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'omnigent'`,
+  ));
+  if (!owned || !validOmnigentReceipt(owned, owned.resultJson?.omnigentDispatchReceipt)) return null;
+  const issueId = owned.contextSnapshot?.issueId;
+  if (typeof issueId === "string") {
+    const [issue] = await db.select().from(issues).where(and(
+      eq(issues.companyId, owned.companyId), eq(issues.id, issueId),
+      eq(issues.assigneeAgentId, owned.agentId), sql`${issues.status} != 'cancelled'`,
+    ));
+    if (!issue) return null;
+  }
+  return owned.resultJson!.omnigentDispatchReceipt as Record<string, unknown>;
+}
+
+/** Exact receipt and live boot lease fence the terminal CAS; Stop wins. */
+export async function finalizeOwnedOmnigentObservation(db: Db, run: Run, receipt: Record<string, unknown>,
+  status: string, patch: Partial<typeof heartbeatRuns.$inferInsert>) {
+  if (!validOmnigentReceipt(run, receipt)) return null;
+  const issueId = run.contextSnapshot?.issueId;
+  const [saved] = await db.update(heartbeatRuns).set({ ...patch, status,
+    resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify(patch.resultJson ?? {})}::jsonb`,
+    updatedAt: new Date(),
+  }).where(and(
+    eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
+    eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"),
+    eq(heartbeatRuns.controllerBootId, legacyControllerBootId), gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
+    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt' = ${JSON.stringify(receipt)}::jsonb`,
+    typeof issueId === "string" ? sql`exists (select 1 from ${issues} where ${issues.id} = ${issueId}
+      and ${issues.companyId} = ${run.companyId} and ${issues.assigneeAgentId} = ${run.agentId} and ${issues.status} != 'cancelled')` : undefined,
+  )).returning();
+  return saved ?? null;
 }
