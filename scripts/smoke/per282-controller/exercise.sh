@@ -24,7 +24,7 @@ k 'wait --for=condition=Ready pod --all --timeout=180s'
 DB=$(k 'get pod database -o jsonpath={.status.podIP}')
 A=$(k 'get pod controller-a -o jsonpath={.status.podIP}')
 B=$(k 'get pod controller-b -o jsonpath={.status.podIP}')
-tar -czf "$TMP/overlay.tgz" -C "$ROOT"  server/src/controller-drain.ts server/src/controller-drain.test.ts  server/src/services/run-admission.ts server/src/services/heartbeat.ts  server/src/services/run-history-query.ts server/src/index.ts server/src/shutdown.ts  server/src/routes/health.ts server/src/services/native-runtime/native-review-dispatch.ts  server/src/__tests__/fixtures/controller-worker.ts  server/src/__tests__/fixtures/controller-exercise.ts  server/src/__tests__/fixtures/controller-faults.ts
+tar -czf "$TMP/overlay.tgz" -C "$ROOT"  server/src/services/legacy-controller-lease.ts server/src/services/omnigent-attachment.ts server/src/controller-drain.ts server/src/controller-drain.test.ts  server/src/services/run-admission.ts server/src/services/heartbeat.ts  server/src/services/run-history-query.ts server/src/index.ts server/src/shutdown.ts  server/src/routes/health.ts server/src/services/native-runtime/native-review-dispatch.ts  server/src/__tests__/fixtures/controller-worker.ts  server/src/__tests__/fixtures/controller-exercise.ts  server/src/__tests__/fixtures/controller-faults.ts
 for pod in controller-a controller-b; do k "exec -i $pod -- tar -xzf - -C /app" < "$TMP/overlay.tgz"; done
 k 'exec -i controller-a -- sh' <<EOF2
 cd /app/server

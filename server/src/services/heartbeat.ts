@@ -27,6 +27,7 @@ import { getConversationConfirmationContext, type ConversationConfirmationContex
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { isControllerDraining } from "../controller-drain.js";
+import { saveOmnigentDispatchReceipt, claimOmnigentAttachment, releaseOmnigentAttachment } from "./omnigent-attachment.js";
 import { admitAgentRun } from "./run-admission.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
@@ -19251,13 +19252,20 @@ export function heartbeatService(
       if (await hasLiveLegacyController(db, run)) continue;
       const dispatchedAdapterType = readNonEmptyString(parseObject(parseObject(run.runnerProfileJson).adapterDispatch).adapterType) ?? adapterType;
       if (run.runtimeMode === "legacy" && dispatchedAdapterType === "omnigent" &&
-          ["dispatching", "awaiting_external_evidence"].includes(run.executionStage ?? "")) {
+          ["dispatching", "external_attached", "awaiting_external_evidence"].includes(run.executionStage ?? "")) {
         // A dead controller is not a stopped OmniGenT response. Keep the exact
         // run/issue/session binding and concurrency slot; never replay tools.
-        await db.update(heartbeatRuns).set({ executionStage: "awaiting_external_evidence" })
-          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-            eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, run.controllerBootId!),
-            lte(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`)));
+        if (!isControllerDraining() && await claimOmnigentAttachment(db, run)) {
+          const execution = executeRun(run.id, { legacyOmnigentResume: true })
+            .catch(err => logger.error({ err, runId: run.id }, "OmniGenT same-run attachment failed"));
+          activeRunExecutionPromises.add(execution);
+          void execution.finally(() => activeRunExecutionPromises.delete(execution));
+        } else {
+          await db.update(heartbeatRuns).set({ executionStage: "awaiting_external_evidence" })
+            .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+              eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, run.controllerBootId!),
+              lte(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`)));
+        }
         continue;
       }
 
@@ -20105,6 +20113,25 @@ export function heartbeatService(
   // closes that window: once it settles, any run it dispatched is already in
   // activeRunExecutionPromises, and the second await drains that run. A wakeup or
   // a run can add more entries as it settles, so loop until both sets are empty.
+  async function checkpointOmnigentRunsForShutdown() {
+    const owned = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"),
+      eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+    ));
+    const detached: typeof owned = [];
+    for (const run of owned) {
+      if (!parseObject(run.resultJson).omnigentDispatchReceipt) continue;
+      const control = adapterExecutionControls.get(run.id);
+      if (!control) continue;
+      control.controller.abort(new Error("Legacy controller lease lost"));
+      detached.push(run);
+    }
+    // Settle exact executors before handing off. HTTP and DB remain available.
+    await drainActiveRunExecutions();
+    for (const run of detached) await releaseOmnigentAttachment(db, run);
+    return { checkpointedRunIds: detached.map(run => run.id) };
+  }
+
   async function drainActiveRunExecutions() {
     for (const timer of nativeSessionResumeDispatchTimers.values()) {
       clearTimeout(timer);
@@ -20185,6 +20212,7 @@ export function heartbeatService(
     runId: string,
     runOptions: {
       nativeLeaseOwner?: string;
+      legacyOmnigentResume?: boolean;
       nativeRestartRecovery?: NativeRestartRecoveryClaim;
     } = {},
   ) {
@@ -23313,6 +23341,11 @@ export function heartbeatService(
           }
         }
         const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
+          const receipt = parseObject((meta as unknown as { context?: Record<string, unknown> }).context).omnigentDispatchReceipt;
+          if (agent.adapterType === "omnigent" && receipt) {
+            await controllerLease.assertOwned();
+            await saveOmnigentDispatchReceipt(db, run, receipt);
+          }
           if (meta.env && secretKeys.size > 0) {
             for (const key of secretKeys) {
               if (key in meta.env) meta.env[key] = "***REDACTED***";
@@ -24711,6 +24744,10 @@ export function heartbeatService(
             // heartbeat run snapshot.
             const adapterContext: Record<string, unknown> = {
               ...context,
+              ...(runOptions.legacyOmnigentResume ? {
+                wakeReason: "paperclip_rollout_resume",
+                omnigentDispatchReceipt: parseObject(run.resultJson).omnigentDispatchReceipt,
+              } : {}),
               ...(legacyQuestionResponse
                 ? {
                     [PAPERCLIP_WAKE_PAYLOAD_KEY]: {
@@ -24853,8 +24890,14 @@ export function heartbeatService(
               );
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
+            if (!executionControl.controller.signal.aborted) await controllerLease.assertOwned();
             // Lease loss is detachment, not a provider failure or cancellation.
             // OmniGenT preserves its external turn; no cleanup/retry is authorized.
+            if (agent.adapterType === "omnigent" && (adapterResult.errorCode === "omnigent_controller_detached" ||
+                (runOptions.legacyOmnigentResume && ["omnigent_recovery_evidence_missing", "omnigent_unreachable", "omnigent_adapter_error", "omnigent_auth_failed", "omnigent_not_found", "omnigent_upstream_error"].includes(adapterResult.errorCode ?? "")))) {
+              legacyOwnershipHeld = true;
+              return;
+            }
             if (agent.adapterType === "omnigent" && executionControl.controller.signal.aborted &&
                 executionControl.controller.signal.reason instanceof Error &&
                 executionControl.controller.signal.reason.message === "Legacy controller lease lost") {
@@ -26161,6 +26204,10 @@ export function heartbeatService(
         });
       }
     } catch (outerErr) {
+      if (runOptions.legacyOmnigentResume && parseObject(run.resultJson).omnigentDispatchReceipt) {
+        legacyOwnershipHeld = true;
+        logger.warn({ err: outerErr, runId: run.id }, "OmniGenT attachment deferred; original provider turn retained");
+      }
       if (legacyOwnershipHeld) {
         // Retained external ownership is deliberately not terminalized.
       } else if (
@@ -26599,6 +26646,9 @@ export function heartbeatService(
         }
       } finally {
         controllerLease.stop();
+        if (legacyOwnershipHeld) await releaseOmnigentAttachment(db, run).catch(err => {
+          logger.warn({ err, runId: run.id }, "attachment release deferred to lease expiry");
+        });
         activeRunExecutions.delete(run.id);
         // A failed owned Stop remains visible until this exact executor settles,
         // including a graceful exit result arriving after the cancellation error.
@@ -30097,6 +30147,7 @@ export function heartbeatService(
     resolveSchedulingSuppression: getSchedulingSuppression,
     drainRunningRunsForShutdown,
     drainActiveRunExecutions,
+    checkpointOmnigentRunsForShutdown,
     startTaskDrain,
     stopTaskDrain,
     getTaskDrainStatus,
