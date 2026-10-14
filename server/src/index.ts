@@ -1958,7 +1958,8 @@ async function startServerWithDatabaseTeardown(
     });
     if (completed === "timed_out") {
       logger.warn({ signal }, "controller drain deadline reached; unfinished runs retained, no replacement dispatched");
-      if (exitProcess) await new Promise<never>(() => {});      throw new Error("controller_shutdown_not_settled");
+      if (exitProcess) await new Promise<never>(() => {});
+      throw new Error("controller_shutdown_not_settled");
     }
     const telemetryClient = getTelemetryClient();
     if (telemetryClient) { telemetryClient.stop(); await telemetryClient.flush(); }
