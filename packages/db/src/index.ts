@@ -1,3 +1,5 @@
+// Reuse the installed driver for dedicated ephemeral LISTEN/NOTIFY connections.
+export { default as postgres } from "postgres";
 export {
   createDb,
   withDedicatedDbConnection,
