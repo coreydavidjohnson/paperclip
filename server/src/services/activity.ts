@@ -1,4 +1,4 @@
-import { issueRunIdsCondition } from "./run-history-query.js";
+import { issueRunIdsCondition, issueRunContextColumns, issueRunContextJoin } from "./run-history-query.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -406,12 +406,10 @@ export function activityService(db: Db) {
           continuationAttempt: heartbeatRuns.continuationAttempt,
           lastUsefulActionAt: heartbeatRuns.lastUsefulActionAt,
           nextAction: heartbeatRuns.nextAction,
-          wakeCommentIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds'`,
-          wakeCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`,
-          contextCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'commentId'`,
-          contextIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
+          ...issueRunContextColumns,
         })
         .from(heartbeatRuns)
+        .leftJoin(issueRunContextJoin, sql`true`)
         .innerJoin(
           agents,
           and(

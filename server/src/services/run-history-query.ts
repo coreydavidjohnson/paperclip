@@ -33,3 +33,17 @@ export const runListContextColumns = {
   contextWakeSource: sql<string | null>`run_list_context."wakeSource"`.as("contextWakeSource"),
   contextWakeTriggerDetail: sql<string | null>`run_list_context."wakeTriggerDetail"`.as("contextWakeTriggerDetail"),
 } as const;
+
+// Preserve -> JSON and ->> text types while decoding issue-run context once.
+export const issueRunContextJoin = sql`lateral jsonb_to_record(
+  case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+    then ${heartbeatRuns.contextSnapshot} end
+) as issue_run_context(
+  "wakeCommentIds" jsonb, "wakeCommentId" text, "commentId" text, "issueId" text
+)`;
+export const issueRunContextColumns = {
+  wakeCommentIds: sql<string[] | null>`issue_run_context."wakeCommentIds"`,
+  wakeCommentId: sql<string | null>`issue_run_context."wakeCommentId"`,
+  contextCommentId: sql<string | null>`issue_run_context."commentId"`,
+  contextIssueId: sql<string | null>`issue_run_context."issueId"`,
+} as const;
