@@ -198,3 +198,22 @@ into the current fork image or supplied by a fork migration.
   or replay; no cross-restart total ID ordering. Internal plugin session
   observers stay origin-local. Full fork/image/exact-SHA acceptance remains
   the parent acceptance lane, not this focused transport exercise.
+
+### PER282 follow-up: dedicated-session isolation and fault receipts
+
+- Checked upstream master `3e8e1efb84d3c9dbf438bf6d0a68eec1873c6539` before
+  this correction: upstream live-events remains process-local; no transport
+  replacement exists there.
+- Remove postgres.js parsed-options `shared` sentinel when cloning resolved
+  client options. Otherwise its parser returns the options unchanged and
+  mutable retry/type state leaks between the DB pool and event session.
+  Retain password callback, TLS, host/port arrays, target-session selection
+  and startup parameters; bound the dedicated session pipeline to one.
+- Enforce the WebSocket 1MiB ceiling *including* the pending frame and its
+  maximum protocol header, not only the already-buffered bytes.
+- Add real idle TCP-blackhole, paused native reader, pending-startup cleanup
+  and driver-option/stale-epoch regression tests. Parent API unchanged.
+- Verified parent controller/readiness overlay `002c2b5`: actual health 503
+  and websocket fences passed; integrated server typecheck exit 0. Focused
+  server 24 tests, UI 61 tests and token gates passed. See
+  `scripts/smoke/per282-events/README.md` for fixture scope and receipts.

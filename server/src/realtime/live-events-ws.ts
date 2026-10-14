@@ -264,11 +264,12 @@ export function setupLiveEventsWebSocketServer(
 
     const send = (event: import("@paperclipai/shared").LiveEvent) => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      if (socket.bufferedAmount > 1024 * 1024) {
+      const raw = JSON.stringify(event);
+      if (socket.bufferedAmount + Buffer.byteLength(raw) + 14 > 1024 * 1024) {
         socket.terminate(); // Slow readers reconnect/refetch rather than grow an unbounded queue.
         return;
       }
-      socket.send(JSON.stringify(event));
+      socket.send(raw);
     };
     const companyCleanup = subscribeCompanyUiLiveEvents(context.companyId, send);
     const globalCleanup = subscribeGlobalUiLiveEvents(send);
