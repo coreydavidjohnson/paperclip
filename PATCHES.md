@@ -434,3 +434,40 @@ into the current fork image or supplied by a fork migration.
   during observation and verifies original turn identity.
 - Retirement: drop when upstream supplies equivalently fenced admitted-turn
   observation/finalization; never relax the new-dispatch security guard.
+
+## Keep wake admission on one database connection (PER-506)
+
+- Upstream evidence: `v2026.1012.0` (`bba6a45f0d364cfd962ac59b3bdf2426a8222adb`)
+  and inspected master `ebceb2a744654822370e6995cea2468a2d14d1b8` still await
+  prior-session workspace resolution inside issue admission (master moved it
+  to `server/src/services/heartbeat/queue.ts`). The last 40 master commits were
+  searched for pool/starvation/workspace/wake changes; no released equivalent
+  was found. Author intent is unverified.
+- Why: each admission can reserve a pool connection, then ask the outer pool
+  for a task-session or responsible-user read; enough admissions exhaust the
+  pool and prevent readiness and delivery from progressing. Filesystem checks
+  also retain the issue lock while slow storage responds.
+- Change: resolve read-only prior-session workspace preflight before admission;
+  thread the reserved transaction through responsible-user, routine, parent,
+  comment and company-default reads. Existing callers retain their defaults.
+  Transactional tenant/lock/authority/dependency/finalization/receipt checks
+  and post-commit dispatch remain in place. No pool/concurrency cap, dependency,
+  schema, deployment or reconnect-policy change.
+- Audit: queued-comment validation, chat retry authorization (outer `db` is only
+  an authority-registry key), execution blockers, stale retry cancellation,
+  dependency/finalization readiness, wake-queue admission, daily caps and
+  activity persistence use the supplied transaction. Explicit user native
+  cleanup retains its existing fail-closed stop-proof checks, including a
+  dynamic module load and synchronous durable-state reads; this patch does
+  not relax cleanup or automatically replay unknown actions.
+- Files: `server/src/services/heartbeat.ts`,
+  `server/src/__tests__/heartbeat-wake-pool-starvation.test.ts`, `PATCHES.md`.
+- Regression: `pnpm --filter @paperclipai/server exec vitest run
+  src/__tests__/heartbeat-wake-pool-starvation.test.ts`. A disposable embedded
+  Postgres pool of one makes the nested acquisition deterministic; a gated
+  real filesystem stat checks real `/ready` responsiveness, followed by
+  same-dependency revalidation, retry admission, a four-waiter burst,
+  durable deferral and successful admitted-run completion.
+  The fixture never connects to production; teardown closes fixture clients.
+- Removal: a released upstream equivalent preserves all admission and delivery
+  contracts and passes the constrained-pool regression.
