@@ -260,6 +260,13 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.runs()).toHaveLength(2);
     expect((await f.actions())[0]).toMatchObject({ ownerType: "agent", attemptCount: 1 });
   });
+  it("PER-404 retains a named credential unblock action", async () => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: { owner: { agentId: f.agentId }, action: "Obtain the required credential through its approved owner" } }).where(eq(issues.id, f.issueId));
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
   it("PER-404 retains an unresolved blocker while the source is blocked", async () => {
     const f = await fixture();
     const blockerId = randomUUID();
