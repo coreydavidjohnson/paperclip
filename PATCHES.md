@@ -434,3 +434,27 @@ into the current fork image or supplied by a fork migration.
   during observation and verifies original turn identity.
 - Retirement: drop when upstream supplies equivalently fenced admitted-turn
   observation/finalization; never relax the new-dispatch security guard.
+
+## Restored recovery history and late disposition evidence (PER-422)
+
+- Cause: restored wakes reference already settled actions, but the native read
+  endpoint returned only active actions. A source update can also settle recovery
+  before its repair turn writes the final note.
+- Files: server/src/routes/issues.ts and issue-recovery-actions.test.ts. No schema,
+  grant, ownership, scheduler or migration changes.
+- Contract: return at most 50 company/source-scoped records, `hasMore`, or one
+  exact UUID via `actionId`; `active` retains active-only semantics. Native read
+  permissions remain intact. Missing or foreign exact IDs return not found.
+- Board-only late notes for settled deliberate_wait_without_target actions must
+  match current source status, with no newer active action. Append previous notes,
+  deduplicate retries and audit; preserve resolution outcome/timestamps and never
+  mutate the source or enqueue another run. Existing execution-reconciliation
+  reopening and authorization gates remain unchanged.
+- Source tests: the new disposable embedded-Postgres fixture failed on baseline
+  with actions=[] after restore, then passed with note/source readback, retry
+  deduplication, newer-action guard and malformed/foreign action checks.
+- Upstream master at inspection still returns active plus only workspace restore
+  holds, not general settled disposition history. Retire once a released native
+  equivalent passes these regressions. No upstream communication is authorized.
+- Homelab Fork.Dockerfile must compile and ship routes/issues.js; otherwise a fork
+  pin alone does not deploy this repair. Add the recovery test to its gate.

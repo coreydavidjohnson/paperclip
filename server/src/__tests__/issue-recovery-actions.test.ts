@@ -2083,6 +2083,82 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(receipt!.evidence).toEqual(newerEvidence);
   });
 
+  it("bounds recovery history and never returns another source or company action", async () => {
+    const fixture = await seedCompany();
+    const other = await seedCompany();
+    const rows = Array.from({ length: 51 }, (_, index) => makeRecoveryActionRow({
+      companyId: fixture.companyId, sourceIssueId: fixture.sourceIssueId, ownerAgentId: fixture.coderId,
+      status: "resolved", outcome: "restored", fingerprint: `per422:history:${index}`,
+    }));
+    await db.insert(issueRecoveryActions).values(rows as any);
+    const foreign = makeRecoveryActionRow({ companyId: other.companyId, sourceIssueId: other.sourceIssueId, ownerAgentId: other.coderId,
+      status: "resolved", outcome: "restored", resolutionNote: "Other company evidence" });
+    await db.insert(issueRecoveryActions).values(foreign as any);
+    const app = createApp();
+    const history = await request(app).get(`/api/issues/${fixture.sourceIssueId}/recovery-actions`).expect(200);
+    expect(history.body.active).toBeNull();
+    expect(history.body.actions).toHaveLength(50);
+    expect(history.body.hasMore).toBe(true);
+    expect(history.body.actions.every((row: any) => row.companyId === fixture.companyId && row.sourceIssueId === fixture.sourceIssueId)).toBe(true);
+    await request(app).get(`/api/issues/${fixture.sourceIssueId}/recovery-actions`).query({ actionId: foreign.id }).expect(404);
+    await request(app).post(`/api/issues/${fixture.sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: foreign.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "Must not alter another company record.",
+    }).expect(404);
+  });
+
+  it("keeps restored wake actions discoverable and records a late disposition note without replay", async () => {
+    const { companyId, coderId, sourceIssueId, prefix } = await seedCompany();
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));
+    const service = issueRecoveryActionService(db);
+    const action = await service.upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "per422:fixture",
+      nextAction: "Repair the disposition.", wakePolicy: { type: "board_escalation" },
+    });
+    const wake = vi.fn(async () => null);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const originalNote = "Restored to the original owner for disposition repair.";
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: originalNote,
+    }).expect(200);
+    for (const ref of [sourceIssueId, `${prefix}-1`]) {
+      const history = await request(app).get(`/api/issues/${ref}/recovery-actions`).expect(200);
+      expect(history.body.active).toBeNull();
+      expect(history.body.actions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: action.id, status: "resolved", resolutionNote: originalNote }),
+      ]));
+      const exact = await request(app).get(`/api/issues/${ref}/recovery-actions`).query({ actionId: action.id }).expect(200);
+      expect(exact.body.actions.map((row: any) => row.id)).toEqual([action.id]);
+    }
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: {
+      owner: { agentId: coderId }, action: "Complete the separate prerequisite delivery task.",
+    }}).where(eq(issues.id, sourceIssueId));
+    const lateNote = "Source now waits for the prerequisite delivery task; no execution was repeated.";
+    const payload = { actionId: action.id, outcome: "blocked", sourceIssueStatus: "blocked", resolutionNote: lateNote };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(payload).expect(200);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(payload).expect(200);
+    const exact = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: action.id }).expect(200);
+    expect(exact.body.actions[0]).toMatchObject({
+      id: action.id, status: "resolved", outcome: "handed_back", resolutionNote: originalNote + String.fromCharCode(10, 10) + lateNote,
+    });
+    const source = await request(app).get(`/api/issues/${sourceIssueId}`).expect(200);
+    expect(source.body).toMatchObject({ status: "blocked", assigneeAgentId: coderId,
+      unblockDescriptor: { owner: { agentId: coderId } } });
+    expect(wake).toHaveBeenCalledTimes(1);
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(logs.filter(entry => entry.action === "issue.recovery_action_note_added")).toHaveLength(1);
+    await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: randomUUID() }).expect(404);
+    await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: "invalid" }).expect(400);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "New request must not change the source.",
+    }).expect(409);
+    const newer = await service.upsertSourceScoped({ companyId, sourceIssueId, kind: "missing_disposition",
+      cause: "successful_run_missing_issue_disposition", fingerprint: "per422:newer", nextAction: "Preserve this new action." });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ ...payload,
+      resolutionNote: "Must not write while a different recovery action is active." }).expect(409);
+    expect(await service.getActiveForIssue(companyId, sourceIssueId)).toMatchObject({ id: newer.id });
+  });
+
   it("resolves an active recovery action and removes it from active projections", async () => {
     const { companyId, managerId, sourceIssueId } = await seedCompany();
     const recoveryActionSvc = issueRecoveryActionService(db);
