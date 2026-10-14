@@ -176,7 +176,7 @@ into the current fork image or supplied by a fork migration.
 - Why: platform work uses the existing child-create route even outside the
   caller's report tree or beneath an open Home Lab-created ancestor. The MCP
   board bridge had a parent-ownership race and must not be deployed.
-- Contract: only authenticated standard agent-run JWTs can create a todo child
+- Contract: only authenticated standard agents with a bound running run can create a todo child
   for the unique active same-company Home Lab, from their own exact running
   parent run, with a native parent blocker. Admission is repeated under locks
   in the child-plus-blocker transaction, including cancellation and run identity.

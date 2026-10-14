@@ -20,7 +20,7 @@ export async function authorizeHomeLabChild(
   const [candidate] = await db.select().from(agents).where(eq(agents.id, body.assigneeAgentId));
   if (candidate?.name !== "Home Lab") return false;
   const deny = () => { throw forbidden("Home Lab delegation requires your active run, owned parent, todo child and parent blocker"); };
-  if (!actor.agentId || !actor.runId || !actor.companyId || actor.source !== "agent_jwt"
+  if (!actor.agentId || !actor.runId || !actor.companyId || !(["agent_jwt", "agent_key"].includes(actor.source ?? ""))
       || (actor.keyScope && actor.keyScope.kind !== "standard")
       || body.assigneeUserId || body.status !== "todo" || body.blockParentUntilDone !== true
       || (body.blockedByIssueIds?.length ?? 0) > 0) deny();
