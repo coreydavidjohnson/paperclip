@@ -262,7 +262,7 @@ describe("legacy continuation persisted authority", () => {
     expect(result.parentBlockerAdded).toBe(false);
     expect(result.issue.originKind).toBe(`${purpose}_child`);
     await expect(issueService(db).update(f.issueId, { blockedByIssueIds: [result.issue.id] }))
-      .rejects.toThrow("Routing or coordination children cannot block their parent");
+      .rejects.toMatchObject({status: 422, message: "Routing or coordination children cannot block their parent"});
   });
   it("routing-child: implementation child remains a blocker", async () => {
     const f = await fixture();
