@@ -133,3 +133,39 @@ into the current fork image or supplied by a fork migration.
   copy emitted JS. Base DB packages/migrations stay unchanged; lockfile
   equality mandatory. Remove when a released upstream equivalent passes
   these tests and comparable measurements, not when a proposal closes.
+
+## Controller admission and bounded completion drain (PER-282)
+
+- Authorized PER-282 task branch; based on exact production pin
+  1270c9f1e53f64e450f82cc977a11b16b2791c36. Not deployed.
+- Upstream inspected at master e0f30a4c7186498b71b2637f253b3399997dac7d
+  and supplied release v2026.1012.0 bba6a45f0d364cfd962ac59b3bdf2426a8222adb.
+  Upstream master still invokes interrupting heartbeat drain in signal shutdown;
+  its existing boot lease is reused rather than adding another leader lease.
+- Files: server/src/index.ts, shutdown.ts, controller-drain.ts,
+  routes/health.ts, services/heartbeat.ts, services/run-admission.ts,
+  services/native-runtime/native-review-dispatch.ts, controller-drain.test.ts,
+  __tests__/fixtures/controller-{worker,exercise,faults}.ts and
+  scripts/smoke/per282-controller/{exercise.sh,fixture.yaml,postgres.yaml,README.md}.
+  No DB migration, grant, secret, dependency/lockfile, production manifest, or
+  live-events.ts change.
+- Shared claim transaction uses PostgreSQL advisory agent fence plus running
+  count. All ordinary/comment/reviewer claim routes use it. Existing timer CAS,
+  routine claims and DB-clock boot leases stay authoritative. Shutdown prevents
+  scheduler/turn admission, waits boundedly for current work/finalizers without
+  operator cancellation, retains run-scoped HTTP access, and exits with bounded
+  teardown allowance. Readiness and loopback preStop share a one-way deadline.
+- Dispatched OmniGenT runs with expired ownership are retained on the original
+  run as awaiting_external_evidence; detachment skips terminalization and
+  environment release. This is preservation, NOT completed same-run recovery.
+- Exercise: unique disposable namespace, digest-pinned test images, separate
+  real controller processes and PostgreSQL, no mocks for controller/DB/process.
+  Tested simultaneous admission/timer claim, live-owner startup overlap, long
+  process completion, finalizer suppression, timeout, readiness/preStop,
+  locked renewal and unreachable DB. Tests/limits are described in the README.
+- Remaining gates: actual isolated OmniGenT long-turn checkpoint/reattachment,
+  production-router run token exercise across both API pods, full exact-SHA
+  typecheck/CI and immutable image integration. Never present seeded retention
+  or fixture shared-DB reads as provider/production API acceptance.
+- Remove when released upstream ships equivalent behavior and passes these
+  two-controller and actual provider recovery gates, not on proposal closure.

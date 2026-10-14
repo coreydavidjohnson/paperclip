@@ -26,6 +26,8 @@ import { AGENT_CHAT_DIRECTIVE, conversationReplay, isConversation, isConversatio
 import { getConversationConfirmationContext, type ConversationConfirmationContext } from "./conversation-confirmation-context.js";
 import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
+import { isControllerDraining } from "../controller-drain.js";
+import { admitAgentRun } from "./run-admission.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
@@ -9423,7 +9425,7 @@ export function resolveHeartbeatSchedulingSuppression(
   ) {
     return { suppressed: true, reason: "database_restore_in_progress" };
   }
-  if (readTaskDrain(new Date()) !== null) {
+  if (isControllerDraining() || readTaskDrain(new Date()) !== null) {
     return { suppressed: true, reason: "task_drain" };
   }
   return { suppressed: false, reason: null };
@@ -9487,6 +9489,7 @@ export function heartbeatService(
     return cachedWorktreeRunExecutionOverride;
   };
   const getSchedulingSuppression = async () => {
+    if (isControllerDraining()) return { suppressed: true as const, reason: "task_drain" as const };
     const override = await resolveWorktreeRunExecutionOverride();
     return resolveHeartbeatSchedulingSuppression(runtimeEnv, {
       allowWorktreeRunExecution: override.allowed,
@@ -17367,6 +17370,7 @@ export function heartbeatService(
       }
     }
 
+    const claimSlot = (tx: Db) => admitAgentRun(tx, run.companyId, run.agentId, parseHeartbeatPolicy(agent).maxConcurrentRuns);
     const claimedAt = new Date();
     const responsibleUserId = await resolveResponsibleUserIdForRun({
       run,
@@ -17501,6 +17505,8 @@ export function heartbeatService(
               ) {
                 return { kind: "stale" as const, run: null };
               }
+
+              if (!await claimSlot(tx as unknown as Db)) return { kind: "stale" as const, run: null };
 
               if (lockedRun.invocationSource === "automation") {
                 const admission = readChatControlRecoveryAdmission(lockedRun);
@@ -17778,9 +17784,11 @@ export function heartbeatService(
             return claimQueuedNativeReviewRun(tx, {
               run, claimedAt, claimValues,
               agentNameKey: normalizeAgentNameKey(agent.name),
+              admit: claimSlot,
             });
           }
           return tx.transaction(async (claimTx) => {
+            if (!await claimSlot(claimTx as unknown as Db)) return null;
             const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
             if (issueClaim.blocked) return null;
             const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
@@ -17886,10 +17894,16 @@ export function heartbeatService(
           status: "queued",
           startedAt: null,
           responsibleUserId: null,
+          controllerBootId: null,
+          controllerLeaseExpiresAt: null,
+          executionStage: null,
           updatedAt: now,
         })
         .where(
-          and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running")),
+          and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.status, "running"),
+            eq(heartbeatRuns.runtimeMode, "legacy"),
+            eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+            gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`)),
         )
         .returning()
         .then((rows) => rows[0] ?? null);
@@ -19235,6 +19249,17 @@ export function heartbeatService(
       if (resumedRunIds.has(run.id)) continue;
       if (locallyTracked) continue;
       if (await hasLiveLegacyController(db, run)) continue;
+      const dispatchedAdapterType = readNonEmptyString(parseObject(parseObject(run.runnerProfileJson).adapterDispatch).adapterType) ?? adapterType;
+      if (run.runtimeMode === "legacy" && dispatchedAdapterType === "omnigent" &&
+          ["dispatching", "awaiting_external_evidence"].includes(run.executionStage ?? "")) {
+        // A dead controller is not a stopped OmniGenT response. Keep the exact
+        // run/issue/session binding and concurrency slot; never replay tools.
+        await db.update(heartbeatRuns).set({ executionStage: "awaiting_external_evidence" })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+            eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, run.controllerBootId!),
+            lte(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`)));
+        continue;
+      }
 
       // Apply staleness threshold to avoid false positives
       if (staleThresholdMs > 0) {
@@ -19916,6 +19941,7 @@ export function heartbeatService(
     const rejectedClaims: Array<{ run: typeof heartbeatRuns.$inferSelect; err: HttpError }> = [];
 
     return withAgentStartLock(agentId, async () => {
+      if ((await getSchedulingSuppression()).suppressed) return [];
       const agent = await getAgent(agentId);
       if (!agent) return [];
       const invokability = await getAgentInvokability(agent);
@@ -20285,6 +20311,7 @@ export function heartbeatService(
       Parameters<typeof cleanupGitHubOperationLaunchers>[0] | null = null;
     let nativeSessionResumeScheduled = false;
     let nativeOwnershipHeld = false;
+    let legacyOwnershipHeld = false;
     let nativeInstructionReservation: Awaited<ReturnType<typeof reserveWarmNativeInstructionDirectory>> = null;
     let nativeDispatchStarted = false;
     let nativeWorkspaceFinalizeScheduled = false;
@@ -24826,6 +24853,14 @@ export function heartbeatService(
               );
             if (!guardedDispatch.dispatched) return;
             adapterResult = await guardedDispatch.resultPromise;
+            // Lease loss is detachment, not a provider failure or cancellation.
+            // OmniGenT preserves its external turn; no cleanup/retry is authorized.
+            if (agent.adapterType === "omnigent" && executionControl.controller.signal.aborted &&
+                executionControl.controller.signal.reason instanceof Error &&
+                executionControl.controller.signal.reason.message === "Legacy controller lease lost") {
+              legacyOwnershipHeld = true;
+              return;
+            }
           }
           if (instructionSave) adapterResult.resultJson = { ...adapterResult.resultJson, instructionSave };
           adapterResult = applyWorkspaceRestoreFailure(adapterResult);
@@ -24901,6 +24936,13 @@ export function heartbeatService(
             await completeWorkspace();
           }
         } catch (adapterErr) {
+          if (agent.adapterType === "omnigent" && legacyAdapterEntered &&
+              executionControl.controller.signal.aborted &&
+              executionControl.controller.signal.reason instanceof Error &&
+              executionControl.controller.signal.reason.message === "Legacy controller lease lost") {
+            legacyOwnershipHeld = true;
+            return;
+          }
           if (adapterErr instanceof NativeWorkspaceFinalizationBusyError
             || adapterErr instanceof NativeWorkspaceFinalizationOwnershipLostError) {
             nativeWorkspaceFinalizeScheduled = true;
@@ -26119,7 +26161,9 @@ export function heartbeatService(
         });
       }
     } catch (outerErr) {
-      if (
+      if (legacyOwnershipHeld) {
+        // Retained external ownership is deliberately not terminalized.
+      } else if (
         nativeOwnershipHeld ||
         outerErr instanceof NativeRunnerOwnershipUnverifiedError
       ) {
@@ -26414,7 +26458,7 @@ export function heartbeatService(
           latestRun &&
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
+          !nativeOwnershipHeld && !legacyOwnershipHeld
         ) {
           latestRun = await terminalizeRunOnLeaseRelease(latestRun).catch(
             (terminalizeErr) => {
@@ -26440,7 +26484,7 @@ export function heartbeatService(
         if (
           !nativeSessionResumeScheduled &&
           !nativeWorkspaceFinalizeScheduled &&
-          !nativeOwnershipHeld
+          !nativeOwnershipHeld && !legacyOwnershipHeld
         ) {
           // Keep launchers during same-run recovery. At a terminal boundary all
           // operations have settled; clean before the remote lease can be stopped.
