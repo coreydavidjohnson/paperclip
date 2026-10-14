@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { agents, agentWakeupRequests, activityLog, companies, createDb, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { createChildIssueSchema } from "@paperclipai/shared";
+import { issueService } from "../services/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -33,6 +35,7 @@ describe("legacy continuation persisted authority", () => {
     }
     return { companyId, agentId, issueId, runId, createRecovery, runs, actions, finish };
   }
+
   it.each([1, 2, 3, 4, 5])("deduplicates concurrent replay with stale prose-derived liveness (%s)", async () => {
     const f = await fixture();
     const recovery = f.createRecovery();
@@ -250,5 +253,50 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.runs()).toHaveLength(2);
     const repair = (await f.runs()).find(r => r.id !== f.runId)!;
     expect(repair.contextSnapshot).toMatchObject({ legacyDispositionEpisode: { id: f.runId, attempt: 1 } });
+  });
+  it.each(["coordination", "routing"])("routing-child: %s cannot block its parent", async purpose => {
+    const f = await fixture();
+    const input = createChildIssueSchema.parse({title: "Route owner hand-back", status: "todo",
+      childPurpose: purpose, blockParentUntilDone: true});
+    const result = await issueService(db).createChild(f.issueId, input);
+    expect(result.parentBlockerAdded).toBe(false);
+    expect(result.issue.originKind).toBe(`${purpose}_child`);
+    await expect(issueService(db).update(f.issueId, { blockedByIssueIds: [result.issue.id] }))
+      .rejects.toThrow("Routing or coordination children cannot block their parent");
+  });
+  it("routing-child: implementation child remains a blocker", async () => {
+    const f = await fixture();
+    const result = await issueService(db).createChild(f.issueId, {
+      title: "Implement required part", status: "todo", blockParentUntilDone: true,
+    });
+    expect(result.parentBlockerAdded).toBe(true);
+  });
+  it.each(["clear", "approval", "dependency"])("routing-child: stale edge starts parent with %s gate", async gate => {
+    const f = await fixture();
+    const childId = randomUUID();
+    await db.insert(issues).values({id: childId, companyId: f.companyId, parentId: f.issueId,
+      title: "Route parent", status: "todo", originKind: "routing_child"});
+    await db.insert(issueRelations).values({companyId: f.companyId, issueId: childId, relatedIssueId: f.issueId, type: "blocks"});
+    await db.update(issues).set({status: "blocked"}).where(eq(issues.id, f.issueId));
+    if (gate === "approval") await db.insert(issueThreadInteractions).values({companyId: f.companyId, issueId: f.issueId,
+      kind: "request_confirmation", status: "pending", payload: {version: 1, prompt: "Approve?"}});
+    let blockerId: string | null = null;
+    if (gate === "dependency") {
+      blockerId = randomUUID();
+      await db.insert(issues).values({id: blockerId, companyId: f.companyId, title: "Real prerequisite", status: "todo"});
+      await db.insert(issueRelations).values({companyId: f.companyId, issueId: blockerId, relatedIssueId: f.issueId, type: "blocks"});
+    }
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    const relations = await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, f.issueId));
+    expect(relations.map(r => r.issueId)).toEqual(blockerId ? [blockerId] : []);
+    expect((await db.select().from(activityLog).where(eq(activityLog.entityId, f.issueId))).filter(row => row.action === "issue.routing_child_blocker_removed")).toHaveLength(1);
+    expect(await f.runs()).toHaveLength(gate === "clear" ? 2 : 1);
+    if (gate === "clear") {
+      const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+      expect(repair.contextSnapshot).toMatchObject({issueId: f.issueId, legacyDispositionEpisode: {attempt: 1, maxAttempts: 2}});
+      expect(repair.agentId).toBe(f.agentId);
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, childId)))[0].status).toBe("todo");
   });
 });

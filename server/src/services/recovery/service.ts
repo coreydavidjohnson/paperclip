@@ -1363,6 +1363,30 @@ export function recoveryService(
     }
   }
 
+  // Remove only explicitly typed routing edges. Real prerequisites, human
+  // decisions and side-effect replay gates remain owned by existing admission.
+  async function removeRoutingChildBlockers(issue: typeof issues.$inferSelect) {
+    await db.transaction(async tx => {
+      await tx.select({id: issues.id}).from(issues).where(and(
+        eq(issues.companyId, issue.companyId), eq(issues.id, issue.id),
+      )).for("update");
+      const children = await tx.select({id: issues.id}).from(issues).where(and(
+        eq(issues.companyId, issue.companyId), eq(issues.parentId, issue.id),
+        inArray(issues.originKind, ["routing_child", "coordination_child"]),
+      ));
+      if (!children.length) return;
+      const removed = await tx.delete(issueRelations).where(and(
+        eq(issueRelations.companyId, issue.companyId), eq(issueRelations.relatedIssueId, issue.id),
+        eq(issueRelations.type, "blocks"), inArray(issueRelations.issueId, children.map(child => child.id)),
+      )).returning({id: issueRelations.issueId});
+      if (removed.length) await logActivity(tx, {
+        companyId: issue.companyId, actorType: "system", actorId: "recovery", agentId: null,
+        action: "issue.routing_child_blocker_removed", entityType: "issue", entityId: issue.id,
+        details: {routingChildIds: removed.map(child => child.id)},
+      });
+    });
+  }
+
   async function hasPersistedDurableWaitPath(
     issue: typeof issues.$inferSelect,
     latestRun: LatestIssueRun,
@@ -2870,6 +2894,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          notInArray(issues.originKind, ["routing_child", "coordination_child"]),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
@@ -2885,6 +2910,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          notInArray(issues.originKind, ["routing_child", "coordination_child"]),
           ...(sameWorkspaceOnly ? [eq(issues.projectWorkspaceId, issue.projectWorkspaceId!)] : []),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
@@ -3784,6 +3810,7 @@ export function recoveryService(
         ? legacyDispositionEpisode(latestRun) : undefined
     );
     const maxAttempts = episode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS;
+    await removeRoutingChildBlockers(current);
     const dependencyWait = episode ? null : await resolveContinuationWaitingOnReview(current);
     if (dependencyWait) {
       await resolveDispositionRepairActionAsCovered(

@@ -839,6 +839,7 @@ export const createChildIssueSchema = withCreateIssueStatusDefault(
         .array(z.string().trim().min(1).max(500))
         .max(20)
         .optional(),
+      childPurpose: z.enum(["implementation", "coordination", "routing"]).optional().default("implementation"),
       blockParentUntilDone: z.boolean().optional().default(false),
     }),
 ).superRefine(requireBlockedStatusForUnblockDescriptor).superRefine(requireTitleOrDescription);

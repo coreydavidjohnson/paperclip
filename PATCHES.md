@@ -458,3 +458,39 @@ into the current fork image or supplied by a fork migration.
   equivalent passes these regressions. No upstream communication is authorized.
 - Homelab Fork.Dockerfile must compile and ship routes/issues.js; otherwise a fork
   pin alone does not deploy this repair. Add the recovery test to its gate.
+- Corey explicitly authorized minimal fork patches in board comment
+  c84b473b-87bc-4c5a-9afc-77948134163c. Publish only to this fork, never upstream.
+- A successful legacy run with blocked but no durable wait evidence enters the
+  existing owner repair. Pending questions/approvals, unresolved blockers,
+  monitors/review stages, pause/Stop/budget, changed ownership, native finalizers
+  and active recovery/replay holds still prevent admission.
+- Include blocked candidates in the stranded sweep, but route them only through
+  successful legacy disposition repair. Failed/unknown side effects never use
+  the generic replay paths. Keep the original episode's two-attempt budget,
+  idempotent successor keys and deduplicated exhausted-board alert.
+- Tests: legacy-continuation.test.ts and legacy-continuation-authority.test.ts
+  cover bare-blocked one-sweep admission, replay deduplication, bounded attempts
+  and retained pending human gates. Upstream and deployed classifier repro both
+  failed before this patch. No database or API schema change.
+- Packaging must compile/copy recovery/service.js and legacy-continuation.js;
+  changing the fork pin without emitted server overlays does not deploy the fix.
+- Retirement: remove this carry only after a released upstream equivalent
+  passes these regressions. Restart-card repair remains a separate acceptance
+  requirement; this patch does not answer human approval or clear replay holds.
+
+## PER-404 routing-child deadlock prevention
+
+Board scope added 2026-10-14, incident row 14: coordination/routing children
+cannot be native blockers of their own parent. Child creation has explicit
+childPurpose (implementation default), persists routing_child/coordination_child,
+and suppresses blockParentUntilDone only for these purposes. Relation updates
+reject the same edge. Owner repair removes already persisted typed routing edges
+and invokes the parent's existing bounded, same-owner, duplicate-safe admission;
+real task dependencies and pending human decisions still gate it. No upstream PR.
+Upstream master f16c0ad5c818c627ac798ef5f31e266a6b256aac was fetched and inspected;
+its createChild still unconditionally honors blockParentUntilDone and has no childPurpose.
+Regression: legacy-continuation-authority.test.ts routing-child cases. The baseline
+has five assertion failures and one genuine implementation-child pass. Deployment
+and real-ticket acceptance must be recorded by the coordinated release owner.
+
+Qualification: all 49 persisted authority tests passed in the cluster fixture; routing-edge removal is transactional and audited once. Recovery child discovery excludes typed routing children so it cannot recreate the deadlock. Explicit purpose avoids trusting issue prose. Pre-existing untyped children are not silently reclassified.
