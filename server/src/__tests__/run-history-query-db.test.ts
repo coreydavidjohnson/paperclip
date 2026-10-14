@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { activityService } from "../services/activity.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueRunContextJoin, issueRunContextColumns, issueRunIdsCondition, runListContextColumns, runListContextJoin } from "../services/run-history-query.js";
 
@@ -51,6 +52,42 @@ describe("run history database contracts", () => {
       expect(rows[0].actual).toEqual(rows[0].old);
       expect(rows[0].actual).not.toHaveProperty("secret");
     }
+  });
+  it("executes the service with malformed contexts and preserves output names, values and membership", async () => {
+    const company = randomUUID(), other = randomUUID(), agent = randomUUID(), otherAgent = randomUUID(), issue = randomUUID();
+    await db.insert(companies).values([{ id: company, name: "C", issuePrefix: "C" }, { id: other, name: "D", issuePrefix: "D" }]);
+    await db.insert(agents).values([{ id: agent, companyId: company, name: "C", role: "engineer", adapterType: "codex_local" }, { id: otherAgent, companyId: other, name: "D", role: "engineer", adapterType: "codex_local" }]);
+    await db.insert(issues).values({ id: issue, companyId: company, title: "Context contract", status: "done" });
+    const values = [null, [], "text", 42, true, {}, { issueId: issue, wakeCommentIds: null },
+      { issueId: issue, wakeCommentIds: ["a"], wakeCommentId: 3, commentId: { a: 1 }, secret: "never-return" },
+      { wakeCommentIds: false, issueId: randomUUID(), wakeCommentId: [1, "x"] }];
+    const ids = values.map(() => randomUUID()), outsider = randomUUID();
+    for (const [i, value] of values.entries()) {
+      await db.insert(heartbeatRuns).values({ id: ids[i], companyId: company, agentId: agent, status: "succeeded", contextSnapshot: value as any, livenessState: "useful", createdAt: new Date(1_700_000_000_000 + i * 1000) });
+    }
+    await db.insert(heartbeatRuns).values({ id: outsider, companyId: other, agentId: otherAgent, status: "succeeded", contextSnapshot: { issueId: issue } });
+    await db.insert(activityLog).values([...ids, ids[7], outsider].map(runId => ({ companyId: company, actorType: "system", actorId: "system", action: "test", entityType: "issue", entityId: issue, runId })));
+    const old = await db.select({ id: heartbeatRuns.id,
+      wakeCommentIds: sql`${heartbeatRuns.contextSnapshot}->'wakeCommentIds'`,
+      wakeCommentId: sql`${heartbeatRuns.contextSnapshot}->>'wakeCommentId'`,
+      contextCommentId: sql`${heartbeatRuns.contextSnapshot}->>'commentId'`,
+      contextIssueId: sql`${heartbeatRuns.contextSnapshot}->>'issueId'`,
+    }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, company), inArray(heartbeatRuns.id, ids))).orderBy(sql`${heartbeatRuns.createdAt} desc`);
+    const actual = await activityService(db).runsForIssue(company, issue);
+    expect(actual).toHaveLength(values.length);
+    expect(actual.map(r => ({ id: r.runId, wakeCommentIds: r.wakeCommentIds, wakeCommentId: r.wakeCommentId, contextCommentId: r.contextCommentId, contextIssueId: r.contextIssueId }))).toEqual(old);
+    expect(actual.every(r => !Object.hasOwn(r, "secret"))).toBe(true);
+    const generated = db.select(issueRunContextColumns).from(heartbeatRuns).leftJoin(issueRunContextJoin, sql`true`).toSQL();
+    expect(generated.sql).toContain("left join lateral jsonb_to_record");
+    expect(generated.sql).toContain('"wakeCommentIds" jsonb');
+    expect(generated.sql).toContain('issue_run_context."commentId"');
+    expect(generated.params).toEqual([]);
+    // PostgreSQL converts JSON null to SQL NULL in jsonb_to_record. Both
+    // deserialize to JS null; these fields have no downstream SQL consumers.
+    const nullRows = await db.execute(sql`select ('{"wakeCommentIds":null}'::jsonb->'wakeCommentIds') is distinct from c."wakeCommentIds" as sql_distinct from jsonb_to_record('{"wakeCommentIds":null}'::jsonb) c("wakeCommentIds" jsonb)`);
+    expect(nullRows[0].sql_distinct).toBe(true);
+    const version = await db.execute(sql`show server_version_num`);
+    console.log("issue-run contract PostgreSQL version", version[0].server_version_num);
   });
   it("preserves context/activity union membership, duplicates, company isolation and order", async () => {
     const company = randomUUID(), other = randomUUID(), agent = randomUUID(), otherAgent = randomUUID(), issue = randomUUID();
