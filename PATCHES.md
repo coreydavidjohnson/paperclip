@@ -301,3 +301,5 @@ into the current fork image or supplied by a fork migration.
   and websocket fences passed; integrated server typecheck exit 0. Focused
   server 24 tests, UI 61 tests and token gates passed. See
   `scripts/smoke/per282-events/README.md` for fixture scope and receipts.
+
+- Integrated same-run checkpoint hook. Timed-out shutdown keeps DB/HTTP alive until bounded process exit; checkpointed finalizers permit normal teardown.
