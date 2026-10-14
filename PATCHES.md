@@ -276,3 +276,20 @@ into the current fork image or supplied by a fork migration.
 - Retirement: remove this carry only after a released upstream equivalent
   passes these regressions. Restart-card repair remains a separate acceptance
   requirement; this patch does not answer human approval or clear replay holds.
+
+## PER-404 routing-child deadlock prevention
+
+Board scope added 2026-10-14, incident row 14: coordination/routing children
+cannot be native blockers of their own parent. Child creation has explicit
+childPurpose (implementation default), persists routing_child/coordination_child,
+and suppresses blockParentUntilDone only for these purposes. Relation updates
+reject the same edge. Owner repair removes already persisted typed routing edges
+and invokes the parent's existing bounded, same-owner, duplicate-safe admission;
+real task dependencies and pending human decisions still gate it. No upstream PR.
+Upstream master f16c0ad5c818c627ac798ef5f31e266a6b256aac was fetched and inspected;
+its createChild still unconditionally honors blockParentUntilDone and has no childPurpose.
+Regression: legacy-continuation-authority.test.ts routing-child cases. The baseline
+has five assertion failures and one genuine implementation-child pass. Deployment
+and real-ticket acceptance must be recorded by the coordinated release owner.
+
+Qualification: all 49 persisted authority tests passed in the cluster fixture; routing-edge removal is transactional and audited once. Recovery child discovery excludes typed routing children so it cannot recreate the deadlock. Explicit purpose avoids trusting issue prose. Pre-existing untyped children are not silently reclassified.

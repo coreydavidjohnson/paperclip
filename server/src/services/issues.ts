@@ -1946,6 +1946,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
 };
 type IssueChildCreateInput = IssueCreateInput & {
+  childPurpose?: "implementation" | "coordination" | "routing";
   acceptanceCriteria?: string[];
   blockParentUntilDone?: boolean;
   executionWorkspaceInheritanceMode?: "linkage" | "strategy_only";
@@ -7407,7 +7408,7 @@ export function issueService(db: Db) {
             FOR UPDATE`,
       );
       const relatedIssues = await dbOrTx
-        .select({ id: issues.id })
+        .select({ id: issues.id, parentId: issues.parentId, originKind: issues.originKind })
         .from(issues)
         .where(
           and(eq(issues.companyId, companyId), inArray(issues.id, deduped)),
@@ -7416,6 +7417,9 @@ export function issueService(db: Db) {
         throw unprocessable(
           "Blocked-by issues must belong to the same company",
         );
+      }
+      if (relatedIssues.some(child => child.parentId === issueId && ["routing_child", "coordination_child"].includes(child.originKind))) {
+        throw unprocessable("Routing or coordination children cannot block their parent");
       }
       await assertNoBlockingCycles(companyId, issueId, deduped, dbOrTx);
     }
@@ -9280,6 +9284,7 @@ export function issueService(db: Db) {
 
       const {
         acceptanceCriteria,
+        childPurpose = "implementation",
         blockParentUntilDone,
         executionWorkspaceInheritanceMode = "linkage",
         actorAgentId,
@@ -9287,6 +9292,7 @@ export function issueService(db: Db) {
         ...issueData
       } = data;
 
+      const mayBlockParent = Boolean(blockParentUntilDone) && childPurpose === "implementation";
       const inheritStrategyOnly =
         executionWorkspaceInheritanceMode === "strategy_only";
       // A child may target another project. Parent workspace identity is only
@@ -9306,6 +9312,7 @@ export function issueService(db: Db) {
           : null;
       let child = await issueService(db).create(parent.companyId, {
         ...issueData,
+        ...(childPurpose !== "implementation" ? { originKind: `${childPurpose}_child` } : {}),
         parentId: parent.id,
         projectId: childProjectId,
         projectWorkspaceId:
@@ -9338,7 +9345,7 @@ export function issueService(db: Db) {
           : { inheritExecutionWorkspaceFromIssueId: parent.id }),
       });
 
-      if (blockParentUntilDone) {
+      if (mayBlockParent) {
         const existingBlockers = await db
           .select({ blockerIssueId: issueRelations.issueId })
           .from(issueRelations)
@@ -9369,7 +9376,7 @@ export function issueService(db: Db) {
 
       return {
         issue: child,
-        parentBlockerAdded: Boolean(blockParentUntilDone),
+        parentBlockerAdded: mayBlockParent,
       };
     },
 
