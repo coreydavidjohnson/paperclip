@@ -65,3 +65,17 @@ Do not remove that setting as incidental upgrade cleanup. Compare the released
 external-conversation projection and exact page APIs first. Change the setting
 only in homelab source with exact CI and full Paperclip reconciliation; verify
 both CNPG instances. The fork image contains no database setting or migration.
+
+
+## Rationale evidence on upgrade (PER-289)
+
+Read each carried patch's Upstream choice/Why note. Separate verified author
+rationale, observed source limitations and local improvements; unknown intent
+is not a documented design choice. Retain the full external-conversation
+contract in PATCHES.md: latest eligible conversation, tenant/assignment, review,
+interaction/approval, publication, heartbeat, wake/session, dependency and
+monitor predicates. Provider extensions are not measured
+performance repairs. Do not infer origins from shallow-boundary blame.
+Released equivalent source, preserved contracts and comparable measurements
+are retirement evidence; closed proposals or master-only code are not enough.
+The PER-289 review is after deployment, not retroactive release approval.
