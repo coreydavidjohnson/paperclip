@@ -79,3 +79,19 @@ performance repairs. Do not infer origins from shallow-boundary blame.
 Released equivalent source, preserved contracts and comparable measurements
 are retirement evidence; closed proposals or master-only code are not enough.
 The PER-289 review is after deployment, not retroactive release approval.
+
+
+## Comment attribution candidate boundary (PER-382)
+
+The PER-382 issues.ts candidate must be deliberately added to the narrow
+homelab server overlay and its test gate by PER-378; a fork commit alone does
+not ship this file. Keep the existing routing/run-history/execution overlays
+and exact dependency lock. Check emitted issues.js, not only deployed src.
+This candidate changes only indexed issue membership in comment attribution.
+Explicit own-run IDs, outer tenant scope, timestamp bounds, lossless log
+markers and secret redaction are invariants. Do not generalize the helper to
+native_issue_id/taskId: that would change the old attribution contract.
+Do not simplify externalConversationStateSql for this candidate. Its repeated
+predicate was not the dominant cost in the bounded blocked-row plan; all
+Slack liveness guards are retained. Endpoint benefit, attention <200ms,
+combined pre-ship cross-review, CI/staging and deployment remain unverified.
