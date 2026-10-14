@@ -59,3 +59,9 @@ patches or migrations in this fork. On every upgrade, compare the release's
 exact predicates and migrations with these definitions. Do not infer merge
 from a closed proposal. A release upgrade that retains the same expensive
 JSON projection is not itself a measured performance repair.
+
+The homelab CNPG configuration disables PostgreSQL JIT (PER-288/PER-289).
+Do not remove that setting as incidental upgrade cleanup. Compare the released
+external-conversation projection and exact page APIs first. Change the setting
+only in homelab source with exact CI and full Paperclip reconciliation; verify
+both CNPG instances. The fork image contains no database setting or migration.

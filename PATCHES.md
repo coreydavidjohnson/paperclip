@@ -152,3 +152,21 @@ into the current fork image or supplied by a fork migration.
   same fix and passing this regression.
 - Packaging must compile and copy server/dist/routes/issues.js; a fork pin
   alone cannot deliver this behavior through the current narrow overlay.
+
+## Homelab-owned PostgreSQL JIT setting (PER-288 / PER-289)
+
+- Owner: coreydavidjohnson/luma-homelab, k8s/paperclip/10-cnpg.yaml.
+  Main commit 9cd742b1a890dd160011a24c94672cd51fe65371 sets jit: "off".
+  This is deployment configuration, not a fork code patch or migration.
+- Why: PostgreSQL compilation dominated the shared external conversation
+  projection, even with empty chat tables. Five paired SQL diagnostics gave
+  median 401.948 ms with JIT and 5.413 ms without it; not page acceptance.
+- Verification: exact-source six-shard CI, synthetic Paperclip security canary,
+  full owning Argo sync and SHOW jit=off on both production CNPG instances.
+  Postmaster times did not change. Exact deployed selected-field projections
+  matched with transaction-local jit on/off; 292 rows, JIT-off execution
+  4.576 ms. Existing PER-218 UNION and creation-source index remain.
+- Reconsider only after a released query change and comparable exact API/page
+  measurements justify JIT. Retain authorization, ordering, projection and
+  secret-redaction contracts. Do not reset shared pg_stat_statements.
+- This ledger records the setting, not API p50 or full-render acceptance.
