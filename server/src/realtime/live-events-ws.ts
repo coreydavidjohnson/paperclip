@@ -343,8 +343,6 @@ export function setupLiveEventsWebSocketServer(
     let pending = 0;
     const deliver = (event: LiveEvent) => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      // Slow readers reconnect and refetch instead of growing an unbounded queue.
-      if (socket.bufferedAmount > 1024 * 1024) { socket.terminate(); return; }
       if (++pending > 1000) { socket.close(1013, "event backlog"); return; }
       delivery = delivery.then(async () => {
         if (socket.readyState !== WebSocket.OPEN) return;
@@ -361,7 +359,12 @@ export function setupLiveEventsWebSocketServer(
           } catch (err) {
             logger.warn({ err, companyId: context.companyId }, "task toast eligibility failed");
           }
-          if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ ...visible, toastEligible }));
+          if (socket.readyState !== WebSocket.OPEN) return;
+          const raw = JSON.stringify({ ...visible, toastEligible });
+          // Slow readers reconnect and refetch instead of growing an unbounded
+          // queue; count the pending frame and its maximum header too.
+          if (socket.bufferedAmount + Buffer.byteLength(raw) + 14 > 1024 * 1024) { socket.terminate(); return; }
+          socket.send(raw);
         }
       }).catch(err => logger.warn({ err, companyId: context.companyId }, "live event authorization failed"))
         .finally(() => { pending -= 1; });
