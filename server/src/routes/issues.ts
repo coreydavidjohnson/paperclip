@@ -1,3 +1,4 @@
+import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
@@ -12060,7 +12061,10 @@ export function issueRoutes(
           sanitizedBody.assigneeAgentId as string | null | undefined,
           { actorType: req.actor.type },
         );
-      await assertNoAgentDelegationCycle({
+      const homeLabDelegation = await authorizeHomeLabChild(db, parent.id, req.actor, {
+        ...sanitizedBody, assigneeAgentId: normalizedAssigneeAgentId,
+      });
+      if (!homeLabDelegation) await assertNoAgentDelegationCycle({
         actorType: req.actor.type,
         actorAgentId: req.actor.agentId,
         parentIssueId: parent.id,
@@ -12083,7 +12087,7 @@ export function issueRoutes(
         parent.companyId,
         childAssignmentScope,
       );
-      if (sanitizedBody.assigneeAgentId || sanitizedBody.assigneeUserId) {
+      if (!homeLabDelegation && (sanitizedBody.assigneeAgentId || sanitizedBody.assigneeUserId)) {
         await assertCanAssignTasks(req, parent.companyId, childAssignmentScope);
       }
       await assertIssueEnvironmentSelection(
@@ -12120,6 +12124,7 @@ export function issueRoutes(
       );
       const { issue, parentBlockerAdded } = await svc.createChild(parent.id, {
         ...createBody,
+        ...(homeLabDelegation ? { homeLabDelegationActor: req.actor } : {}),
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
         executionPolicy,
