@@ -9067,10 +9067,11 @@ export function issueRoutes(
       const {
         actionId,
         outcome,
-        sourceIssueStatus,
+        sourceIssueStatus: requestedSourceIssueStatus,
         resolutionNote,
         executionReconciliation,
       } = req.body;
+      let sourceIssueStatus = requestedSourceIssueStatus;
       if (outcome === "false_positive" || outcome === "cancelled") {
         assertBoard(req);
       }
@@ -9162,6 +9163,35 @@ export function issueRoutes(
           activeRecoveryAction,
           { source: "recovery_action_resolution" },
         );
+
+        if (outcome === "cancelled" && sourceIssueStatus === "todo") {
+          if (lockedIssue.assigneeAgentId !== activeRecoveryAction.returnOwnerAgentId ||
+              !lockedIssue.assigneeAgentId || lockedIssue.unblockDescriptor ||
+              requiresExecutionReconciliation(activeRecoveryAction.cause)) {
+            throw conflict("Cancellation cannot bypass another owner or execution hold.");
+          }
+          const readiness = await svc.getDependencyReadiness(lockedIssue.id, tx);
+          const [wait] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+            eq(issueThreadInteractions.companyId, lockedIssue.companyId), eq(issueThreadInteractions.issueId, lockedIssue.id),
+            eq(issueThreadInteractions.status, "pending"),
+          )).limit(1);
+          if (readiness.unresolvedBlockerCount || wait) throw conflict("Cancellation cannot bypass a blocker or pending interaction.");
+          await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: activeRecoveryAction });
+        }
+
+        if (outcome === "cancelled" && sourceIssueStatus === "blocked" && lockedIssue.status === "blocked" &&
+            activeRecoveryAction.returnOwnerAgentId === lockedIssue.assigneeAgentId && lockedIssue.assigneeAgentId &&
+            !requiresExecutionReconciliation(activeRecoveryAction.cause) && !lockedIssue.unblockDescriptor) {
+          const readiness = await svc.getDependencyReadiness(lockedIssue.id, tx);
+          const [wait] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+            eq(issueThreadInteractions.companyId, lockedIssue.companyId), eq(issueThreadInteractions.issueId, lockedIssue.id),
+            eq(issueThreadInteractions.status, "pending"),
+          )).limit(1);
+          if (!readiness.unresolvedBlockerCount && !wait) {
+            await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: activeRecoveryAction });
+            sourceIssueStatus = "todo";
+          }
+        }
 
         if (outcome === "restored" && activeRecoveryAction.cause === "native_workspace_sync_out_unsafe_archive") {
           throw conflict("Unsafe workspace export recovers automatically without another provider turn.", { code: "workspace_export_automatic_recovery" });
@@ -9334,7 +9364,7 @@ export function issueRoutes(
 
         if (sourceStatusChanged) {
           const safeHandBack =
-            outcome === "restored" &&
+            (outcome === "restored" || outcome === "cancelled") &&
             sourceIssueStatus === "todo" &&
             activeRecoveryAction.returnOwnerAgentId != null &&
             lockedIssue.assigneeAgentId ===

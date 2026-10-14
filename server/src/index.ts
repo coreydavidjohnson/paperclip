@@ -12,7 +12,7 @@ import { waitForPendingRunFailureReports } from "./services/run-failure-report.j
 import { verifyStoppedNativeSessionForReplacement } from "./services/native-runtime/native-session-executor.js";
 import { embeddedPostgresOwnerPort } from "./embedded-postgres-owner.js";
 import { deliverExecutionStatuses } from "./services/execution-status-delivery.js";
-import { deliverReconciledExecutions, settleUnrecoverableExecutions } from "./services/execution-recovery-resolution.js";
+import { alertDeferredExecutionWakes, deliverReconciledExecutions, settleUnrecoverableExecutions } from "./services/execution-recovery-resolution.js";
 import { reconcileSafeNativeReplacements } from "./services/native-runtime/native-safe-replacement.js";
 import { reconcileAbandonedExecutionControl } from "./services/execution-control-reconciliation.js";
 import { EXECUTION_RECONCILIATION_INTERVAL_MS } from "./services/execution-control-deadline.js";
@@ -1166,6 +1166,7 @@ async function startServerWithDatabaseTeardown(
     ["reconciliation_delivery", () => heartbeat ? deliverReconciledExecutions(db, heartbeat.wakeup) : undefined],
     ["status_delivery", () => deliverExecutionStatuses(db)],
     ["automatic_disposition", () => settleUnrecoverableExecutions(db)],
+    ["deferred_wake_alert", () => alertDeferredExecutionWakes(db)],
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
   ] as const;
   const sweepExecutionControl = () => {

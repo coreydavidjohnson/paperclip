@@ -608,6 +608,7 @@ export const resolveIssueRecoveryActionSchema = z
       return;
     }
 
+    if (value.outcome === "cancelled" && ["todo", "blocked"].includes(value.sourceIssueStatus)) return;
     if (value.outcome === "false_positive" || value.outcome === "cancelled") {
       if (
         value.sourceIssueStatus !== "done" &&

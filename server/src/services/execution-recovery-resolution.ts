@@ -1,12 +1,16 @@
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
-import { claimedAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
+import { claimedAdapterType, historicalAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
-import { and, eq, inArray, isNull, not, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, not, or, sql } from "drizzle-orm";
 import {
+  agents,
   chatActions,
+  agentWakeupRequests,
+  companies,
+  issueComments,
   environmentLeases,
   heartbeatRuns,
   issueRecoveryActions,
@@ -20,8 +24,56 @@ import {
   EXECUTION_RECONCILIATION_CAUSES,
   type ExecutionReconciliation,
 } from "@paperclipai/shared";
+import { remoteExecutionHasStopped } from "./remote-execution-termination.js";
+import { secretService } from "./secrets.js";
+import { validOmnigentReceipt } from "./omnigent-attachment.js";
+import { issueService } from "./issues.js";
+import { collectDispositionRepairSourceState } from "./recovery/disposition-repair.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
+
+/** Read-only proof: terminal Paperclip status alone cannot stop a remote turn. */
+export async function platformExecutionHasStopped(db: Db, run: typeof heartbeatRuns.$inferSelect): Promise<boolean> {
+  const evidence = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  if (evidence?.kind === "bootstrap" && evidence.providerWorkStarted === false) return true;
+  const adapterType = await historicalAdapterType(db, run);
+  if (adapterType !== "omnigent") return await remoteExecutionHasStopped(db, run.companyId, run.id);
+  const receipt = run.resultJson?.omnigentDispatchReceipt as Record<string, unknown> | undefined;
+  if (!validOmnigentReceipt(run, receipt)) return false;
+  const [agent] = await db.select().from(agents).where(and(eq(agents.companyId, run.companyId), eq(agents.id, run.agentId)));
+  if (!agent || agent.adapterType !== "omnigent") return false;
+  const { config } = await secretService(db).resolveAdapterConfigForRuntime(run.companyId, agent.adapterConfig,
+    { consumerType: "agent", consumerId: agent.id, actorType: "system", actorId: "execution-recovery",
+      responsibleUserId: run.responsibleUserId, heartbeatRunId: run.id }, { adapterType: "omnigent" });
+  const base = config.baseUrl ?? config.url;
+  if (typeof base !== "string" || typeof config.agentId !== "string") return false;
+  const headers: Record<string, string> = {};
+  for (const [key, value] of Object.entries((config.headers ?? {}) as Record<string, unknown>)) {
+    if (typeof value === "string" && key.toLowerCase() !== "x-databricks-omnigent-slice-key") headers[key] = value;
+  }
+  if (typeof config.apiToken === "string") headers.Authorization = `Bearer ${config.apiToken}`;
+  const url = `${base.replace(/\/+$/, "")}/v1/sessions/${encodeURIComponent(String(receipt!.omnigentSessionId))}?include_items=false&include_usage=false`;
+  const read = async () => {
+    const response = await fetch(url, { headers, redirect: "error", signal: AbortSignal.timeout(4000) });
+    if (!response.ok) throw new Error("OmniGenT stop observation unavailable");
+    return await response.json() as Record<string, unknown>;
+  };
+  try {
+    let session = await read();
+    if (session.id !== receipt!.omnigentSessionId || session.agent_id !== config.agentId) return false;
+    if (typeof session.host_id === "string" && session.host_id) {
+      const host = session.host_id;
+      headers["X-Databricks-Omnigent-Slice-Key"] = host;
+      session = await read();
+      if (session.host_id !== host) return false;
+    } else if (config.hostId) return false;
+    return session.id === receipt!.omnigentSessionId && session.agent_id === config.agentId &&
+      ["idle", "failed"].includes(String(session.status)) && !session.active_response_id &&
+      session.runner_online === true && session.host_online === true && session.archived !== true &&
+      Array.isArray(session.pending_elicitations) && session.pending_elicitations.length === 0 &&
+      Array.isArray(session.pending_inputs) && session.pending_inputs.length === 0;
+  } catch { return false; }
+}
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {
@@ -261,7 +313,7 @@ export async function deliverReconciledExecutions(
           recoveryActionId: action.id,
           previousRunId: decision.runId,
           retryOfRunId: decision.runId,
-          forceFreshSession: true,
+          forceFreshSession: (action.evidence.automaticRecovery as { policy?: string } | undefined)?.policy !== "platform_recheck_v1",
           wakeReason: "issue_recovery_action_restored",
           source: "execution.reconciled",
         },
@@ -374,7 +426,10 @@ export async function settleUnrecoverableExecutions(
     .where(
       and(
         not(conversationRecoveryActionPredicate()!),
-        inArray(issueRecoveryActions.status, ["active", "escalated"]),
+        or(inArray(issueRecoveryActions.status, ["active", "escalated"]), and(
+          eq(issueRecoveryActions.status, "resolved"),
+          sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+        )),
         eq(issueRecoveryActions.kind, "active_run_watchdog"),
         inArray(issueRecoveryActions.cause, [
           ...EXECUTION_RECONCILIATION_CAUSES,
@@ -449,7 +504,8 @@ export async function settleUnrecoverableExecutions(
           !EXECUTION_RECONCILIATION_CAUSES.includes(
             action.cause as (typeof EXECUTION_RECONCILIATION_CAUSES)[number],
           ) ||
-          !["active", "escalated"].includes(action.status) ||
+          (!["active", "escalated"].includes(action.status) &&
+            !(action.status === "resolved" && (action.evidence.automaticRecovery as { replay?: string } | undefined)?.replay === "blocked")) ||
           (run.nativeIssueId ?? run.contextSnapshot?.issueId) !== task.id ||
           !["failed", "timed_out", "interrupted", "cancelled"].includes(
             run.status,
@@ -475,6 +531,51 @@ export async function settleUnrecoverableExecutions(
           !["done", "cancelled"].includes(task.status) &&
           (!task.executionRunId || task.executionRunId === run.id) &&
           (!task.checkoutRunId || task.checkoutRunId === run.id);
+        // A platform failure is not an agent report of uncertain side effects.
+        // Resume a model turn with history, never replay a recorded tool call.
+        const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+        const agentFlaggedUnknown = recovery?.actionOutcomes === "unknown" ||
+          ["uncertain_external_action", "uncertain_provider_action", "uncertain_control_plane_action"].includes(action.cause);
+        const platformFailure = Boolean(run.errorCode && (
+          run.errorCode.startsWith("omnigent_") ||
+          ["server_shutdown_interrupted", "execution_reconciliation_required"].includes(run.errorCode)
+        ));
+        if (current && platformFailure && !agentFlaggedUnknown && !hasWorkspaceRestoreFailure(run.resultJson)) {
+          if (run.status === "cancelled" || !(await platformExecutionHasStopped(tx as unknown as Db, run))) return;
+          // Do not turn a terminal DB row into proof of a stopped OS process,
+          // released lease or finished native coordinator. Reuse the evidence gate.
+          const decision: ExecutionReconciliation = { runId: run.id, providerStopped: true,
+            actionOutcome: "mixed", outcomeEvidence: "Terminal platform failure; re-check live state and existing action receipts before any new side effect. Prior tool calls are not replayed.",
+          };
+          await validateExecutionReconciliation({ db: tx as unknown as Db, companyId: run.companyId,
+            issueId: task.id, agentId: task.assigneeAgentId, sourceRunId: run.id, decision });
+          const state = await collectDispositionRepairSourceState(tx as unknown as Db, { issue: task });
+          const [activeRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, task.companyId),
+            inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+            sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${task.id}`,
+          )).limit(1);
+          if (activeRun || state.hasDurableWaitingPath || task.unblockDescriptor ||
+              task.status === "in_review") return;
+          if (task.status === "blocked") {
+            await issueService(tx as unknown as Db).update(task.id, { status: "todo" }, tx);
+          }
+          await markExecutionReconciliation(tx as unknown as Db, action, decision, "execution-recovery");
+          await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "restored",
+            resolvedAt: now, updatedAt: now, wakePolicy: null, monitorPolicy: null,
+            nextAction: "Continue in the retained session; inspect live state before any external action.",
+            evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({ automaticRecovery: {
+              policy: "platform_recheck_v1", runId: run.id, replay: "allowed", recordedAt: now.toISOString(),
+            } })}::jsonb`,
+          }).where(eq(issueRecoveryActions.id, action.id));
+          await persistActivity(tx as unknown as Db, { companyId: run.companyId, actorType: "system",
+            actorId: "execution-recovery", action: "issue.execution_recovery_settled", entityType: "issue",
+            entityId: task.id, runId: run.id, details: { recoveryActionId: action.id, outcome: "restored", policy: "platform_recheck_v1" },
+          });
+          options.failpoint?.("persisted");
+          return;
+        }
+        if (action.status === "resolved") return;
         const note = current
           ? hasWorkspaceRestoreFailure(run.resultJson)
             ? "Workspace repair required. Verify safe staging or repair before continuing. Saved work and approval decisions remain in force."
@@ -570,4 +671,46 @@ export async function settleUnrecoverableExecutions(
       );
     }
   }
+}
+
+/** One visible warning per saved wake, serialized with wake admission on the issue. */
+export async function alertDeferredExecutionWakes(db: Db, now = new Date()) {
+  const stale = await db.select({ wake: agentWakeupRequests }).from(agentWakeupRequests)
+    .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
+      sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`))
+    .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
+    .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      lt(agentWakeupRequests.requestedAt, new Date(now.getTime() - 30 * 60_000)),
+      not(inArray(issues.status, ["done", "cancelled"])), isNull(issues.hiddenAt),
+      not(sql`exists (select 1 from issue_comments c where c.company_id = ${issues.companyId}
+        and c.issue_id = ${issues.id} and c.author_type = 'system'
+        and c.client_request_id = 'deferred-wake-alert:' || ${agentWakeupRequests.id}::text)`)))
+    .orderBy(agentWakeupRequests.requestedAt).limit(50);
+  let alerted = 0;
+  for (const { wake } of stale) {
+    await db.transaction(async tx => {
+      const [task] = await tx.select().from(issues).where(and(eq(issues.companyId, wake.companyId),
+        sql`${issues.id}::text = ${wake.payload?.issueId}`)).for("update");
+      const [current] = await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, wake.companyId), eq(agentWakeupRequests.id, wake.id),
+        eq(agentWakeupRequests.status, "deferred_issue_execution")));
+      if (!task || !current || task.hiddenAt || ["done", "cancelled"].includes(task.status)) return;
+      const key = `deferred-wake-alert:${wake.id}`;
+      const [posted] = await tx.select({ id: issueComments.id }).from(issueComments).where(and(
+        eq(issueComments.companyId, task.companyId), eq(issueComments.issueId, task.id),
+        eq(issueComments.authorType, "system"), eq(issueComments.clientRequestId, key)));
+      if (posted) return;
+      await issueService(tx as unknown as Db).addComment(task.id,
+        `A saved wake has waited for execution for more than 30 minutes. Inspect its recovery hold. The saved message is retained. Wake: ${wake.id}`,
+        {}, { authorType: "system", clientRequestId: key, presentation: {
+          kind: "system_notice", tone: "warning", title: "Saved wake delayed more than 30 minutes",
+          detailsDefaultOpen: false, density: "compact",
+        } }, tx);
+      await persistActivity(tx as unknown as Db, { companyId: task.companyId, actorType: "system",
+        actorId: "execution-recovery", action: "issue.deferred_wake_stale", entityType: "issue",
+        entityId: task.id, details: { wakeId: wake.id, requestedAt: wake.requestedAt.toISOString() } });
+      alerted += 1;
+    });
+  }
+  return { alerted };
 }

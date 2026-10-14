@@ -1,3 +1,4 @@
+import { collectDispositionRepairSourceState } from "../../../services/recovery/disposition-repair.js";
 import { isAcknowledgedNativeReassignmentStop, isAcknowledgedNativeStop } from "../../../services/acknowledged-native-stop.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { instanceSettingsService } from "../../../services/instance-settings.js";
@@ -11,6 +12,7 @@ import {
   agentWakeupRequests,
   agents,
   chatActions,
+  companies,
   heartbeatRuns,
   issueComments,
   issueRecoveryActions,
@@ -725,6 +727,14 @@ async function recordNativeTerminalRecoveryIfNeeded(tx: Db, run: HeartbeatRunRow
     !["done", "cancelled"].includes(issue.status);
   if (!applies || isAcknowledgedNativeStop(run) || isAcknowledgedNativeReassignmentStop(run)) return false;
 
+  const [reconciled] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
+    eq(issueRecoveryActions.status, "resolved"),
+    sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+    sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'providerStopped' = 'true'`,
+  )).limit(1);
+  if (reconciled) return false;
+
   const existing = await tx
     .select({ id: issueRecoveryActions.id, evidence: issueRecoveryActions.evidence })
     .from(issueRecoveryActions)
@@ -1096,6 +1106,12 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
               sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
             )).limit(1)
           : [];
+        const [reconciledExecution] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, run.companyId), eq(issueRecoveryActions.sourceIssueId, issueRow?.id ?? run.id),
+          eq(issueRecoveryActions.status, "resolved"),
+          sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+          sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'providerStopped' = 'true'`,
+        )).limit(1);
         const preDrainFacts: PreDrainFacts = {
           issueRowPresent: issueRow !== null,
           executionRunIdMatchesRun: !issueRow || !issueRow.executionRunId || issueRow.executionRunId === run.id,
@@ -1104,7 +1120,7 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
           issueStatus: issueRow?.status ?? "",
           hasAssigneeUser: Boolean(issueRow?.assigneeUserId),
           assigneeAgentMatchesRunAgent: issueRow?.assigneeAgentId === run.agentId,
-          legacyExecutionNeedsReconciliation: legacyExecutionNeedsReconciliation(run),
+          legacyExecutionNeedsReconciliation: !reconciledExecution && legacyExecutionNeedsReconciliation(run),
           // An operator stop never promotes old queued work by itself. The
           // next explicit wake adopts those messages atomically when it
           // queues a run.
@@ -1192,6 +1208,24 @@ export function createPostgresWakeQueueAdapter(db: Db, deps: WakeQueuePostgresAd
         // transaction so cleanup retries and restart sweeps use the same gate.
         if (issueRow.conversationAgentId && !(await instanceSettingsService(tx).getExperimental()).enableAgentChat) {
           return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
+        }
+
+        // Releasing a recovery hold is not a new authorization. In particular,
+        // leave saved messages intact while an approval, dependency or pause waits.
+        const [savedRecoveryWake] = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.companyId, issueRow.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${issueRow.id}`,
+          sql`${agentWakeupRequests.payload}->'executionWait' is not null`,
+        )).limit(1);
+        if (savedRecoveryWake) {
+          const [company] = await tx.select({ status: companies.status }).from(companies).where(eq(companies.id, issueRow.companyId));
+          const [agent] = await tx.select().from(agents).where(and(eq(agents.companyId, issueRow.companyId), eq(agents.id, run.agentId)));
+          const state = await collectDispositionRepairSourceState(tx as unknown as Db, { issue: issueRow });
+          if (company?.status !== "active" || !agent || !(await evaluateAgentInvokabilityFromDb(tx, agent)).invokable ||
+              issueRow.hiddenAt || issueRow.unblockDescriptor || issueRow.status === "blocked" || state.hasDurableWaitingPath ||
+              await isAutomaticRecoverySuppressedByPauseHold(tx, issueRow.companyId, issueRow.id, issueTreeControlService(tx))) {
+            return { outcome: { kind: "released" }, postCommitEffects: [], run: runSnapshot };
+          }
         }
 
         const locked: LockedIssueExecution = { primaryIssue: toIssueSnapshot(issueRow), run: runSnapshot, recoveryOnly };

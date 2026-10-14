@@ -435,6 +435,7 @@ into the current fork image or supplied by a fork migration.
 - Retirement: drop when upstream supplies equivalently fenced admitted-turn
   observation/finalization; never relax the new-dispatch security guard.
 
+<<<<<<< HEAD
 ## Reset hints do not fail the live-event session (PER-619 / PER-608)
 
 - Valid own/peer reset envelopes advance bounded origin dedupe and request UI
@@ -678,3 +679,28 @@ into the current fork image or supplied by a fork migration.
   deployment and integration tests remain required, not implied by unit counts.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
+=======
+## PER-475: terminal platform recovery and saved-wake liveness
+
+- Upstream checked at `66424362a85e80a9d8f1b1e2e94002eb1049b8ef`:
+  execution recovery still forces fresh sessions and emits preserve-without-replay
+  holds. No upstream proposal is made, per instruction.
+- Automatically reconcile terminal platform failures only after a read-only
+  provider-stop check and existing process, coordinator, lease and continuation
+  gates. Retain the session and require live state/action receipt inspection;
+  never replay tool calls. Agent-flagged uncertain effects remain held.
+- Historical platform holds can be reconciled. Resolved holds release their
+  original deferred messages through the existing transactional queue admission;
+  pauses, approvals and source ownership remain authoritative.
+- The existing control sweep publishes one idempotent system warning per wake
+  older than 30 minutes on an open visible issue. Concurrent publication locks
+  the issue and rechecks the comment key.
+- Close only the exact terminal reserved owner disposition retry, including
+  failed retries; keep unrelated recovery and execution holds. Cancellation
+  returns blocked work to its unchanged owner only through hand-back gates.
+- Regression runner: `bash scripts/smoke/per475-recovery/check.sh`.
+  It uses digest-pinned disposable cluster compute and real PostgreSQL, with
+  namespace deletion and absence readback. It is not a production canary.
+- Retirement: drop when upstream supplies equivalent retained-session recovery,
+  evidence fencing, saved-message delivery and retry-action lifecycle handling.
+>>>>>>> ebb044c3 (fix(recovery): reconcile platform failures and release saved wakes (PER-475))

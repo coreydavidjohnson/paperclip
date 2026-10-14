@@ -17,6 +17,7 @@ import {
   environmentLeases,
   environments,
   heartbeatRuns,
+  heartbeatRunEvents,
   issueComments,
   issueInboxArchives,
   issueRecoveryActions,
@@ -32,7 +33,7 @@ import {
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
-import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
+import { platformExecutionHasStopped, alertDeferredExecutionWakes, deliverReconciledExecutions, settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService } from "../services/recovery/service.js";
@@ -154,6 +155,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(issueComments);
     await db.delete(environmentLeases);
     await db.delete(activityLog);
+    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -1804,6 +1806,181 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(recorded!.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "pending" });
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+  });
+
+  it.each(["omnigent_session_failed", "omnigent_rotation_not_ready", "server_shutdown_interrupted", "execution_reconciliation_required"])("automatically reconciles terminal platform failure %s, including historical no-replay holds", async errorCode => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(heartbeatRuns).set({ errorCode, finishedAt: new Date(), sessionIdAfter: "original-session", resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+      status: "resolved", outcome: "blocked", ownerType: "board", returnOwnerAgentId: coderId,
+      nextAction: "Wait for recovery", evidence: { runId, automaticRecovery: { replay: "blocked" } },
+    }).returning();
+    await settleUnrecoverableExecutions(db);
+    const [saved] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
+    expect(saved).toMatchObject({ status: "resolved", outcome: "restored", evidence: {
+      automaticRecovery: { policy: "platform_recheck_v1", replay: "allowed" },
+      executionReconciliation: { runId, providerStopped: true }, continuationDelivery: "pending",
+    } });
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]!.sessionIdAfter).toBe("original-session");
+    const wake = vi.fn(async () => null);
+    await deliverReconciledExecutions(db, wake);
+    expect(wake).toHaveBeenCalledWith(coderId, expect.objectContaining({ contextSnapshot: expect.objectContaining({ forceFreshSession: false }) }));
+  });
+
+  it.each(["running", "idle", "wrong-session", "offline", "approval", "missing-receipt", "malformed", "stored-stop-running"])("requires live remote stop proof (%s)", async mode => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(agents).set({ adapterType: "omnigent", adapterConfig: { baseUrl: "https://fixture.invalid", agentId: "home_lab" } }).where(eq(agents.id, coderId));
+    await db.update(heartbeatRuns).set({ runnerProfileJson: { adapterDispatch: { adapterType: "omnigent" } },
+      resultJson: mode === "missing-receipt" ? {} : { ...(mode === "stored-stop-running" ? { executionRecovery: { providerStopped: true } } : {}), omnigentDispatchReceipt: {
+        version: 1, runId, companyId, agentId: coderId, omnigentSessionId: "retained", state: "observed",
+      } },
+    }).where(eq(heartbeatRuns.id, runId));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const probe = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+      id: mode === "wrong-session" ? "foreign" : "retained", agent_id: "home_lab",
+      status: ["running", "stored-stop-running"].includes(mode) ? "running" : "idle", active_response_id: ["running", "stored-stop-running"].includes(mode) ? "active" : null,
+      runner_online: mode !== "offline", host_online: true, pending_inputs: mode === "malformed" ? undefined : [], pending_elicitations: mode === "approval" ? [{}] : [],
+    }), { status: 200 }));
+    try { expect(await platformExecutionHasStopped(db, run!)).toBe(mode === "idle"); }
+    finally { probe.mockRestore(); }
+  });
+
+  it("does not clear an agent-flagged unknown action after a platform failure", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(heartbeatRuns).set({ errorCode: "omnigent_session_failed", resultJson: {
+      executionRecovery: { actionOutcomes: "unknown" },
+    } }).where(eq(heartbeatRuns.id, runId));
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+      ownerType: "board", returnOwnerAgentId: coderId, nextAction: "Inspect uncertain effect", evidence: { runId },
+    }).returning();
+    await settleUnrecoverableExecutions(db);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]!.evidence.automaticRecovery).toMatchObject({ replay: "blocked" });
+  });
+
+  it("returns cancelled recovery work to the unchanged owner without an extra resume", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({ companyId, sourceIssueId,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target", fingerprint: "cancelled-case",
+      ownerType: "board", returnOwnerAgentId: coderId, nextAction: "Return work", wakePolicy: { type: "board_escalation" },
+    });
+    const response = await request(createApp())
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "cancelled", sourceIssueStatus: "blocked" }).expect(200);
+    expect(response.body.issue).toMatchObject({ status: "todo", assigneeAgentId: coderId });
+    expect(response.body.recoveryAction.status).toBe("cancelled");
+  });
+
+
+  it.each(["succeeded", "failed", "timed_out", "interrupted", "cancelled"])("closes the exact agent-owned terminal disposition retry (%s)", async status => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target", fingerprint: "terminal-retry",
+      ownerType: "agent", ownerAgentId: coderId, returnOwnerAgentId: coderId,
+      nextAction: "Record a disposition", wakePolicy: { type: "bounded_owner_disposition_repair", scheduledRunId: runId },
+    }).returning();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(), contextSnapshot: {
+      issueId: sourceIssueId, recoveryActionId: action!.id,
+    } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ status: status === "succeeded" ? "blocked" : "in_progress" }).where(eq(issues.id, sourceIssueId));
+    const recovery = recoveryService(db, { enqueueWakeup: vi.fn(async () => null) });
+    await recovery.reconcileStrandedAssignedIssues();
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0])
+      .toMatchObject({ status: "resolved", wakePolicy: null });
+  });
+
+  it.each(["new-reservation", "other-owner"])("does not close a terminal retry with %s", async mode => {
+    const { companyId, coderId, managerId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target", fingerprint: "fenced-retry",
+      ownerType: "agent", ownerAgentId: mode === "other-owner" ? managerId : coderId, returnOwnerAgentId: coderId,
+      nextAction: "Keep current owner reservation", wakePolicy: { type: "bounded_owner_disposition_repair",
+        scheduledRunId: mode === "new-reservation" ? randomUUID() : runId },
+    }).returning();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(), contextSnapshot: { issueId: sourceIssueId, recoveryActionId: action!.id } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: { owner: { agentId: coderId }, action: "Wait for the real prerequisite." } }).where(eq(issues.id, sourceIssueId));
+    await recoveryService(db, { enqueueWakeup: vi.fn(async () => null) }).reconcileStrandedAssignedIssues();
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]!.status).toBe("active");
+  });
+
+  it.each(["paused-agent", "paused-company", "dependency", "approval", "descriptor"])("retains saved recovery messages behind %s", async gate => {
+    const { companyId, coderId, sourceIssueId, previousRunId, heartbeat } = await seedReconciledDelivery();
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId, agentId: coderId,
+      source: "on_demand", status: "deferred_issue_execution", payload: { issueId: sourceIssueId,
+        executionWait: { reason: "execution_recovery" }, _paperclipWakeContext: { issueId: sourceIssueId, wakeReason: "issue_commented" } },
+    }).returning();
+    if (gate === "paused-agent") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
+    if (gate === "paused-company") await db.update(companies).set({ status: "paused" }).where(eq(companies.id, companyId));
+    if (gate === "descriptor") await db.update(issues).set({ status: "blocked", unblockDescriptor: {
+      owner: { agentId: coderId }, action: "Wait for the named repair.",
+    } }).where(eq(issues.id, sourceIssueId));
+    if (gate === "approval") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+      kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Approve?" },
+    });
+    if (gate === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Real prerequisite", status: "todo", priority: "medium" }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker!.id, relatedIssueId: sourceIssueId, type: "blocks" });
+    }
+    await db.update(heartbeatRuns).set({ errorCode: "omnigent_session_failed", finishedAt: new Date() }).where(eq(heartbeatRuns.id, previousRunId));
+    await heartbeat.resumeQueuedRuns();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null });
+  });
+
+  it("promotes the saved deferred message once after the execution hold resolves", async () => {
+    const { companyId, coderId, sourceIssueId, previousRunId, heartbeat, action } = await seedReconciledDelivery();
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId: sourceIssueId,
+      authorType: "user", authorUserId: "recovery-user", body: "Retain this exact saved message.",
+    }).returning();
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId, agentId: coderId,
+      source: "on_demand", triggerDetail: "system", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+      requestedByActorType: "user", requestedByActorId: "recovery-user",
+      payload: { issueId: sourceIssueId, executionWait: { reason: "execution_recovery" },
+        _paperclipWakeContext: { issueId: sourceIssueId, wakeReason: "issue_commented", wakeCommentId: comment!.id, wakeCommentIds: [comment!.id] } },
+    }).returning();
+    await db.update(issueRecoveryActions).set({ evidence: { ...action.evidence, continuationDelivery: "delivered" } }).where(eq(issueRecoveryActions.id, action.id));
+    await db.update(heartbeatRuns).set({ errorCode: "omnigent_session_failed", finishedAt: new Date() }).where(eq(heartbeatRuns.id, previousRunId));
+    await Promise.all([heartbeat.resumeQueuedRuns(), heartbeat.resumeQueuedRuns()]);
+    await heartbeat.resumeQueuedRuns();
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id));
+    expect(receipt!.status).not.toBe("deferred_issue_execution");
+    expect(receipt!.runId).toBeTruthy();
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, receipt!.runId!));
+    expect(JSON.stringify(successor!.contextSnapshot)).toContain(comment!.id);
+    expect(await db.select().from(issueComments).where(eq(issueComments.id, comment!.id))).toHaveLength(1);
+  });
+
+
+  it("alerts once for an open issue with a deferred wake older than 30 minutes", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const now = new Date("2026-10-14T22:00:00Z");
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId, agentId: coderId,
+      source: "automation", status: "deferred_issue_execution", payload: { issueId: sourceIssueId },
+      requestedAt: new Date("2026-10-14T21:29:59Z"),
+    }).returning();
+    const results = await Promise.all([alertDeferredExecutionWakes(db, now), alertDeferredExecutionWakes(db, now)]);
+    expect(results.map(r => r.alerted).sort()).toEqual([0, 1]);
+    expect(await alertDeferredExecutionWakes(db, now)).toEqual({ alerted: 0 });
+    expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, `deferred-wake-alert:${wake!.id}`))).toHaveLength(1);
+    await db.insert(agentWakeupRequests).values({ companyId, agentId: coderId,
+      source: "automation", status: "deferred_issue_execution", payload: { issueId: sourceIssueId }, requestedAt: now,
+    });
+    expect(await alertDeferredExecutionWakes(db, now)).toEqual({ alerted: 0 });
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, sourceIssueId));
+    expect(await alertDeferredExecutionWakes(db, new Date("2026-10-15T00:00:00Z"))).toEqual({ alerted: 0 });
   });
 
   async function seedReconciledDelivery() {

@@ -103,6 +103,7 @@ import {
   lte,
   ne,
   notInArray,
+  not,
   or,
   sql,
 } from "drizzle-orm";
@@ -19511,6 +19512,30 @@ export function heartbeatService(
     if ((await getSchedulingSuppression()).suppressed) return;
     await resumeExecutionWaitComments();
     const cutoff = await getWorktreeExecutionCutoff();
+    const releasedHolds = await db.select({ wake: agentWakeupRequests }).from(agentWakeupRequests)
+      .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
+        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
+        eq(issues.assigneeAgentId, agentWakeupRequests.agentId)))
+      .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
+      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        sql`${agentWakeupRequests.payload}->'executionWait' is not null`,
+        sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
+        isNull(issues.executionRunId), notInArray(issues.status, ["done", "cancelled"]),
+        not(exists(db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, issues.companyId), eq(issueRecoveryActions.sourceIssueId, issues.id), executionBlockerPredicate(),
+        )))), cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
+      .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
+    for (const { wake } of releasedHolds) {
+      const [latest] = await db.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, wake.companyId), eq(heartbeatRuns.agentId, wake.agentId),
+        sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${String(wake.payload?.issueId)}`,
+      )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+      if (!latest || !isHeartbeatRunTerminalStatus(latest.status)) continue;
+      if (await getExecutionBlocker(db, wake.companyId, String(wake.payload?.issueId))) continue;
+      await releaseIssueExecutionAndPromote(latest, { suppressImmediateRecovery: true }).catch(err => {
+        logger.warn({ err, queueId: wake.id }, "Recovery-released wake remains pending");
+      });
+    }
     const pendingInterrupts = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId })
       .from(agentWakeupRequests).innerJoin(companies, eq(companies.id, agentWakeupRequests.companyId))
       .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
@@ -27654,7 +27679,6 @@ export function heartbeatService(
               opts.requestedByActorId !== "execution-recovery" ||
               opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
               enrichedContextSnapshot.source !== "execution.reconciled" ||
-              enrichedContextSnapshot.forceFreshSession !== true ||
               payload?.issueId !== issue.id ||
               payload?.recoveryActionId !== actionId ||
               issue.assigneeAgentId !== agentId ||
@@ -27685,6 +27709,8 @@ export function heartbeatService(
               action.status !== "resolved" ||
               action.kind !== "active_run_watchdog" ||
               action.returnOwnerAgentId !== agentId ||
+              enrichedContextSnapshot.forceFreshSession !==
+                (parseObject(action.evidence.automaticRecovery).policy !== "platform_recheck_v1") ||
               !sourceRunId ||
               !isUuidLike(sourceRunId) ||
               decision.providerStopped !== true ||

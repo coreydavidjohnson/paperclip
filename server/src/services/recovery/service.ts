@@ -3358,6 +3358,31 @@ export function recoveryService(
     return Boolean(run || wake);
   }
 
+  async function closeTerminalDispositionRetry(candidate: typeof issueRecoveryActions.$inferSelect) {
+    if (candidate.kind !== "deliberate_wait_without_target" || candidate.ownerType !== "agent") return false;
+    const runId = readNonEmptyString(parseObject(candidate.wakePolicy).scheduledRunId);
+    if (!runId) return false;
+    return db.transaction(async tx => {
+      const [issue] = await tx.select().from(issues).where(and(eq(issues.companyId, candidate.companyId),
+        eq(issues.id, candidate.sourceIssueId))).for("update");
+      const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, candidate.companyId),
+        eq(heartbeatRuns.id, runId))).for("update");
+      if (!issue || !run || !["succeeded", "failed", "timed_out", "interrupted", "cancelled"].includes(run.status) ||
+          parseObject(run.contextSnapshot).recoveryActionId !== candidate.id ||
+          (run.nativeIssueId ?? parseObject(run.contextSnapshot).issueId) !== issue.id) return false;
+      const closed = await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "restored",
+        resolvedAt: new Date(), updatedAt: new Date(), wakePolicy: null, monitorPolicy: null,
+        resolutionNote: `The exact owner disposition retry ended (${run.status}); source status is ${issue.status}. Other holds remain in force.`,
+      }).where(and(eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
+        eq(issueRecoveryActions.id, candidate.id), eq(issueRecoveryActions.ownerType, "agent"),
+        eq(issueRecoveryActions.ownerAgentId, run.agentId), eq(issueRecoveryActions.returnOwnerAgentId, run.agentId),
+        inArray(issueRecoveryActions.status, ["active", "escalated"]),
+        sql`${issueRecoveryActions.wakePolicy}->>'scheduledRunId' = ${run.id}`,
+      )).returning({ id: issueRecoveryActions.id });
+      return closed.length > 0;
+    });
+  }
+
   async function reconcileActiveRecoveryActions() {
     const rows = await db
       .select({ action: issueRecoveryActions, issue: issues })
@@ -3379,6 +3404,9 @@ export function recoveryService(
       issueIds: [] as string[],
     };
     for (const { action, issue } of rows) {
+      if (await closeTerminalDispositionRetry(action)) {
+        result.resolved += 1; result.issueIds.push(issue.id); continue;
+      }
       const wakePolicy = parseObject(action.wakePolicy);
       const wakePolicyType = readNonEmptyString(wakePolicy.type);
       if (
@@ -3744,8 +3772,8 @@ export function recoveryService(
       )
       .limit(1)
       .then((rows) => rows[0] ?? null);
-    if (!current || current.status === "done" || current.status === "cancelled")
-      return "skipped";
+    if (!current) return "skipped";
+    if (current.status === "done" || current.status === "cancelled") return "skipped";
 
     const episode = options.legacyEpisode ?? (
       parseObject(parseObject(latestRun?.contextSnapshot).legacyDispositionEpisode).id && latestRun
@@ -4292,6 +4320,16 @@ export function recoveryService(
   async function reconcileStrandedAssignedIssues(opts?: {
     issueCreatedAtGte?: Date | null;
   }) {
+    // Retire finished reserved retries before generic failure classification can
+    // replace their wake policy. A later pass may create distinct recovery work.
+    const completedRetryIssues = new Set<string>();
+    const retries = await db.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.kind, "deliberate_wait_without_target"), eq(issueRecoveryActions.ownerType, "agent"),
+      inArray(issueRecoveryActions.status, ["active", "escalated"]),
+    ));
+    for (const action of retries) {
+      if (await closeTerminalDispositionRetry(action)) completedRetryIssues.add(action.sourceIssueId);
+    }
     const candidates = await db
       .select()
       .from(issues)
@@ -4357,6 +4395,7 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      if (completedRetryIssues.has(issue.id)) { result.skipped += 1; continue; }
       if (issue.originKind === "chat_channel") {
         await settleSlackConversation(db, issue.companyId, issue.id);
         const [current] = await db.select({ externalConversationState: externalConversationStateSql() })
