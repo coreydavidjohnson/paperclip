@@ -1,3 +1,4 @@
+import { isLiveEventTransportReady } from "../services/live-events.js";
 import { beginControllerDrain, isControllerDraining } from "../controller-drain.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -148,7 +149,7 @@ export function healthRoutes(
     res.json({ draining: true, deadline: beginControllerDrain() });
   });
   router.get("/ready", async (_req, res) => {
-    if (isControllerDraining() || getStartupRecoveryState().phase !== "ready" || !opts.authReady || !db) {
+    if (!isLiveEventTransportReady() || isControllerDraining() || getStartupRecoveryState().phase !== "ready" || !opts.authReady || !db) {
       res.status(503).json({ ready: false });
       return;
     }
@@ -158,7 +159,7 @@ export function healthRoutes(
       await Promise.race([readinessProbe, new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error("readiness_database_timeout")), 2000);
       })]);
-      const ready = !isControllerDraining() && getStartupRecoveryState().phase === "ready";
+      const ready = isLiveEventTransportReady() && !isControllerDraining() && getStartupRecoveryState().phase === "ready";
       res.status(ready ? 200 : 503).json({ ready });
     } catch { res.status(503).json({ ready: false }); }
     finally { if (timer) clearTimeout(timer); }

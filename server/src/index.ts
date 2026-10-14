@@ -6,7 +6,7 @@ import {
   SKILL_VERSION_RETENTION_STARTUP_DELAY_MS,
   skillVersionRetentionService,
 } from "./services/skill-version-retention.js";
-import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
+import { startLiveEventTransport, subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import { registerScheduledWork } from "./services/scheduled-work.js";
 import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
@@ -659,11 +659,14 @@ async function startServerWithDatabaseTeardown(
   // Ends every pool this process opened. Used by the orderly shutdown path
   // (after the application services, before the embedded provider stops) and
   // by the fail-loud startup path, so no exit leaves pooled backends behind.
+  let liveEvents: ReturnType<typeof startLiveEventTransport> | null = null;
   const closeDatabaseClients = async () => {
+    await liveEvents?.stop();
     const clients = pluginMigrationDb === db ? [db] : [db, pluginMigrationDb];
     await Promise.all(clients.map((client) => endDatabaseClient(client, 5)));
   };
   startupDatabase.close = closeDatabaseClients;
+  liveEvents = startLiveEventTransport(db);
   
   // A claimed warm-pool stack may restart while its provider environment still
   // names the pool host. Restore the signed, durable identity before Better
