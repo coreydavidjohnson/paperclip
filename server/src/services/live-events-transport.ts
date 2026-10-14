@@ -95,9 +95,11 @@ export function createLiveEventTransport(
     if (stopped) return;
     const epoch = ++generation;
     // Reuse resolved credentials/TLS/multi-host configuration, not the DB pool.
+    const { shared: _shared, ...resolved } = db.$client.options as typeof db.$client.options & { shared?: unknown };
+    // The parsed-options sentinel bypasses normalization and shares retry state.
     const options = {
-      ...db.$client.options,
-      max: 1, prepare: false, idle_timeout: 0, max_lifetime: 0,
+      ...resolved,
+      max: 1, max_pipeline: 1, prepare: false, idle_timeout: 0, max_lifetime: 0,
       connect_timeout: 2, fetch_types: false,
       connection: { ...db.$client.options.connection, application_name: "paperclip-live-events", statement_timeout: 2000 },
       onnotify: (channel: string, raw: string) => { if (channel === CHANNEL) notification(raw, epoch); },
