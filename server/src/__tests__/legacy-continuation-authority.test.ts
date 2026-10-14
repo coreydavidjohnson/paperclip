@@ -334,6 +334,8 @@ describe("legacy continuation persisted authority", () => {
       const repair = (await f.runs()).find(r => r.id !== f.runId)!;
       expect(repair.contextSnapshot).toMatchObject({issueId: f.issueId, legacyDispositionEpisode: {attempt: 1, maxAttempts: 2}});
       expect(repair.agentId).toBe(f.agentId);
+      expect(repair.contextSnapshot).toMatchObject({wakeReason: "issue_blockers_resolved", routingParentHandback: true});
+      expect(repair.contextSnapshot?.recoveryIntent).not.toBe("status_only");
     }
     expect((await db.select().from(issues).where(eq(issues.id, childId)))[0].status).toBe("todo");
   });

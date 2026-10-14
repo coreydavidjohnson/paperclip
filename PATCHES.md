@@ -293,3 +293,5 @@ has five assertion failures and one genuine implementation-child pass. Deploymen
 and real-ticket acceptance must be recorded by the coordinated release owner.
 
 Qualification: all 49 persisted authority tests passed in the cluster fixture; routing-edge removal is transactional and audited once. Recovery child discovery excludes typed routing children so it cannot recreate the deadlock. Explicit purpose avoids trusting issue prose. Pre-existing untyped children are not silently reclassified.
+
+Routing parents use ordinary issue_blockers_resolved / normal_model wake routing, not issue_disposition_repair recovery-only presentation. Internal bounded episode authority is retained for dispatch safety and deduplication; this is not approval to replay unknown side effects. A failing-before wake-reason regression covers this distinction.
