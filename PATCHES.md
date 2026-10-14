@@ -352,3 +352,48 @@ into the current fork image or supplied by a fork migration.
 
 - Start UI transport before traffic, require it for readiness, stop before normal and startup-error DB cleanup.
 - No production deploy; image/typecheck/provider handover gates remain.
+
+## PER-282 follow-up: durable OmniGenT same-run controller attachment
+
+- **Base:** `bbc0e958ded599ff182507454dbcfa4b7e4f5e60` (production fork pin
+  `1270c9f1e53f64e450f82cc977a11b16b2791c36`).
+- **Why carried:** retention alone parked expired remote work forever; the
+  controller shutdown timeout could close the pool while finalizers were live.
+  Current inspected upstream stable `bba6a45f` and master `e0f30a4c` have no
+  equivalent for the home-owned external OmniGenT adapter. Reuses that adapter's
+  existing read-only rollout attach implementation, not a provider scheduler.
+- **Behavior:** commits a versioned run/company/agent/session dispatch intent
+  before the provider message POST; stores accepted pending ID and observed
+  original user/response/turn identifiers. PostgreSQL boot-lease CAS claims the
+  same running row after expiry. The real heartbeat executor passes the durable
+  receipt into read-only attachment; no new heartbeat, prompt, session or tool
+  replay. Session/user/response/turn binding cannot change during receipt updates.
+  Ambiguous delivery remains retained until transcript evidence appears.
+- **Checkpoint:** at completion-grace expiry, aborts only the local observer
+  with the existing ownership-loss reason (not operator cancellation), joins
+  actual executor finalizers, then expires its lease. A periodic reaper on the
+  next controller attaches automatically. Original run-scoped tokens remain
+  valid across controllers sharing the same signing/instance configuration.
+  Missing evidence never grants dispatch authority.
+- **Coupled change:** home-owned `services/paperclip/adapter/src/server/execute.ts`
+  and `omni-client.ts` in luma-homelab. Approval-create/resolve and final-mirror
+  intents persist before their side effects; handover reuses approval IDs and
+  never repeats an uncertain write. Removes old cold-start prompt resend.
+- **Parent-owned wiring:** `scripts/smoke/per282-controller/INDEX-INTEGRATION.md`
+  lists exact `server/src/index.ts` shutdown callback changes. This branch does
+  not touch index/live-events/WebSocket/UI/db exports because parent integrates
+  those concurrently. Both branches and the index hook must ship together.
+- **Verification:** isolated pinned-image real PostgreSQL / two API controllers /
+  real home-owned adapter against an exact-HTTP-contract OmniGenT stub. A turn
+  outlived the full **120000ms** completion grace, checkpointed and succeeded on
+  controller B with original run/session/user/response/turn. Original JWT exercised
+  production auth + agents + issues routes on both controllers before/after drain.
+  Exactly one prompt, zero interrupts/approval replays, one original run.
+  143 adapter tests and 22 focused fork tests passed; changed server production
+  modules transpiled with esbuild. Cleanup verified namespace absent.
+- **Limits:** stub integration is not real OmniGenT acceptance (PER-285 owns
+  that). Tests are source overlays on immutable dependency images, not an image
+  build. Full server typecheck previously exited 137; not claimed as passed.
+  Parent exact-SHA CI/image build and index wiring remain required, no deploy here.
+- **Retire:** drop when upstream + external adapter provide equivalent durable
+  same-run remote attachment, identity fencing and no-replay checkpoint semantics.

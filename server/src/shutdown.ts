@@ -44,14 +44,19 @@ export async function drainRunExecutionFinalizersForShutdown(input: {
 export async function completeControllerTurnsForShutdown(input: {
   signal: "SIGINT" | "SIGTERM";
   waitForSchedulerIdle: () => Promise<void>;
+  checkpoint?: () => Promise<unknown>;
   drain: (() => Promise<void>) | null;
   log: ShutdownLogger;
 }) {
   beginControllerDrain();
-  return drainRunExecutionFinalizersForShutdown({ ...input,
+  const result = await drainRunExecutionFinalizersForShutdown({ ...input,
     timeoutMs: controllerDrainRemainingMs(),
     drain: async () => { await input.waitForSchedulerIdle(); await input.drain?.(); },
   });
+  if (result === "drained" || !input.checkpoint) return result;
+  await input.checkpoint();
+  // Unlike a timeout, this confirms the observers and their finalizers settled.
+  return "checkpointed" as const;
 }
 
 type ShutdownHttpListener = {

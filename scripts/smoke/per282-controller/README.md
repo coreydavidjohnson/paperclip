@@ -53,3 +53,18 @@ exit 137, not a pass. Changed production modules transpiled with esbuild in the
 cluster; full exact-SHA CI and immutable-image rebuild remain with integration.
 The two fixtures are source overlays on a digest-pinned dependency image, not
 new immutable application images. Event transport is intentionally untouched.
+
+## Follow-up: actual remote long-turn attachment (supersedes retention-only gap above)
+
+`DRAIN_GRACE_MS=120000 ADAPTER_SOURCE=<home-owned services/paperclip/adapter> bash scripts/smoke/per282-controller/attach.sh`
+
+Uses the real adapter and production auth/agents/issues routers on two independent
+API controllers. The isolated exact-API OmniGenT stub holds one real dispatched
+message until the test releases its final response. The full 120s grace expires,
+local executor finalizers settle without provider interruption, and the periodic
+reaper automatically adopts the original run on B. API requests use the original
+JWT captured from the provider prompt, not a fixture token or board auth. Receipt
+identity, one prompt/no replay and original-run completion are assertions. See
+`evidence/attach-120s.txt`; this proves application/adapter integration, **not**
+real OmniGenT runner acceptance (PER285). Parent must apply the exact shutdown
+hook in `INDEX-INTEGRATION.md` when merging event/index integration.

@@ -1,0 +1,193 @@
+namespace/per282-attach-1791947100-439642 created
+pod/controller-a created
+pod/controller-b created
+pod/database created
+pod/controller-a condition met
+pod/controller-b condition met
+pod/database condition met
+fixture migrations applied
+CHECKPOINT elapsedMs=120032 graceMs=120000
+PASS actual heartbeat + home-owned adapter HTTP integration: same run/session/user/response/turn after bounded checkpoint and controller handover
+PASS original JWT through both production auth/API routers: agent self, issue reads, comments before/after drain and on new owner
+PASS exactly one prompt, zero interrupts/approval replays, one original run succeeds; no replacement/recovery run
+✔ config: missing baseUrl or agentId fails closed (2.109963ms)
+✔ session key is per issue, falls back to run when there is no issue (0.25166ms)
+✔ configured project, model and effort reach the new session before its turn (12.616159ms)
+✔ native wrapper labels reach new sessions without replacing Paperclip ownership (3.143224ms)
+✔ a Tests-project issue gets a labelled [test] session that is archived when the turn ends (3.052751ms)
+✔ an ordinary issue session is not labelled or archived (2.510892ms)
+✔ resuming repairs missing native wrapper labels and preserves other labels (5.548288ms)
+✔ issue labels override effective agent config, and resumed changes precede the message (5.128862ms)
+✔ unconfigured Paperclip wakes preserve model and effort selected in OmniGenT (3.479132ms)
+✔ explicit default labels clear model and effort selected in OmniGenT (3.567287ms)
+✔ explicit default labels omit overrides when creating a session (2.043747ms)
+✔ chat replies finish through the adapter result without changing conversation status (4.323991ms)
+✔ empty model catalog preserves requested model and effort at session creation (2.439419ms)
+✔ unknown model comments and restores the default rather than silently failing (1.788134ms)
+✔ agent configuration UI exposes project, model and effort (0.224754ms)
+✔ happy path: creates session, sends prompt, returns summary and sessionParams (1.876551ms)
+✔ new session is titled from the Paperclip issue title, not the agent name (1.750368ms)
+✔ idle without assistant text waits for the final answer and mirrors its comment (2.886315ms)
+✔ interrupted in user or tool text is not provider interruption evidence (2.704835ms)
+✔ a real assistant interruption marker is not a successful answer (1.884219ms)
+✔ a session running again after an idle transcript read is reattached (2.546509ms)
+✔ cold-start rejection never replays a dispatched message (2.044089ms)
+✔ cold-start evidence never retries a message with assistant output (1.803845ms)
+✔ successful acknowledgements and partial progress mirror comments without disposition (3.559771ms)
+✔ successful mirroring preserves explicit native owner dispositions (5.878906ms)
+✔ native blocker completion leaves parent disposition to its owner (2.396153ms)
+✔ child completion wake forwards native summaries, ancestry and disposition protocol (1.995983ms)
+✔ follow-up wake resumes the same session and sends the compact prompt (2.77722ms)
+✔ lost sessionParams (crash after create) re-attaches by label instead of duplicating (2.737744ms)
+✔ deleted session is recreated (1.532996ms)
+✔ session rebound to a different OmniGenT agent is not reused (2.690307ms)
+✔ busy session: duplicate wake waits for the in-flight answer without injecting a message (2.281747ms)
+✔ rollout resume harvests an already-completed turn without another prompt (2.750815ms)
+✔ rollout resume waits for the original busy turn without another prompt (2.020301ms)
+✔ snapshot resume reattaches when the original user item arrived after capture (26.32805ms)
+✔ snapshot resume harvests only the captured response, not a later user turn (2.523689ms)
+✔ rollout resume refuses missing or foreign session evidence instead of creating a session (1.346278ms)
+✔ legacy controller lease loss detaches without interrupting OmniGenT work (1.226742ms)
+✔ legacy controller loss during approval does not cancel the pending OmniGenT approval (1.187814ms)
+✔ company allowlist blocks an OmniGenT agent from another client (0.126596ms)
+✔ offline host is a transient, retryable failure (0.339885ms)
+✔ OmniGenT 5xx on create is transient (0.304506ms)
+✔ OmniGenT unreachable is transient (1.110498ms)
+✔ a short OmniGenT outage during create and polling is retried without resending the message (2.330809ms)
+✔ OmniGenT unreachable beyond the retry budget fails after about three minutes (1.015007ms)
+✔ turn error surfaces as failure and is commented on the issue (1.738661ms)
+✔ permission prompt becomes a Paperclip approval; approve => accept (2.95833ms)
+✔ permission prompt rejected in Paperclip => decline (2.226865ms)
+✔ permission prompt with no Paperclip token fails closed (decline) (1.486028ms)
+✔ approval waits cannot outlive the owning run's timeout (1.15329ms)
+✔ Paperclip cancel interrupts the OmniGenT session (1.673016ms)
+✔ operator interrupt for queued messages settles cleanly without a run-ended comment (1.613878ms)
+✔ cancelled chat turns do not post a run-ended comment (1.446622ms)
+✔ ordinary task cancel still reports the run end (1.694127ms)
+✔ adapter timeout interrupts and reports timedOut (2.346579ms)
+✔ session whose runtime dies is reported promptly and cleared for next wake (1.619401ms)
+✔ listModels reads the OmniGenT host catalog and declares efforts (0.721323ms)
+✔ a failed binding with host_online=false gets no control retry or prompt (0.603406ms)
+✔ a idle binding with host_online=false gets no control retry or prompt (0.292248ms)
+✔ a failed binding with host_online=null gets no control retry or prompt (0.273472ms)
+✔ a idle binding with host_online=null gets no control retry or prompt (0.295218ms)
+✔ a failed binding gets a control-only retry before any new prompt (1.927653ms)
+✔ an unrecoverable failed binding sends no prompt, replays no old error, and keeps the session (0.459301ms)
+✔ a normal in-flight attach never triggers a session retry or a new prompt (0.949902ms)
+✔ a queued retry response is not accepted as recovery and sends no prompt (0.350464ms)
+✔ a not_recovered retry response is not accepted as recovery and sends no prompt (0.332004ms)
+✔ a recovered session with no runner_online evidence is not treated as clean idle (59999.913229ms)
+✔ an idle binding with an offline runner is recovered by retry_session before the prompt (1.697536ms)
+✔ a failed binding with a pending approval gets no retry and no prompt (0.998577ms)
+✔ readiness verification is bounded by time, not by the configured poll interval (5.410768ms)
+✔ cancellation during retry verification preserves the abort and sends no prompt (0.716419ms)
+✔ controller lease loss during retry verification detaches without a prompt (0.55379ms)
+✔ an approval that appears during recovery is attached to, never answered with a new prompt (1.336352ms)
+✔ a hung read during recovery hits the stage budget, is unrecovered rather than cancelled, and sends no prompt (1.704329ms)
+✔ successful reply is not a disposition: backlog: I will build and check it next. (1.214744ms)
+✔ successful reply is not a disposition: backlog: Not done. Tests remain. (1.023887ms)
+✔ successful reply is not a disposition: backlog: DONE: did the thing (1.015595ms)
+✔ successful reply is not a disposition: todo: I will build and check it next. (1.118ms)
+✔ successful reply is not a disposition: todo: Not done. Tests remain. (1.039255ms)
+✔ successful reply is not a disposition: todo: DONE: did the thing (1.108049ms)
+✔ successful reply is not a disposition: in_progress: I will build and check it next. (1.254746ms)
+✔ successful reply is not a disposition: in_progress: Not done. Tests remain. (1.370048ms)
+✔ successful reply is not a disposition: in_progress: DONE: did the thing (1.04436ms)
+✔ answer publication failure does not complete unfinished work or replay writes (1.64898ms)
+✔ an 18-second native startup recovers before the first prompt, without redispatching (3.134558ms)
+✔ a new session that fails before its prompt has structured non-dispatch evidence (0.864501ms)
+✔ a healthy new session crosses the dispatch boundary only for its one message (1.425818ms)
+✔ a input session during recovery does not authorize bootstrap replay (0.89435ms)
+✔ a active session during recovery does not authorize bootstrap replay (0.569668ms)
+✔ a pending session during recovery does not authorize bootstrap replay (0.52252ms)
+✔ a foreign session during recovery does not authorize bootstrap replay (0.545279ms)
+✔ attachments from the description and wake comments reach the model as session files (5.252959ms)
+✔ attachments referenced by URL in a resumed wake comment are fetched and deduped (2.480716ms)
+✔ native rotation creates a fresh session with the handoff (3.520175ms)
+✔ native rotation preserves busy work and pending approval (3.185325ms)
+✔ native rotation can retry after the old label was retired (3.340352ms)
+✔ native rotation fails closed on foreign ownership or missing handoff (3.374562ms)
+✔ compression timeout is a failure, not a completed answer: Context compression timed out without reducing this conversation. (1.644475ms)
+✔ compression timeout is a failure, not a completed answer: Context compression timed out before it could commit while the re (1.459312ms)
+✔ compression error metadata remains a failure without clearing history (1.520582ms)
+✔ a discussion of compression is not a compression failure (1.707822ms)
+✔ failed session compression evidence is retained without resend (1.496795ms)
+✔ OmniClient getSession sets query params correctly (0.399344ms)
+✔ execute polls omnigent session with include_items=false and include_usage=false (1.328557ms)
+✔ PER-192 prompt recovery accepts the final reply from the same run's Hermes continuation (7739.759148ms)
+✔ PER-192 environment recovery accepts the final reply from the same run's Hermes continuation (3.847874ms)
+✔ durable intent is committed before message POST and uncertain outcome is never replayed (1.013686ms)
+✔ same-run receipt rejects another run and never creates or sends work (0.326739ms)
+✔ accepted receipt captures provider pending ID and preserves it in result (1.195895ms)
+✔ GET recovers from 502 without changing its request (25.58883ms)
+✔ GET recovers from 503 without changing its request (1.321636ms)
+✔ GET recovers from 504 without changing its request (0.562173ms)
+✔ GET stops after three extra attempts with jittered 2/4/8 second delays (1.529766ms)
+✔ GET does not retry HTTP 400 (0.375509ms)
+✔ GET does not retry HTTP 401 (0.269732ms)
+✔ GET does not retry HTTP 403 (0.236601ms)
+✔ GET does not retry HTTP 404 (0.21437ms)
+✔ GET does not retry HTTP 409 (0.24694ms)
+✔ GET does not retry HTTP 429 (0.311011ms)
+✔ GET does not retry HTTP 500 (0.274315ms)
+✔ comment never retries HTTP 502 (0.336881ms)
+✔ createApproval never retries HTTP 502 (0.207812ms)
+✔ completeIssue never retries HTTP 502 (0.204638ms)
+✔ comment never retries HTTP 503 (0.16857ms)
+✔ createApproval never retries HTTP 503 (0.190303ms)
+✔ completeIssue never retries HTTP 503 (0.169728ms)
+✔ comment never retries HTTP 504 (0.188394ms)
+✔ createApproval never retries HTTP 504 (0.167043ms)
+✔ completeIssue never retries HTTP 504 (0.189731ms)
+✔ approval GETs use the same retry policy (0.304676ms)
+✔ the existing four-argument constructor remains supported (0.236322ms)
+✔ GET network failures are not retried (0.25287ms)
+✔ a retry logging failure does not prevent recovery (0.342971ms)
+✔ GET has a 30 second timeout that also bounds response body reads (9.941996ms)
+✔ successful response bodies still use the existing JSON semantics (0.312344ms)
+✔ an already cancelled caller sends no GET (0.240685ms)
+✔ caller cancellation aborts the combined GET signal (0.383411ms)
+✔ cancellation during retry logging skips the delay and next GET (0.278509ms)
+✔ cancellation during an injected retry delay sends no subsequent GET (0.27009ms)
+✔ the default retry sleep is cancellable (5.484613ms)
+✔ a caller signal does not change single-shot comment behavior (0.366647ms)
+✔ a caller signal does not change single-shot createApproval behavior (0.160981ms)
+✔ a caller signal does not change single-shot completeIssue behavior (0.148528ms)
+ℹ tests 143
+ℹ suites 0
+ℹ pass 143
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 68697.997133
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.11 [39m[90m/app/server[39m
+
+ [32m✓[39m src/shutdown.test.ts [2m([22m[2m18 tests[22m[2m)[22m[32m 151[2mms[22m[39m
+[90mstdout[2m | src/controller-drain.test.ts[2m > [22m[2mdrain is one-way, preserves the first preStop deadline, bounds scheduler DB hangs
+[22m[39m{ signal: [32m'SIGTERM'[39m, timeoutMs: [33m30[39m } bounded heartbeat execution finalizer drain timed out
+
+[90mstdout[2m | src/controller-drain.test.ts[2m > [22m[2mcheckpoint settles before shutdown can report a detached controller
+[22m[39m{ signal: [32m'SIGTERM'[39m, timeoutMs: [33m0[39m } bounded heartbeat execution finalizer drain timed out
+
+[90mstdout[2m | src/controller-drain.test.ts[2m > [22m[2mcheckpoint failure propagates rather than closing DB over live finalizers
+[22m[39m{ signal: [32m'SIGTERM'[39m, timeoutMs: [33m0[39m } bounded heartbeat execution finalizer drain timed out
+
+ [32m✓[39m src/controller-drain.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 41[2mms[22m[39m
+ [32m✓[39m src/services/omnigent-attachment.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 4[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m3 passed[39m[22m[90m (3)[39m
+[2m      Tests [22m [1m[32m22 passed[39m[22m[90m (22)[39m
+[2m   Start at [22m 03:09:10
+[2m   Duration [22m 2.44s[2m (transform 926ms, setup 245ms, import 1.58s, tests 196ms, environment 0ms)[22m
+
+
+  ../../tmp/transpile/services/heartbeat.js            918.6kb
+  ../../tmp/transpile/shutdown.js                        4.8kb
+  ../../tmp/transpile/services/omnigent-attachment.js    3.5kb
+
+⚡ Done in 75ms
+Warning: deleting cluster-scoped resources, not scoped to the provided namespace
+namespace "per282-attach-1791947100-439642" deleted
+CLEANUP: namespace absent: per282-attach-1791947100-439642
