@@ -749,3 +749,13 @@ into the current fork image or supplied by a fork migration.
   not deliver these files. Preserve existing overlays and full Argo hooks.
 - Remove when a released upstream equivalent preserves these contracts and
   meets comparable endpoint measurements. No upstream issue/PR is authorized.
+
+## PER-378 candidate: issue-run context single decode (not deployed)
+
+The issue-run history projection now extracts wakeCommentIds as JSONB and
+wakeCommentId/commentId/issueId as text in one guarded LEFT JOIN LATERAL.
+Company predicates, membership, order, result/usage projection, redaction and
+execution/liveness decoration are unchanged. Malformed/non-object contexts
+retain one row with null fields. The database contract test compares all four
+fields and unusual JSON types. Dependency lockfile is unchanged. Endpoint
+benefit, packaging and deployment gates remain pending; do not label this live.

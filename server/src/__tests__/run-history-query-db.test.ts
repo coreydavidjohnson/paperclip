@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { issueRunIdsCondition, runListContextColumns, runListContextJoin } from "../services/run-history-query.js";
+import { issueRunContextJoin, issueRunContextColumns, issueRunIdsCondition, runListContextColumns, runListContextJoin } from "../services/run-history-query.js";
 
 describe("run history database contracts", () => {
   let fixture: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -26,6 +26,30 @@ describe("run history database contracts", () => {
       const row = result[0];
       for (const [oldKey, newKey] of [["old_issue", "issueId"], ["old_task", "taskId"], ["old_key", "taskKey"], ["old_comment", "commentId"], ["old_wake", "wakeCommentId"], ["old_reason", "wakeReason"], ["old_source", "wakeSource"], ["old_detail", "wakeTriggerDetail"]]) expect(row[newKey]).toEqual(row[oldKey]);
       expect(row).not.toHaveProperty("secret");
+    }
+  });
+  it("matches all four issue-run fields without changing JSON types or row count", async () => {
+    const values = [null, [], "text", 42, true, {},
+      { wakeCommentIds: ["a", "b"], wakeCommentId: "w", commentId: "c", issueId: "i", secret: "never-return" },
+      { wakeCommentIds: { nested: true }, wakeCommentId: 3, commentId: [1, "x"], issueId: false },
+      { wakeCommentIds: null, wakeCommentId: { a: 1 }, commentId: null },
+      { wakeCommentIds: "not-an-array", issueId: "large", extra: "x".repeat(100000) }];
+    for (const value of values) {
+      const rows = await db.execute(sql`with heartbeat_runs as (select ${JSON.stringify(value)}::jsonb as context_snapshot)
+        select jsonb_build_object(
+          'wakeCommentIds', context_snapshot->'wakeCommentIds',
+          'wakeCommentId', context_snapshot->>'wakeCommentId',
+          'contextCommentId', context_snapshot->>'commentId',
+          'contextIssueId', context_snapshot->>'issueId') as old,
+        jsonb_build_object(
+          'wakeCommentIds', ${issueRunContextColumns.wakeCommentIds},
+          'wakeCommentId', ${issueRunContextColumns.wakeCommentId},
+          'contextCommentId', ${issueRunContextColumns.contextCommentId},
+          'contextIssueId', ${issueRunContextColumns.contextIssueId}) as actual
+        from heartbeat_runs left join ${issueRunContextJoin} on true`);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].actual).toEqual(rows[0].old);
+      expect(rows[0].actual).not.toHaveProperty("secret");
     }
   });
   it("preserves context/activity union membership, duplicates, company isolation and order", async () => {
