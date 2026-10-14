@@ -458,6 +458,8 @@ into the current fork image or supplied by a fork migration.
   equivalent passes these regressions. No upstream communication is authorized.
 - Homelab Fork.Dockerfile must compile and ship routes/issues.js; otherwise a fork
   pin alone does not deploy this repair. Add the recovery test to its gate.
+## Unsupported blocked owner disposition (PER-404 / PER-270)
+
 - Corey explicitly authorized minimal fork patches in board comment
   c84b473b-87bc-4c5a-9afc-77948134163c. Publish only to this fork, never upstream.
 - A successful legacy run with blocked but no durable wait evidence enters the
