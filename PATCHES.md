@@ -723,3 +723,29 @@ into the current fork image or supplied by a fork migration.
 - Preserve PER-894 no-continuation delivery and dependency locks plus combined admission/UI/payload/cache history.
 - Regression uses real disposable PostgreSQL with malformed/noncanonical/missing/foreign bindings, native precedence, existing status-delivery/recovery suites and 192KiB contexts with 1000 same-company issues. The benchmark disables hash/merge joins transaction-locally to reproduce the observed live nested-loop shape; its timings are not production/API/browser latency claims.
 - Retire the backport when the next complete upstream upgrade includes this commit and passes the private contracts.
+## Execution run-context candidate (PER-358; not deployed)
+
+- Why: existing execution projection independently extracts three fields from
+  potentially TOASTed run snapshots. Author intent for this extraction shape
+  is not established; preserve the downstream execution/liveness contract.
+  Inspected upstream master 2c17d3ca and released v2026.1012.0 retain the old
+  extraction. This is a private candidate, not an upstream submission.
+- Guarded LEFT JOIN LATERAL jsonb_to_record with quoted JSONB fields retains
+  every selected run scalar, tenant/id predicates and downstream behavior.
+  jsonb_build_object retains explicit-null/missing-key output equivalence.
+  No schema, migration, dependencies, secret registry or caching change.
+- Verification: three focused tests passed and server tsc --noEmit passed
+  in pinned dependency-image BuildKit with Node heap capped at 1536 MiB.
+  Fixtures include JSON scalars/nested values/large context, SQL NULL,
+  one-row membership, actual Drizzle query and cross-company isolation.
+  Full selected-field read-only comparison on 80 PER-99 runs: zero differences;
+  SQL pairs original 151/141 ms versus candidate 102/99 ms. Not API acceptance.
+- Fable pre-ship review requires exact endpoint benefit and full query tests.
+  Query tests now pass; endpoint benefit and packaging are still unverified.
+  Current production API p50 fails runs/comments/attention, and full render
+  under one second is unverified. Candidate MUST NOT be called deployed.
+- Packaging must compile/copy execution-projection.js and execution-run-context.js
+  together and run their tests/typecheck. Current homelab narrow overlay does
+  not deliver these files. Preserve existing overlays and full Argo hooks.
+- Remove when a released upstream equivalent preserves these contracts and
+  meets comparable endpoint measurements. No upstream issue/PR is authorized.

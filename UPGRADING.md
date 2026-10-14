@@ -108,3 +108,10 @@ approval/objective provenance are unchanged. Retire the carry only with a
 released equivalent passing the exactly-once and edited/distinct-ID checks.
 The OmniGenT external adapter must use this same adapter-utils revision, not
 its older npm dependency copy; test the assembled image's buildPrompt too.
+PER-358's execution-run-context candidate is prepared but not deployed. Its
+PATCHES.md entry records SQL-only equivalence/performance and unfinished exact
+API/render acceptance. Do not mistake a task-branch SHA for image provenance;
+compile and copy both execution-projection and execution-run-context together
+and retain the embedded database/tenant tests. Broad tsc previously OOMKilled
+both BuildKit lanes; a 1536 MiB Node heap passed the focused verification.
+The lasting source-owned build limit and repeated canaries belong to PER-377.

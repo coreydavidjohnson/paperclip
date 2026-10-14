@@ -9,6 +9,7 @@ import {
 import type { ExecutionProjection } from "@paperclipai/shared";
 import { EXECUTION_CONTROL_DEADLINE_MS } from "./execution-control-deadline.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
+import { executionRunContextColumn, executionRunContextJoin } from "./execution-run-context.js";
 const text = (v: unknown) => (typeof v === "string" ? v : null);
 const executionRunColumns = {
   id: heartbeatRuns.id,
@@ -27,10 +28,7 @@ const executionRunColumns = {
   scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
   startedAt: heartbeatRuns.startedAt,
   status: heartbeatRuns.status,
-  contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
-    'issueId', ${heartbeatRuns.contextSnapshot}->'issueId',
-    'failureRetriesBeforeAiConnectionWait', ${heartbeatRuns.contextSnapshot}->'failureRetriesBeforeAiConnectionWait',
-    'failureRetriesBeforeWorkspaceWait', ${heartbeatRuns.contextSnapshot}->'failureRetriesBeforeWorkspaceWait')`,
+  contextSnapshot: executionRunContextColumn,
 };
 type Run = Pick<typeof heartbeatRuns.$inferSelect, keyof typeof executionRunColumns>;
 type Coordinator = typeof nativeRunFinalizations.$inferSelect;
@@ -54,6 +52,7 @@ export async function executionProjectionsForRuns(
   const runs = await db
     .select(executionRunColumns)
     .from(heartbeatRuns)
+    .leftJoin(executionRunContextJoin, sql`true`)
     .where(
       and(
         eq(heartbeatRuns.companyId, companyId),
