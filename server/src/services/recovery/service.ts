@@ -3718,7 +3718,7 @@ export function recoveryService(
       gates: {
         stopped: stop.kind !== "clear" || isOperatorCancelledRun(run, run.agentId),
         paused: pause, budgetBlocked: budget,
-        pendingWait: state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
+        pendingWait: Boolean(issue.unblockDescriptor) || state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
         activeExecution: state.hasActiveExecutionPath || latest?.id !== (dispatchRunId ?? run.id),
         ownedLifecycle: run.issueCommentStatus === "retry_queued" || run.issueCommentStatus === "retry_exhausted" ||
           Boolean(readNonEmptyString(context.goalControlRequestId)) || context.resumeSessionGoalHeartbeat === true ||
