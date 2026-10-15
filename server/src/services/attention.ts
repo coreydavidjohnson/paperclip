@@ -1498,7 +1498,7 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
         }));
       }
 
-      const blockedIssues = await issueService(db).list(companyId, { status: "blocked", includeBlockedBy: true, readCondition });
+      const blockedIssues = await issueService(db).listBlockedForAttention(companyId, readCondition);
       type BlockedAttentionIssue = IssueSubjectRow & {
         blockerAttention?: {
           state?: string;

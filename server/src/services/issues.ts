@@ -204,7 +204,7 @@ import {
   type IssueGraphLivenessInput,
   type IssueLivenessFinding,
 } from "./recovery/issue-graph-liveness.js";
-import { visibleIssueCondition } from "./issue-visibility.js";
+import { executionIssueCondition, visibleIssueCondition } from "./issue-visibility.js";
 import { finalizeStatusCardsForStalledGeneration } from "./status-card-finalization.js";
 import { finalizeSummarySlotsForTerminalIssue } from "./summary-slot-finalization.js";
 import {
@@ -9165,6 +9165,38 @@ export function issueService(db: Db) {
       dbOrTx: any = db,
     ) => {
       return listIssueDependencyReadinessMap(dbOrTx, companyId, issueIds);
+    },
+
+    // Attention needs blocker semantics, not labels, runs, watchdogs or inbox activity.
+    listBlockedForAttention: async (companyId: string, readCondition?: SQL<boolean>) => {
+      const priorityOrder = sql`CASE ${issues.priority} WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
+      const rows = await db.select({
+        id: issues.id,
+        companyId: issues.companyId,
+        parentId: issues.parentId,
+        identifier: issues.identifier,
+        title: issues.title,
+        status: issues.status,
+        priority: issues.priority,
+        reviewPolicy: issues.reviewPolicy,
+        assigneeAgentId: issues.assigneeAgentId,
+        assigneeUserId: issues.assigneeUserId,
+        executionRunId: issues.executionRunId,
+        unblockDescriptor: issues.unblockDescriptor,
+        blockedTransitionAt: issues.blockedTransitionAt,
+        createdAt: issues.createdAt,
+        updatedAt: issues.updatedAt,
+      }).from(issues).where(and(
+        eq(issues.companyId, companyId),
+        eq(issues.status, "blocked"),
+        executionIssueCondition(),
+        nonPluginOperationIssueCondition(),
+        readCondition,
+      )).orderBy(...issueListOrderBy(companyId, {
+        hasSearch: false, priorityOrder, searchOrder: sql`0`,
+      }));
+      const attention = await listIssueBlockerAttentionMap(db, companyId, rows);
+      return rows.map((row) => ({ ...row, blockerAttention: attention.get(row.id) }));
     },
 
     listBlockerAttention: async (
