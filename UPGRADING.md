@@ -79,3 +79,13 @@ performance repairs. Do not infer origins from shallow-boundary blame.
 Released equivalent source, preserved contracts and comparable measurements
 are retirement evidence; closed proposals or master-only code are not enough.
 The PER-289 review is after deployment, not retroactive release approval.
+
+## Decision queue listing carry (PER-715)
+
+On upgrade, compare decision-queues.ts visibleItems with the PER-715 ledger.
+Keep the real-PostgreSQL query ceiling and single-source visibility parity
+checks. Do not replace source/company/hidden checks or actor authorization with
+same-company membership, implicit-board shortcuts or cross-request caching.
+Parent integration must include decision-queues-routes.test.ts in its image
+regression gate and preserve the pending reset-readiness carry in base 505f58abe.
+This implementation commit is not production deployment or phone acceptance.

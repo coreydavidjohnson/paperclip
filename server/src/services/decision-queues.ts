@@ -179,19 +179,21 @@ function toTriage(row: typeof decisionTriage.$inferSelect): DecisionTriage {
   };
 }
 
+const issueResourceColumns = {
+  issueId: issues.id,
+  companyId: issues.companyId,
+  projectId: issues.projectId,
+  parentIssueId: issues.parentId,
+  assigneeAgentId: issues.assigneeAgentId,
+  assigneeUserId: issues.assigneeUserId,
+  originKind: issues.originKind,
+  originId: issues.originId,
+  status: issues.status,
+};
+
 async function loadIssueResource(db: Db, companyId: string, issueId: string): Promise<AuthorizationResource | null> {
   return db
-    .select({
-      issueId: issues.id,
-      companyId: issues.companyId,
-      projectId: issues.projectId,
-      parentIssueId: issues.parentId,
-      assigneeAgentId: issues.assigneeAgentId,
-      assigneeUserId: issues.assigneeUserId,
-      originKind: issues.originKind,
-      originId: issues.originId,
-      status: issues.status,
-    })
+    .select(issueResourceColumns)
     .from(issues)
     .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId), isNull(issues.hiddenAt)))
     .then((rows) => rows[0] ? ({ type: "issue", ...rows[0] } as const) : null);
@@ -371,11 +373,33 @@ export function decisionQueueService(db: Db) {
     const rows = await db.select().from(decisionQueueItems)
       .where(and(eq(decisionQueueItems.companyId, companyId), eq(decisionQueueItems.queueId, queueId)))
       .orderBy(desc(decisionQueueItems.createdAt), desc(decisionQueueItems.id));
+    // Batch only source/resource reads; authorization still runs for every item.
+    // The map lives for this listing, never across requests or mutations.
+    const interactionIds = rows.filter((row) => row.sourceKind === "issue_thread_interaction")
+      .map((row) => row.sourceId);
+    const interactionResources = interactionIds.length === 0 ? [] : await db
+      .select({ sourceId: issueThreadInteractions.id, ...issueResourceColumns })
+      .from(issueThreadInteractions)
+      .innerJoin(issues, and(
+        eq(issues.id, issueThreadInteractions.issueId),
+        eq(issues.companyId, companyId),
+        isNull(issues.hiddenAt),
+      ))
+      .where(and(
+        eq(issueThreadInteractions.companyId, companyId),
+        inArray(issueThreadInteractions.id, interactionIds),
+      ));
+    const resources = new Map(interactionResources.map(({ sourceId, ...resource }) =>
+      [sourceId, { type: "issue" as const, ...resource }]));
     const visible: DecisionQueueItem[] = [];
     for (const row of rows) {
-      if (await canReadDecisionSource(db, authActor, companyId, row.sourceKind as AttentionSourceKind, row.sourceId)) {
-        visible.push(toQueueItem(row));
-      }
+      const resource = resources.get(row.sourceId);
+      const readable = row.sourceKind === "issue_thread_interaction"
+        ? resource !== undefined && (await authorizationService(db).decide({
+            actor: authActor, action: "issue:read", resource,
+          })).allowed
+        : await canReadDecisionSource(db, authActor, companyId, row.sourceKind as AttentionSourceKind, row.sourceId);
+      if (readable) visible.push(toQueueItem(row));
     }
     return visible;
   }
