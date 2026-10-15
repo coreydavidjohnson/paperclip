@@ -41,6 +41,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { attentionRoutes } from "../routes/attention.js";
+import { issueService } from "../services/issues.js";
 import { attentionService } from "../services/attention.js";
 import { listAttentionExhaustedRuns } from "../services/attention-exhausted-runs.js";
 import { agentService } from "../services/agents.js";
@@ -224,6 +225,55 @@ describeEmbeddedPostgres("attention service", () => {
       currentParticipant: { type: "agent", agentId },
     };
   }
+
+  it("matches the legacy blocked projection and excludes non-execution issue kinds", async () => {
+    const { companyId, workerId } = await seedCompany("ATV");
+    const now = new Date("2026-10-15T12:00:00Z");
+    const root = await insertIssue({ companyId, identifier: "ATV-1", title: "Root", status: "blocked",
+      priority: "high", blockedTransitionAt: now, unblockDescriptor: { owner: "board", action: "Input" } });
+    const child = await insertIssue({ companyId, identifier: "ATV-2", title: "Child", status: "blocked",
+      parentId: root, assigneeAgentId: workerId });
+    await db.insert(issueRelations).values({ companyId, issueId: child, relatedIssueId: root, type: "blocks" });
+    await insertIssue({ companyId, identifier: "ATV-3", title: "Harness", status: "blocked", harnessKind: "test" });
+    await insertIssue({ companyId, identifier: "ATV-4", title: "Plugin operation", status: "blocked",
+      originKind: "plugin:fixture:operation" });
+    const hidden = await insertIssue({ companyId, identifier: "ATV-5", title: "Hidden", status: "blocked" });
+    await db.update(issues).set({ hiddenAt: now }).where(eq(issues.id, hidden));
+    const conversation = await insertIssue({ companyId, identifier: "ATV-6", title: "Conversation", status: "blocked" });
+    await db.update(issues).set({ conversationAgentId: workerId, conversationUserId: "board-user", conversationState: "active", assigneeAgentId: workerId }).where(eq(issues.id, conversation));
+    const other = await seedCompany("ATO");
+    await insertIssue({ companyId: other.companyId, identifier: "ATO-1", title: "Other company", status: "blocked" });
+    const svc = issueService(db);
+    const legacy = await svc.list(companyId, { status: "blocked", includeBlockedBy: true });
+    const projected = await svc.listBlockedForAttention(companyId);
+    expect(projected.map((row) => row.id)).toEqual(legacy.map((row) => row.id));
+    expect(projected.map((row) => row.id).sort()).toEqual([root, child].sort());
+    const fields = Object.keys(projected[0]);
+    expect(projected).toEqual(legacy.map((row) => Object.fromEntries(fields.map((key) => [key, (row as any)[key]]))));
+  });
+
+  it("does not hydrate unused issue-list fields for blocked attention", async () => {
+    const { companyId } = await seedCompany("ATP");
+    const now = new Date("2026-10-15T12:00:00Z");
+    await insertIssue({ companyId, identifier: "ATP-1", title: "Board input", status: "blocked",
+      blockedTransitionAt: now, unblockDescriptor: { owner: "board", action: "Supply input" } });
+    const queries: string[] = [];
+    const session = (db as any).session;
+    const prepare = session.prepareQuery;
+    session.prepareQuery = function (...args: any[]) {
+      queries.push(args[0].sql);
+      return prepare.apply(this, args);
+    };
+    try {
+      const feed = await attentionService(db).list(companyId, { userId: "board-user" });
+      expect(feed.items.some((item) => item.dedupKey.startsWith("blocked-owner:"))).toBe(true);
+      expect(queries.filter((query) => query.includes('from "issue_labels"'))).toEqual([]);
+      expect(queries.filter((query) => query.includes('from "issue_watchdogs"'))).toEqual([]);
+      expect(queries.filter((query) => query.includes('MAX("created_at")'))).toEqual([]);
+    } finally {
+      session.prepareQuery = prepare;
+    }
+  });
 
   it("excludes internal harness reviews from items, counts, and decision queues", async () => {
     const { companyId, workerId } = await seedCompany("ATH");

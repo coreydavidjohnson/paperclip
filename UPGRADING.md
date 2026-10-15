@@ -79,3 +79,12 @@ performance repairs. Do not infer origins from shallow-boundary blame.
 Released equivalent source, preserved contracts and comparable measurements
 are retirement evidence; closed proposals or master-only code are not enough.
 The PER-289 review is after deployment, not retroactive release approval.
+
+## Attention blocked projection (PER-716)
+
+Keep the permanent legacy-projection equality and unused-query regressions.
+`listBlockedForAttention` must inherit every new upstream read/visibility filter
+(in particular master's actor `readCondition`) and preserve issue list ordering
+before reusing the blocker analyzer. Retire when a released equivalent avoids
+unused list hydration and passes payload, graph and queue/retention parity.
+Synthetic profile gains are not production latency acceptance.

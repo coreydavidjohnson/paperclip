@@ -452,3 +452,33 @@ into the current fork image or supplied by a fork migration.
 - Upstream master inspected on 2026-10-15 and released v2026.1012.0 do not
   contain this downstream transport; no upstream equivalent to upgrade to.
   Retire with an equivalent released transport and these regressions passing.
+
+## Minimal blocked projection for Attention (PER-716)
+
+- Why: Attention discarded labels, active-run/watchdog hydration, last-activity
+  aggregates and blockedBy summaries returned by the full issue list. A loaded
+  isolated profile measured 15 SQL queries in that phase (59 total).
+- Change: `issueService.listBlockedForAttention` selects only consumed fields,
+  reuses the existing company/execution/plugin predicates, exact legacy order
+  and batched blocker analyzer. No cache, schema, dependency, authorization,
+  graph cap, queue/retention mutation, sorting, deduplication or cursor change.
+- Verification: RED unwanted-label query regression; 56 focused tests GREEN,
+  including permanent legacy-projection parity and company/hidden/harness/
+  conversation/plugin exclusions. Same-fixture alternating 12 legacy/candidate
+  HTTP pairs: payload equality except generatedAt; queue and retention state
+  equality after each request. 180 blocked, 30 review, 142 dependency edges
+  (including cycle), one child edge, 40 interactions, 80 failed runs carrying
+  100KB context each. Queries 59 -> 54; blocked phase 15 -> 10. Boundary median
+  251.09 -> 226.77ms, nearest-rank sample p95 331.89 -> 267.40ms; blocked phase
+  median 63.19 -> 43.22ms. These are synthetic results, not production benefit.
+- Scope: `attention.ts`, `issues.ts`, `attention-service.test.ts`. Decisions
+  queue optimization is independent. Parent owns image/build/deploy/final p95.
+- Upstream observed 2026-10-15: released v2026.1012.0 and master
+  5ec93dae014c16ff33953fb0fb0274e4efc7819f still use full issue list. No author
+  rationale is inferred. Drop when a released equivalent preserves the fixed
+  list's visibility/read policies, ordering and blocker semantics, with parity
+  and query-count regressions passing. Master now has readCondition; port it
+  into this path when upgrading, never discard the new authorization predicate.
+- Focused check: `pnpm --filter @paperclipai/server exec vitest run
+  src/__tests__/attention-service.test.ts src/__tests__/issue-blocker-attention.test.ts
+  src/__tests__/issue-review-attention.test.ts`.
