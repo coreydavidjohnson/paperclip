@@ -543,7 +543,7 @@ into the current fork image or supplied by a fork migration.
   fences; retire this patch instead of retaining a duplicate implementation.
 ## Bounded external-observer admission (PER-708)
 
-- Upstream inspected through b1566ca49 (2026-10-15), including #14979
+- Upstream inspected through 67a9d5cc3 (2026-10-15), including #14979
   silence diagnostics and #16451 remote warm recovery. Neither implements
   admission suspension for the downstream OmniGenT legacy adapter. No new
   dependency, migration or upstream runtime patch.
@@ -563,3 +563,5 @@ into the current fork image or supplied by a fork migration.
   claim races. Existing observation tests retain Stop and identity refusals.
 - Retirement: remove when a released upstream supports equivalently bound
   external-observer admission and same-issue exclusion, with these tests passing.
+
+- Revalidated over production fork 710551e553870ef2810b689a091bef37e09dddab. Receipt intent is not negative dispatch evidence; idle/no-runner alone is not exact turn-stop evidence. Unknown work stays owned, not finalized.

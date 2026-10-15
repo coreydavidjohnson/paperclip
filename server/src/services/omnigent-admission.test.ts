@@ -67,6 +67,17 @@ const support = await getEmbeddedPostgresTestSupport();
   expect(await countAdmittedRunsForAgent(db,run.agentId)).toBe(0);
   expect(await db.transaction(tx=>admitAgentRun(tx as unknown as typeof db,run.companyId,run.agentId,1,{id:randomUUID(),issueId:run.contextSnapshot!.issueId as string}))).toBe(false);
  });
+ it('retains unknown accepted work and its issue fence when an external summary says idle without a runner',async()=>{
+  const {run,issueId,receipt}=await seed(600,'blocked','accepted');
+  // A summary is not a terminal observation tied to this response/turn.
+  await db.update(heartbeatRuns).set({resultJson:{omnigentDispatchReceipt:receipt,externalSummary:{status:'idle',runner_online:false}}}).where(eq(heartbeatRuns.id,run.id));
+  await suspendOmnigentAdmissions(db);
+  const [saved]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,run.id));
+  expect(saved.status).toBe('running');expect(saved.finishedAt).toBeNull();
+  expect(saved.resultJson?.omnigentDispatchReceipt).toEqual(receipt);
+  expect(await countAdmittedRunsForAgent(db,run.agentId)).toBe(0);
+  expect(await db.transaction(tx=>admitAgentRun(tx as unknown as typeof db,run.companyId,run.agentId,1,{id:randomUUID(),issueId}))).toBe(false);
+ });
  it('fails closed if receipt binding changes',async()=>{
   const {run,receipt}=await seed();await suspendOmnigentAdmissions(db);
   await db.update(heartbeatRuns).set({resultJson:{omnigentDispatchReceipt:{...receipt,omnigentSessionId:'replacement'}}}).where(eq(heartbeatRuns.id,run.id));
