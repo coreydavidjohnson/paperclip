@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "@paperclipai/db";
-const { driver } = vi.hoisted(() => ({ driver: vi.fn() }));
+const { driver, warn, info } = vi.hoisted(() => ({ driver: vi.fn(), warn: vi.fn(), info: vi.fn() }));
+vi.mock("../middleware/logger.js", () => ({ logger: { warn, info } }));
 vi.mock("@paperclipai/db", () => ({ postgres: driver }));
 import { createLiveEventTransport } from "../services/live-events-transport.js";
 
 describe("dedicated live-event session options and epochs", () => {
-  beforeEach(() => { vi.useFakeTimers(); driver.mockReset(); });
+  beforeEach(() => { vi.useFakeTimers(); driver.mockReset(); warn.mockReset(); info.mockReset(); });
   afterEach(() => { vi.useRealTimers(); });
   const event = { id: 1, companyId: "a", type: "activity.logged" as const, createdAt: "2026-10-14T00:00:00Z", payload: {} };
   function fixture(listen = () => Promise.resolve([])) {
@@ -24,9 +25,9 @@ describe("dedicated live-event session options and epochs", () => {
       connection: { search_path: "fixture", application_name: "pool", statement_timeout: 99999 },
       max: 20, max_pipeline: 100, idle_timeout: 30, max_lifetime: () => 100,
     } };
-    const ready = vi.fn(), receive = vi.fn();
-    const transport = createLiveEventTransport({ $client: pool } as unknown as Db, receive, ready);
-    return { clients, options, pool, password, ssl, socket, transport, ready, receive };
+    const ready = vi.fn(), receive = vi.fn(), resync = vi.fn();
+    const transport = createLiveEventTransport({ $client: pool } as unknown as Db, receive, ready, resync);
+    return { clients, options, pool, password, ssl, socket, transport, ready, receive, resync };
   }
   it("reparses resolved credentials/TLS/multi-host options without sharing pool state", async () => {
     const f = fixture();
@@ -78,4 +79,46 @@ describe("dedicated live-event session options and epochs", () => {
     expect(f.clients[0].notify.mock.calls.some(call => JSON.parse(call[1]).reset === true)).toBe(true);
     await f.transport.stop();
   });
+  it("resyncs peer and own resets without changing readiness, client or dedupe", async () => {
+    const f = fixture(); await vi.advanceTimersByTimeAsync(0);
+    f.transport.publish(event); await vi.advanceTimersByTimeAsync(0);
+    const own = JSON.parse(f.clients[0].notify.mock.calls[0][1]).origin;
+    f.ready.mockClear();
+    for (const origin of [own, "00000000-0000-0000-0000-000000000001"]) {
+      const notify = (data: object) => f.options[0].onnotify("paperclip_ui_events_v1", JSON.stringify(data));
+      notify({ origin, sequence: 2, reset: true });
+      notify({ origin, sequence: 2, reset: true });
+      notify({ origin, sequence: 1, event });
+      notify({ origin, sequence: 3, event });
+    }
+    expect(f.resync).toHaveBeenCalledTimes(2);
+    expect(f.receive).toHaveBeenCalledTimes(2);
+    expect(f.ready).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(f.options).toHaveLength(1); expect(f.clients[0].end).not.toHaveBeenCalled();
+    expect(info).toHaveBeenCalledWith({ reason: "reset_received", generation: 1 }, "live_event_transport_resync");
+    await f.transport.stop();
+  });
+  it.each(["null", "{}", "bad json", JSON.stringify({ origin: "00000000-0000-0000-0000-000000000001", sequence: 1, reset: false }), JSON.stringify({ origin: "00000000-0000-0000-0000-000000000001", sequence: 1, reset: true, event })])("fails closed for invalid envelope %s", async raw => {
+    const f = fixture(); await vi.advanceTimersByTimeAsync(0);
+    f.options[0].onnotify("paperclip_ui_events_v1", raw);
+    expect(f.ready).toHaveBeenLastCalledWith(false);
+    expect(f.clients[0].end).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith({ reason: "invalid_payload", generation: 1 }, "live_event_transport_failed");
+    await f.transport.stop();
+  });
+  it("publishes and receives an oversized reset while staying ready", async () => {
+    const f = fixture(); await vi.advanceTimersByTimeAsync(0); f.ready.mockClear();
+    f.transport.publish({ ...event, payload: { text: "x".repeat(8000) } });
+    await vi.advanceTimersByTimeAsync(0);
+    const raw = f.clients[0].notify.mock.calls[0][1];
+    expect(JSON.parse(raw)).toMatchObject({ reset: true });
+    expect(Buffer.byteLength(raw)).toBeLessThan(7500);
+    f.options[0].onnotify("paperclip_ui_events_v1", raw);
+    expect(f.resync).toHaveBeenCalledOnce(); expect(f.ready).not.toHaveBeenCalled();
+    expect(f.options).toHaveLength(1); expect(f.clients[0].end).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(expect.objectContaining({ trigger: "oversize", bytes: expect.any(Number), generation: 1 }), "live_event_reset_published");
+    await f.transport.stop();
+  });
+
 });

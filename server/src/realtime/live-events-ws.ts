@@ -11,7 +11,7 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
 import { activityToastIdentity } from "./activity-toast-identity.js";
 import { taskToastEligible } from "./task-toast-eligibility.js";
-import { subscribeCompanyUiLiveEvents, subscribeGlobalUiLiveEvents, subscribeLiveEventTransportState, isLiveEventTransportReady } from "../services/live-events.js";
+import { subscribeCompanyUiLiveEvents, subscribeGlobalUiLiveEvents, subscribeLiveEventTransportState, subscribeLiveEventTransportResync, isLiveEventTransportReady } from "../services/live-events.js";
 import { trackIdleWork } from "../services/task-admission.js";
 
 interface WsSocket {
@@ -392,12 +392,16 @@ export function setupLiveEventsWebSocketServer(
     });
   });
 
+  const resyncCleanup = subscribeLiveEventTransportResync(() => {
+    for (const socket of wss.clients) socket.close(1013, "live events resync");
+  });
   const stateCleanup = subscribeLiveEventTransportState(ready => {
     if (!ready) for (const socket of wss.clients) socket.close(1013, "live events resync");
   });
 
   wss.on("close", () => {
     stateCleanup();
+    resyncCleanup();
     for (const cleanup of cleanupByClient.values()) cleanup();
     cleanupByClient.clear();
     clearInterval(pingInterval);

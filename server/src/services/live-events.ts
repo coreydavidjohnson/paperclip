@@ -10,6 +10,7 @@ const emitter = new EventEmitter();
 emitter.setMaxListeners(0);
 const uiEmitter = new EventEmitter();
 uiEmitter.setMaxListeners(0);
+const transportResync = Symbol("transport-resync");
 const transportState = Symbol("transport-state");
 let transport: ReturnType<typeof createLiveEventTransport> | undefined;
 let transportReady = true;
@@ -89,6 +90,11 @@ export function subscribeGlobalUiLiveEvents(listener: LiveEventListener) {
   return () => uiEmitter.off("*", listener);
 }
 
+export function subscribeLiveEventTransportResync(listener: () => void) {
+  uiEmitter.on(transportResync, listener);
+  return () => uiEmitter.off(transportResync, listener);
+}
+
 export function isLiveEventTransportReady() { return transportReady; }
 
 export function subscribeLiveEventTransportState(listener: (ready: boolean) => void) {
@@ -107,7 +113,7 @@ export function startLiveEventTransport(db: Db) {
     if (ready === transportReady) return;
     transportReady = ready;
     uiEmitter.emit(transportState, ready);
-  });
+  }, () => uiEmitter.emit(transportResync));
   const owned = transport;
   return {
     isReady: isLiveEventTransportReady,
