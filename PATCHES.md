@@ -447,6 +447,8 @@ into the current fork image or supplied by a fork migration.
   Logs contain no event bodies, credentials or company data.
 - Regression: live-events-transport.test.ts covers own/peer reset, dedupe,
   malformed payloads, oversized publish and unchanged session/readiness.
+  The two-process integration verifies 1013 resync and identical PostgreSQL
+  backend PIDs/readiness for oversized and queue-full resets.
 - Upstream master inspected on 2026-10-15 and released v2026.1012.0 do not
   contain this downstream transport; no upstream equivalent to upgrade to.
   Retire with an equivalent released transport and these regressions passing.
