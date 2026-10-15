@@ -88,3 +88,12 @@ Keep the permanent legacy-projection equality and unused-query regressions.
 before reusing the blocker analyzer. Retire when a released equivalent avoids
 unused list hydration and passes payload, graph and queue/retention parity.
 Synthetic profile gains are not production latency acceptance.
+## Decision queue listing carry (PER-715)
+
+On upgrade, compare decision-queues.ts visibleItems with the PER-715 ledger.
+Keep the real-PostgreSQL query ceiling and single-source visibility parity
+checks. Do not replace source/company/hidden checks or actor authorization with
+same-company membership, implicit-board shortcuts or cross-request caching.
+Parent integration must include decision-queues-routes.test.ts in its image
+regression gate and preserve the pending reset-readiness carry in base 505f58abe.
+This implementation commit is not production deployment or phone acceptance.

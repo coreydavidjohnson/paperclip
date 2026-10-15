@@ -482,3 +482,26 @@ into the current fork image or supplied by a fork migration.
 - Focused check: `pnpm --filter @paperclipai/server exec vitest run
   src/__tests__/attention-service.test.ts src/__tests__/issue-blocker-attention.test.ts
   src/__tests__/issue-review-attention.test.ts`.
+## Decision queue interaction listing reads (PER-715)
+
+- Why: each listed issue-thread interaction performed a source SELECT and an
+  issue SELECT before authorization, even for the implicit board actor.
+- Upstream: released v2026.1012.0 and inspected master
+  b1566ca494f4af6e8d4418fa37393c5caee02582 retain the sequential path; path history
+  was last changed September 11. Minimal private carry approved for PER-711.
+- Change: one company-scoped interaction/visible-issue join per nonempty queue;
+  reuse the exact issue-resource projection, then authorize every item normally.
+  Other source kinds and single-source/mutation/retention checks are unchanged.
+  No global cache, actor shortcut, schema, dependency, or production change.
+- Regression: server/src/__tests__/decision-queues-routes.test.ts uses synthetic
+  embedded PostgreSQL. At 271 interactions / 189 issues, count and item listings
+  must each use at most four queries and retain exact ordering/results. Parity
+  checks cover missing/hidden/foreign sources, board/agent/unauthenticated actors,
+  responsible-user denial, low trust and visibility changes between calls.
+- Run: pnpm --filter @paperclipai/server exec vitest run
+  src/__tests__/decision-queues-routes.test.ts
+  src/__tests__/authorization-service.test.ts
+  src/__tests__/decision-retention-service.test.ts
+- Retire: drop when a released upstream equivalent passes the query ceiling and
+  security regressions. Parent PER-711 owns image-gate wiring, integration,
+  deployment and final latency; PER-705 owns phone acceptance.

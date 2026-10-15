@@ -13,10 +13,12 @@ import {
   decisionQueues,
   decisionTriage,
   decisionTriageEvents,
+  heartbeatRuns,
   issueThreadInteractions,
   issueWorkProducts,
   issues,
 } from "@paperclipai/db";
+import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 import type { AttentionItem } from "@paperclipai/shared";
 import {
   getEmbeddedPostgresTestSupport,
@@ -24,7 +26,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { errorHandler } from "../middleware/index.js";
 import { decisionQueueRoutes } from "../routes/decision-queues.js";
-import { decisionQueueService } from "../services/decision-queues.js";
+import { canReadDecisionSource, decisionQueueService } from "../services/decision-queues.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -54,6 +56,7 @@ describeEmbeddedPostgres("decision queue routes", () => {
     await db.delete(issueWorkProducts);
     await db.delete(approvals);
     await db.delete(issues);
+    await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -143,6 +146,120 @@ describeEmbeddedPostgres("decision queue routes", () => {
       runId: null,
     };
   }
+
+  it("bounds interaction listing reads independently of queue size in real Postgres", async () => {
+    const { companyId, agentId } = await seed();
+    const issueIds = Array.from({ length: 189 }, () => randomUUID());
+    await db.insert(issues).values(issueIds.map((id) => ({
+      id, companyId, title: "Synthetic decision", assigneeAgentId: agentId,
+    })));
+    const interactionIds = Array.from({ length: 271 }, () => randomUUID());
+    await db.insert(issueThreadInteractions).values(interactionIds.map((id, index) => ({
+      id, companyId, issueId: issueIds[index % issueIds.length]!,
+      kind: "ask_user_questions", status: "pending", payload: { version: 1, questions: [] } as never,
+    })));
+    const [queue] = await db.insert(decisionQueues).values({
+      companyId, key: "large", title: "Large", createdByType: "system",
+    }).returning();
+    await db.insert(decisionQueueItems).values(interactionIds.map((sourceId, index) => ({
+      companyId, queueId: queue!.id, sourceKind: "issue_thread_interaction", sourceId,
+      addedByType: "system", createdAt: new Date(1_700_000_000_000 + index),
+    })));
+    const svc = decisionQueueService(db);
+    const queries: string[] = [];
+    const previousDebug = db.$client.options.debug;
+    db.$client.options.debug = (_connection, query) => { queries.push(query); };
+    let queues;
+    let listed;
+    let countReads = 0;
+    let itemReads = 0;
+    const started = performance.now();
+    try {
+      queues = await svc.list(companyId, boardActor(companyId));
+      countReads = queries.length;
+      queries.length = 0;
+      listed = await svc.listItems(companyId, "large", boardActor(companyId));
+      itemReads = queries.length;
+    } finally {
+      db.$client.options.debug = previousDebug;
+    }
+    console.info(JSON.stringify({ fixture: "271 interactions / 189 issues", countReads, itemReads,
+      listingMs: performance.now() - started }));
+    expect(queues).toHaveLength(1);
+    expect(queues![0]!.itemCount).toBe(271);
+    expect(listed!.map((item) => item.sourceId)).toEqual([...interactionIds].reverse());
+    expect(countReads).toBeLessThanOrEqual(4);
+    expect(itemReads).toBeLessThanOrEqual(4);
+  });
+
+  it("keeps batched visibility equal to single-source checks and refreshes each call", async () => {
+    const { companyId, agentId, issueId, interactionId, approvalId } = await seed();
+    const foreignCompanyId = randomUUID();
+    const foreignIssueId = randomUUID();
+    const foreignInteractionId = randomUUID();
+    await db.insert(companies).values({ id: foreignCompanyId, name: "Foreign", issuePrefix: "FOR" });
+    await db.insert(issues).values({ id: foreignIssueId, companyId: foreignCompanyId, title: "Foreign" });
+    await db.insert(issueThreadInteractions).values({ id: foreignInteractionId, companyId: foreignCompanyId,
+      issueId: foreignIssueId, kind: "ask_user_questions", status: "pending", payload: {} as never });
+    const hiddenIssueId = randomUUID();
+    const hiddenInteractionId = randomUUID();
+    await db.insert(issues).values({ id: hiddenIssueId, companyId, title: "Hidden", hiddenAt: new Date() });
+    await db.insert(issueThreadInteractions).values({ id: hiddenInteractionId, companyId,
+      issueId: hiddenIssueId, kind: "ask_user_questions", status: "pending", payload: {} as never });
+    const [queue] = await db.insert(decisionQueues).values({ companyId, key: "parity", title: "Parity",
+      createdByType: "system" }).returning();
+    const sources: Array<{ sourceKind: AttentionItem["sourceKind"]; sourceId: string }> = [
+      { sourceKind: "issue_thread_interaction" as const, sourceId: interactionId },
+      { sourceKind: "issue_thread_interaction" as const, sourceId: foreignInteractionId },
+      { sourceKind: "issue_thread_interaction" as const, sourceId: hiddenInteractionId },
+      { sourceKind: "issue_thread_interaction" as const, sourceId: randomUUID() },
+      { sourceKind: "approval" as const, sourceId: approvalId },
+      { sourceKind: "review" as const, sourceId: issueId },
+    ];
+    await db.insert(decisionQueueItems).values(sources.map((source, index) => ({ ...source,
+      companyId, queueId: queue!.id, addedByType: "system", createdAt: new Date(1_700_000_000_000 + index),
+    })));
+    const svc = decisionQueueService(db);
+    async function parity(actor: Parameters<typeof canReadDecisionSource>[1]) {
+      const expected: string[] = [];
+      for (const source of [...sources].reverse()) {
+        if (await canReadDecisionSource(db, actor, companyId, source.sourceKind, source.sourceId)) {
+          expected.push(source.sourceId);
+        }
+      }
+      expect((await svc.listItems(companyId, "parity", actor)).map((item) => item.sourceId)).toEqual(expected);
+      expect((await svc.list(companyId, actor))[0]!.itemCount).toBe(expected.length);
+      return expected;
+    }
+    expect(await parity(boardActor(companyId))).toHaveLength(3);
+    expect(await parity(agentActor(companyId, agentId))).toHaveLength(2);
+    expect(await parity({ type: "none", source: "none" })).toHaveLength(0);
+    expect(await parity({ ...agentActor(companyId, agentId), onBehalfOfUserId: randomUUID() })).toHaveLength(0);
+    // Failed runs retain own-agent/no-issue and linked-issue rules.
+    const otherAgentId = randomUUID();
+    await db.insert(agents).values({ id: otherAgentId, companyId, name: "Other", role: "engineer" });
+    const runIds = Array.from({ length: 3 }, () => randomUUID());
+    await db.insert(heartbeatRuns).values([
+      { id: runIds[0]!, companyId, agentId, status: "failed", contextSnapshot: {} },
+      { id: runIds[1]!, companyId, agentId: otherAgentId, status: "failed", contextSnapshot: {} },
+      { id: runIds[2]!, companyId, agentId, status: "failed", contextSnapshot: { issueId: hiddenIssueId } },
+    ]);
+    const failedSources = runIds.map((sourceId) => ({ sourceKind: "failed_run" as const, sourceId }));
+    await db.insert(decisionQueueItems).values(failedSources.map((source, index) => ({ ...source,
+      companyId, queueId: queue!.id, addedByType: "system", createdAt: new Date(1_700_000_000_100 + index),
+    })));
+    sources.push(...failedSources);
+    expect(await parity(boardActor(companyId))).toHaveLength(5);
+    expect(await parity(agentActor(companyId, agentId))).toHaveLength(3);
+    await db.update(agents).set({ permissions: { trustPreset: LOW_TRUST_REVIEW_PRESET,
+      authorizationPolicy: { trustBoundary: { mode: LOW_TRUST_REVIEW_PRESET, projectIds: [], rootIssueId: issueId } },
+    } }).where(eq(agents.id, agentId));
+    await parity(agentActor(companyId, agentId));
+    await db.update(issues).set({ hiddenAt: new Date() }).where(eq(issues.id, issueId));
+    expect(await parity(boardActor(companyId))).toEqual([runIds[1], runIds[0], approvalId]);
+    await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, interactionId));
+    await parity(boardActor(companyId));
+  });
 
   it("creates idempotently, patches, lists by updated time, and audits queue mutations", async () => {
     const { companyId } = await seed();
