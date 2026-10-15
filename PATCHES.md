@@ -505,3 +505,19 @@ into the current fork image or supplied by a fork migration.
 - Retire: drop when a released upstream equivalent passes the query ceiling and
   security regressions. Parent PER-711 owns image-gate wiring, integration,
   deployment and final latency; PER-705 owns phone acceptance.
+
+## Guarded desktop recovery (PER-591)
+
+- Pinned upstream has no registry-bound desktop recovery transport. This private
+  service extension uses existing issueService transactions and native scheduler
+  outbox, not an agent/board token or a second recovery loop.
+- Dedicated authentication, strict bound evidence, actual blocked-transition
+  audit, governance fences, durable incident/resume receipts and explicit
+  restore-only child closure. Default unconfigured, resume disabled.
+- Files: desktop-recovery route/service/eligibility, app mount, token redaction,
+  shared status-wake-intents helper and native heartbeat dispatch guard.
+- Contract and activation gates: doc/DESKTOP_RECOVERY.md. No new production
+  Secret, credential or network grant is included. PER-580 owns client wiring.
+- Tests: tests/desktop-recovery (HTTP, policy, isolated DB/races/native services).
+- Removal: upstream provides the same restricted transport and native atomic
+  fences; retire this patch instead of retaining a duplicate implementation.

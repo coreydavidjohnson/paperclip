@@ -1,4 +1,5 @@
 export const HTTP_LOG_REDACT_PATHS = [
+  'req.headers["x-desktop-recovery-token"]',
   "req.headers.authorization",
   'req.headers["proxy-authorization"]',
   "req.headers.cookie",
