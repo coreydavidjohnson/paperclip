@@ -541,3 +541,25 @@ into the current fork image or supplied by a fork migration.
 - Tests: tests/desktop-recovery (HTTP, policy, isolated DB/races/native services).
 - Removal: upstream provides the same restricted transport and native atomic
   fences; retire this patch instead of retaining a duplicate implementation.
+## Bounded external-observer admission (PER-708)
+
+- Upstream inspected through b1566ca49 (2026-10-15), including #14979
+  silence diagnostics and #16451 remote warm recovery. Neither implements
+  admission suspension for the downstream OmniGenT legacy adapter. No new
+  dependency, migration or upstream runtime patch.
+- A server-owned runner-profile receipt separates admission from ownership.
+  After 30 seconds of a blocked/review/done disposition, or five minutes
+  without output, the periodic reaper suspends admission only with exact
+  company/agent/run/issue/session binding. The original run remains running;
+  provider work, receipt, issue blockers and execution locks are untouched.
+- All new claims use the same transaction-scoped agent and issue advisory
+  fences. A running original run excludes another claim for its issue even
+  after issue lock cleanup or reassignment. Unrelated work can use capacity.
+- Intent is ambiguous delivery, not proof of rejection. Suspension does not
+  cancel, signal, replay, classify effects, or finalize. Original receipt/boot
+  lease observation and Stop/execution holds retain their existing authority.
+- Regressions: omnigent-admission.test.ts uses real disposable PostgreSQL for
+  thresholds, late acknowledgement, blockers/cards, capacity and cross-agent
+  claim races. Existing observation tests retain Stop and identity refusals.
+- Retirement: remove when a released upstream supports equivalently bound
+  external-observer admission and same-issue exclusion, with these tests passing.

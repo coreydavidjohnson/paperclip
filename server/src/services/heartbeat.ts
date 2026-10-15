@@ -28,7 +28,7 @@ import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./nativ
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { isControllerDraining } from "../controller-drain.js";
 import { saveOmnigentDispatchReceipt, claimOmnigentAttachment, releaseOmnigentAttachment, loadOwnedOmnigentObservation, finalizeOwnedOmnigentObservation } from "./omnigent-attachment.js";
-import { admitAgentRun } from "./run-admission.js";
+import { admitAgentRun, countAdmittedRunsForAgent, suspendOmnigentAdmissions } from "./run-admission.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
@@ -17371,7 +17371,7 @@ export function heartbeatService(
       }
     }
 
-    const claimSlot = (tx: Db) => admitAgentRun(tx, run.companyId, run.agentId, parseHeartbeatPolicy(agent).maxConcurrentRuns);
+    const claimSlot = (tx: Db) => admitAgentRun(tx, run.companyId, run.agentId, parseHeartbeatPolicy(agent).maxConcurrentRuns, { id: run.id, issueId: issueId ?? null });
     const claimedAt = new Date();
     const responsibleUserId = await resolveResponsibleUserIdForRun({
       run,
@@ -18923,6 +18923,14 @@ export function heartbeatService(
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
+    for (const suspended of await suspendOmnigentAdmissions(db)) {
+      await appendRunEvent(suspended, {
+        eventType: "lifecycle", stream: "system", level: "warn",
+        message: "Admission suspended; original external work and issue ownership retained. No prompt replay or provider stop.",
+        payload: { admissionSuspended: true, providerStopped: false,
+          issueId: suspended.contextSnapshot?.issueId ?? null },
+      });
+    }
     // Recovery never launches a provider or infers stopped ownership from
     // terminal status. Uncaptured local copies require durable stop evidence.
     await instructionCopies.recoverStopped().catch(error => {
@@ -19254,7 +19262,7 @@ export function heartbeatService(
       if (run.runtimeMode === "legacy" && dispatchedAdapterType === "omnigent" &&
           ["dispatching", "external_attached", "awaiting_external_evidence"].includes(run.executionStage ?? "")) {
         // A dead controller is not a stopped OmniGenT response. Keep the exact
-        // run/issue/session binding and concurrency slot; never replay tools.
+        // run/issue/session binding; admission may be suspended, never replay tools.
         if (!isControllerDraining() && await claimOmnigentAttachment(db, run)) {
           const execution = executeRun(run.id, { legacyOmnigentResume: true })
             .catch(err => logger.error({ err, runId: run.id }, "OmniGenT same-run attachment failed"));
@@ -19963,7 +19971,7 @@ export function heartbeatService(
         return [];
       }
       const policy = parseHeartbeatPolicy(agent);
-      const runningCount = await countRunningRunsForAgent(agentId);
+      const runningCount = await countAdmittedRunsForAgent(db, agentId);
       const availableSlots = Math.max(
         0,
         policy.maxConcurrentRuns - runningCount,
