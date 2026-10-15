@@ -1,3 +1,5 @@
+import { desktopRecoveryConfig, desktopRecoveryCredentialBoundary, desktopRecoveryRoutes } from './routes/desktop-recovery.js';
+import { desktopRecoveryService } from './services/desktop-recovery.js';
 import { browserUseRoutes } from "./routes/browser-use.js";
 import { browserUseService } from "./services/browser-use.js";
 import { slackToolRoutes } from "./routes/slack-tools.js";
@@ -557,6 +559,8 @@ export async function createApp(
       bindHost: opts.bindHost,
     }),
   );
+  app.use(desktopRecoveryCredentialBoundary);
+  app.use(desktopRecoveryRoutes({ ...desktopRecoveryConfig(process.env), handle: desktopRecoveryService(db) }));
   app.use(cloudRuntimeIdentityMiddleware(db));
   // Connection-intent tools carry their own short-lived, run-bound bearer and
   // must be reachable by remote adapters that intentionally do not receive an
