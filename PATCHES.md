@@ -434,3 +434,19 @@ into the current fork image or supplied by a fork migration.
   during observation and verifies original turn identity.
 - Retirement: drop when upstream supplies equivalently fenced admitted-turn
   observation/finalization; never relax the new-dispatch security guard.
+
+## Reset hints do not fail the live-event session (PER-619 / PER-608)
+
+- Valid own/peer reset envelopes advance bounded origin dedupe and request UI
+  resync (WebSocket 1013) without changing readiness or replacing LISTEN.
+  Malformed envelopes, connection loss and the three-second blackhole fence
+  still fail closed. No reconnect grace, replay, schema or dependency change.
+- Every effective transport failure logs its reason and generation. Reset
+  publication logs oversize byte count, queue_full or serialization_error;
+  reset receipt logs reset_received separately, never as a database failure.
+  Logs contain no event bodies, credentials or company data.
+- Regression: live-events-transport.test.ts covers own/peer reset, dedupe,
+  malformed payloads, oversized publish and unchanged session/readiness.
+- Upstream master inspected on 2026-10-15 and released v2026.1012.0 do not
+  contain this downstream transport; no upstream equivalent to upgrade to.
+  Retire with an equivalent released transport and these regressions passing.

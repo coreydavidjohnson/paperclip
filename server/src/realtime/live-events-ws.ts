@@ -8,7 +8,7 @@ import { agentApiKeys, companyMemberships, instanceUserRoles } from "@paperclipa
 import type { DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "../middleware/logger.js";
-import { subscribeCompanyUiLiveEvents, subscribeGlobalUiLiveEvents, subscribeLiveEventTransportState, isLiveEventTransportReady } from "../services/live-events.js";
+import { subscribeCompanyUiLiveEvents, subscribeGlobalUiLiveEvents, subscribeLiveEventTransportState, subscribeLiveEventTransportResync, isLiveEventTransportReady } from "../services/live-events.js";
 
 interface WsSocket {
   readyState: number;
@@ -294,12 +294,16 @@ export function setupLiveEventsWebSocketServer(
     });
   });
 
+  const resyncCleanup = subscribeLiveEventTransportResync(() => {
+    for (const socket of wss.clients) socket.close(1013, "live events resync");
+  });
   const stateCleanup = subscribeLiveEventTransportState(ready => {
     if (!ready) for (const socket of wss.clients) socket.close(1013, "live events resync");
   });
 
   wss.on("close", () => {
     stateCleanup();
+    resyncCleanup();
     for (const cleanup of cleanupByClient.values()) cleanup();
     cleanupByClient.clear();
     clearInterval(pingInterval);
