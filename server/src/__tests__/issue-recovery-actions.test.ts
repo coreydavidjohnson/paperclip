@@ -1831,6 +1831,22 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       resolutionNote: "Only the obsolete execution hold is cleared; the dependency and approval remain.",
       executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
         outcomeEvidence: "The dispatch was rejected before a new turn; the historical runner is offline and cannot resume." } };
+    // Protected terminal states and detached controllers must keep their hold.
+    for (const protectedRun of [
+      { status: "cancelled", errorCode: "omnigent_cancelled" },
+      { status: "interrupted", errorCode: "omnigent_interrupted" },
+      { status: "failed", errorCode: "omnigent_controller_detached" },
+    ]) {
+      await db.update(heartbeatRuns).set(protectedRun).where(eq(heartbeatRuns.id, runId));
+      await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(action);
+    }
+    await db.update(heartbeatRuns).set({ status: "failed", errorCode: "omnigent_rotation_not_ready" }).where(eq(heartbeatRuns.id, runId));
+    await db.delete(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId));
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: sourceIssueId, type: "blocks" });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ ...body,
+      executionReconciliation: { ...body.executionReconciliation, runId: randomUUID() } }).expect(409);
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect((await request(app).get(`/api/issues/${sourceIssueId}`).expect(200)).body.executionBlocker).toBeNull();
     expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(before);
