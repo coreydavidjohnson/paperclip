@@ -541,3 +541,21 @@ into the current fork image or supplied by a fork migration.
 - Tests: tests/desktop-recovery (HTTP, policy, isolated DB/races/native services).
 - Removal: upstream provides the same restricted transport and native atomic
   fences; retire this patch instead of retaining a duplicate implementation.
+## OmniGenT adapter: compaction replay is not turn completion (PER-820)
+
+- Not a fork code change. Recorded here because it removes the main source of
+  `issue_disposition_repair` runs that the fork's recovery service schedules.
+- Cause: Hermes context compaction replays the run prompt and re-mirrors interim
+  narration while the session briefly reads idle. The external adapter
+  (`luma-homelab` `services/paperclip/adapter`) accepted that narration as final.
+  The run ended `succeeded` mid-turn, and disposition repair attached to the same
+  turn. The agent kept the old run ID, got a 409 checkout conflict and read the
+  repair run as a live successor. Repair 2/2 then created a board card.
+- Fix: luma-homelab `fc8dcc0d` and descendants. An answer followed by tool
+  activity or a replayed run prompt is interim. Completion needs a stable
+  transcript tail. Tests: adapter `execute.test.ts`, "compaction replay" and
+  "transcript tail".
+- Fork resolver unchanged: `disposition_recovery_retry_stale` correctly rejects
+  agent `restored` on agent-owned bounded repair actions. Those clear when the
+  owner records a disposition.
+- Retire when OmniGenT exposes an authoritative turn-complete signal.
