@@ -27624,6 +27624,7 @@ export function heartbeatService(
               executionWorkspacePreference: issues.executionWorkspacePreference,
               executionWorkspaceSettings: issues.executionWorkspaceSettings,
               assigneeAgentId: issues.assigneeAgentId,
+              checkoutRunId: issues.checkoutRunId,
               executionRunId: issues.executionRunId,
               executionAgentNameKey: issues.executionAgentNameKey,
               createdAt: issues.createdAt,
