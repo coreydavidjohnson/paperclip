@@ -51,8 +51,22 @@ describe("issuesApi.list", () => {
     mockApi.get.mockResolvedValueOnce(firstPage).mockResolvedValueOnce([{ id: "last-task" }]);
     const result = await issuesApi.listAll("company-1", { createdFromIssueId: "source-1" });
     expect(result).toHaveLength(501);
-    expect(mockApi.get).toHaveBeenNthCalledWith(1, "/companies/company-1/issues?createdFromIssueId=source-1&limit=500&sortField=id&sortDir=asc");
-    expect(mockApi.get).toHaveBeenNthCalledWith(2, "/companies/company-1/issues?createdFromIssueId=source-1&limit=500&sortField=id&sortDir=asc&afterId=task-499");
+    expect(mockApi.get).toHaveBeenNthCalledWith(1, "/companies/company-1/issues?createdFromIssueId=source-1&limit=500&sortField=id&sortDir=asc&includeReviewAttention=false&includeUnblockDescriptor=false");
+    expect(mockApi.get).toHaveBeenNthCalledWith(2, "/companies/company-1/issues?createdFromIssueId=source-1&limit=500&sortField=id&sortDir=asc&afterId=task-499&includeReviewAttention=false&includeUnblockDescriptor=false");
+  });
+
+  it("opts out of unused metadata even when no filters are supplied", async () => {
+    await issuesApi.list("company-1");
+    expect(mockApi.get).toHaveBeenCalledWith(
+      "/companies/company-1/issues?includeReviewAttention=false&includeUnblockDescriptor=false",
+    );
+  });
+
+  it("can explicitly restore the default API metadata projection", async () => {
+    await issuesApi.list("company-1", { includeReviewAttention: true, includeUnblockDescriptor: true });
+    expect(mockApi.get).toHaveBeenCalledWith(
+      "/companies/company-1/issues?includeReviewAttention=true&includeUnblockDescriptor=true",
+    );
   });
 
   it("passes parentId through to the company issues endpoint", async () => {
@@ -62,7 +76,7 @@ describe("issuesApi.list", () => {
     });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?parentId=issue-parent-1&limit=25",
+      "/companies/company-1/issues?parentId=issue-parent-1&limit=25&includeReviewAttention=false&includeUnblockDescriptor=false",
     );
   });
 
@@ -144,7 +158,7 @@ describe("issuesApi.list", () => {
     });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?descendantOf=issue-root-1&includeBlockedBy=true&limit=25",
+      "/companies/company-1/issues?descendantOf=issue-root-1&includeBlockedBy=true&limit=25&includeReviewAttention=false&includeUnblockDescriptor=false",
     );
   });
 
@@ -155,7 +169,7 @@ describe("issuesApi.list", () => {
     });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?workspaceId=workspace-1&limit=1000",
+      "/companies/company-1/issues?workspaceId=workspace-1&limit=1000&includeReviewAttention=false&includeUnblockDescriptor=false",
     );
   });
 
@@ -163,7 +177,7 @@ describe("issuesApi.list", () => {
     await issuesApi.list("company-1", { limit: 500, offset: 1500 });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?limit=500&offset=1500",
+      "/companies/company-1/issues?limit=500&offset=1500&includeReviewAttention=false&includeUnblockDescriptor=false",
     );
   });
 
@@ -175,7 +189,7 @@ describe("issuesApi.list", () => {
     });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?limit=500&sortField=updated&sortDir=desc",
+      "/companies/company-1/issues?limit=500&sortField=updated&sortDir=desc&includeReviewAttention=false&includeUnblockDescriptor=false",
     );
   });
 
@@ -189,7 +203,7 @@ describe("issuesApi.list", () => {
     });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?touchedByUserId=me&includeLiveDescendantSummary=true&limit=100&sortField=updated&sortDir=desc&view=compact",
+      "/companies/company-1/issues?touchedByUserId=me&includeLiveDescendantSummary=true&limit=100&sortField=updated&sortDir=desc&includeReviewAttention=false&includeUnblockDescriptor=false&view=compact",
     );
   });
 
@@ -197,7 +211,7 @@ describe("issuesApi.list", () => {
     await issuesApi.list("company-1", { hasPlanDocument: false, limit: 25 });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?hasPlanDocument=false&limit=25",
+      "/companies/company-1/issues?hasPlanDocument=false&limit=25&includeReviewAttention=false&includeUnblockDescriptor=false",
     );
   });
 
@@ -208,7 +222,7 @@ describe("issuesApi.list", () => {
     });
 
     expect(mockApi.get).toHaveBeenCalledWith(
-      "/companies/company-1/issues?includeLiveDescendantSummary=true&limit=25",
+      "/companies/company-1/issues?includeLiveDescendantSummary=true&limit=25&includeReviewAttention=false&includeUnblockDescriptor=false",
     );
   });
 

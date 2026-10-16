@@ -7838,6 +7838,14 @@ export function issueRoutes(
     const includeLiveDescendantSummary = parseOptionalBooleanQuery(
       req.query.includeLiveDescendantSummary,
     );
+    const includeReviewAttention = parseOptionalBooleanQuery(req.query.includeReviewAttention);
+    const includeUnblockDescriptor = parseOptionalBooleanQuery(req.query.includeUnblockDescriptor);
+    if (includeReviewAttention === null || includeUnblockDescriptor === null) {
+      res.status(400).json({
+        error: "includeReviewAttention and includeUnblockDescriptor must be true or false when provided",
+      });
+      return;
+    }
     const assigneeAgentFilterRaw = req.query.assigneeAgentId;
     let assigneeAgentId: string | null | undefined;
     const rawUpdatedSince = req.query.updatedSince as string | undefined;
@@ -8002,6 +8010,8 @@ export function issueRoutes(
         req.query.includeBlockedInboxAttention === "true" ||
         req.query.includeBlockedInboxAttention === "1",
       includeLiveDescendantSummary: includeLiveDescendantSummary === true,
+      includeReviewAttention,
+      includeUnblockDescriptor,
       hasPlanDocument,
       q: req.query.q as string | undefined,
       limit,

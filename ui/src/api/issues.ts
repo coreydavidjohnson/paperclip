@@ -101,6 +101,8 @@ export type IssueListFilters = {
   includeRoutineExecutions?: boolean;
   includeBlockedBy?: boolean;
   includeBlockedInboxAttention?: boolean;
+  includeReviewAttention?: boolean;
+  includeUnblockDescriptor?: boolean;
   includeLiveDescendantSummary?: boolean;
   hasPlanDocument?: boolean;
   q?: string;
@@ -156,6 +158,11 @@ function issueListSearchParams(filters?: IssueListFilters) {
   if (filters?.sortField) params.set("sortField", filters.sortField);
   if (filters?.sortDir) params.set("sortDir", filters.sortDir);
   if (filters?.afterId) params.set("afterId", filters.afterId);
+  // No production ui/src consumer reads either field. Keep descriptions and
+  // blockerAttention intact (rows, quicklook, inbox and task relations use them).
+  // Explicit true remains available for a future UI consumer.
+  params.set("includeReviewAttention", String(filters?.includeReviewAttention ?? false));
+  params.set("includeUnblockDescriptor", String(filters?.includeUnblockDescriptor ?? false));
   return params;
 }
 
