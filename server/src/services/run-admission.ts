@@ -51,7 +51,7 @@ export async function suspendOmnigentAdmissions(db: Db,
         'version', 1, 'runId', ${heartbeatRuns.id}, 'companyId', ${heartbeatRuns.companyId},
         'agentId', ${heartbeatRuns.agentId}, 'issueId', ${heartbeatRuns.contextSnapshot}->>'issueId',
         'omnigentSessionId', ${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'omnigentSessionId',
-        'suspendedAt', clock_timestamp(), 'reason', ${reason ?? 'bounded_external_observation'}))`,
+        'suspendedAt', clock_timestamp(), 'reason', ${reason ?? 'bounded_external_observation'}::text))`,
   }).where(and(
     eq(heartbeatRuns.id, candidate.id),
     sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${String(candidate.contextSnapshot?.issueId ?? "")}`,
