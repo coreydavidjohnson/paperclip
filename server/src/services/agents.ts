@@ -1226,14 +1226,14 @@ export function agentService(db: Db) {
       }
 
       const patch = configPatchFromSnapshot(revision.afterConfig);
-      return updateAgent(id, patch, {
+      return invalidateSkillListOnMutation(db, async (_companyId: string) => updateAgent(id, patch, {
         recordRevision: {
           createdByAgentId: actor.agentId ?? null,
           createdByUserId: actor.userId ?? null,
           source: "rollback",
           rolledBackFromRevisionId: revision.id,
         },
-      });
+      }))(revision.companyId);
     },
 
     createApiKey: async (

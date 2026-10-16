@@ -36,7 +36,7 @@ export const recoveryRunSelect = {
   // Failure classification searches provider JSON and merges back into it.
   // Preserve full results for that path; successful run output stays in DB.
   resultJson: sql<unknown>`case when ${heartbeatRuns.errorCode} in
-    ('adapter_failed', 'provider_quota', 'configuration_incomplete')
+    ('adapter_failed', 'provider_quota', 'configuration_incomplete', 'adapter_engine_unavailable')
     then ${heartbeatRuns.resultJson}
     else (select to_jsonb(result) from jsonb_to_record(
       case when jsonb_typeof(${heartbeatRuns.resultJson}) = 'object'

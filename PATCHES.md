@@ -576,7 +576,7 @@ into the current fork image or supplied by a fork migration.
 - Why: recovery selected large prompt/history/result/usage payloads for status
   decisions; indexed lookups were cheap in EXPLAIN but expensive to return.
 - Change: explicit recovery JSON/key and column projections; failed provider
-  results remain whole for arbitrary error classification and lossless updates.
+  results (including adapter_engine_unavailable bootstrap evidence) remain whole for arbitrary error classification and lossless updates.
   Retry accounting retains its persisted counters. Slack settlement selects only
   its exact evidence fields. Company predicates, ordering and locks stay intact.
 - The blocked-result repair retains an entire-context SHA-256 comparison under
@@ -606,7 +606,7 @@ into the current fork image or supplied by a fork migration.
   in-flight loads cannot republish. Refresh invalidates model entries before
   discovery, including failed refreshes. Adapter register/unregister/pause clears
   model caches. Skill/source route writes, skill service writes, folder writes
-  and agent create/update/remove/terminate invalidate skill lists before and
+  and agent create/update/rollback/remove/terminate invalidate skill lists before and
   after mutations, including partial failures; overlapping writes bypass reads.
   Filesystem, transaction-scoped and out-of-process changes are bounded by TTL.
 - No response shape, schema, permission, dependency or client changes.

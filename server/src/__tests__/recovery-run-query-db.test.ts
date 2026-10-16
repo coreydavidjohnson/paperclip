@@ -49,9 +49,9 @@ describe("recovery run projections", () => {
     const companyId = randomUUID(), agentId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Projection", issuePrefix: "PQ" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Projection", role: "engineer", adapterType: "codex_local" });
-    for (const errorCode of [null, "adapter_failed", "provider_quota", "configuration_incomplete"]) {
+    for (const errorCode of [null, "adapter_failed", "provider_quota", "configuration_incomplete", "adapter_engine_unavailable"]) {
       const id = randomUUID();
-      const resultJson = { finalizationReasonCode: "conversation_turn_finished", provider: { customError: "rate limit", nullable: null }, stdout: "x".repeat(100_000) };
+      const resultJson = { finalizationReasonCode: "conversation_turn_finished", executionRecovery: { kind: "bootstrap", providerWorkStarted: false }, provider: { customError: "rate limit", nullable: null }, stdout: "x".repeat(100_000) };
       const run = { id, companyId, agentId, errorCode, status: errorCode ? "failed" : "succeeded",
         resultJson, usageJson: { private: "usage" }, scheduledRetryAttempt: 3, scheduledRetryReason: "workspace_busy",
         contextSnapshot: { issueId: "issue", prompt: "do not return", failureRetriesBeforeWorkspaceWait: 2,
