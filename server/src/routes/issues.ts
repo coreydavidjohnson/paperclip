@@ -9231,7 +9231,7 @@ export function issueRoutes(
         }
 
         if (
-          (sourceIssueStatus === "todo" || (sourceIssueStatus === "blocked" && outcome === "blocked")) &&
+          (sourceIssueStatus === "todo" || (sourceIssueStatus === "blocked" && outcome === "blocked" && executionReconciliation)) &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
           assertBoard(req);
@@ -9249,7 +9249,7 @@ export function issueRoutes(
             // Clear only obsolete recoverable conversation holds. This is not
             // admission to run: dependency, approval and operator waits stay put.
             const readiness = await svc.getDependencyReadiness(lockedIssue.id, tx);
-            if (lockedIssue.status !== "blocked" || readiness.unresolvedBlockerCount === 0 ||
+            if (lockedIssue.status !== "blocked" || lockedIssue.executionRunId || lockedIssue.checkoutRunId || readiness.unresolvedBlockerCount === 0 ||
                 activeRecoveryAction.cause !== "legacy_execution_requires_reconciliation" ||
                 reconciledRun.runtimeMode !== "legacy" || reconciledRun.status !== "failed" ||
                 !["omnigent_empty_turn", "omnigent_rotation_not_ready", "paperclip_disposition_failed"].includes(reconciledRun.errorCode ?? "")) {
