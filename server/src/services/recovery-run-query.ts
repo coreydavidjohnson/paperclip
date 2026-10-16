@@ -50,6 +50,7 @@ export const recoveryRunSelect = {
 } as const;
 
 export const retryAccountingRunSelect = {
+  responsibleUserId: heartbeatRuns.responsibleUserId,
   scheduledRetryAttempt: heartbeatRuns.scheduledRetryAttempt,
   scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
   contextSnapshot: sql<Record<string, unknown> | null>`(
