@@ -3394,6 +3394,7 @@ export function recoveryService(
       if (!issue || !action || action.kind !== "deliberate_wait_without_target" ||
           !["active", "escalated"].includes(action.status) ||
           action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+          readNonEmptyString(parseObject(action.wakePolicy).scheduledRunId) ||
           !["blocked", "todo", "in_progress"].includes(issue.status) ||
           !action.returnOwnerAgentId || issue.assigneeAgentId !== action.returnOwnerAgentId || issue.assigneeUserId ||
           issue.unblockDescriptor || issue.monitorNextCheckAt || issue.conversationAgentId ||

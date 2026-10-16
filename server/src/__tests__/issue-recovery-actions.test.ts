@@ -2052,6 +2052,42 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     };
   }
 
+  it.each(["concurrent", "lost-ack"])("delivers ordinary owner return exactly once (%s)", async mode => {
+    const { action, heartbeat, companyId, coderId, sourceIssueId } = await seedReconciledDelivery();
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+    await db.update(issueRecoveryActions).set({ kind: "deliberate_wait_without_target", outcome: "handed_back",
+      evidence: { ownerReturnDelivery: "pending" },
+    }).where(eq(issueRecoveryActions.id, action.id));
+    const options = {
+      source: "automation", triggerDetail: "system", reason: "issue_recovery_owner_return",
+      idempotencyKey: `disposition-owner-return:${action.id}`,
+      payload: { issueId: sourceIssueId, ownerReturnActionId: action.id },
+      requestedByActorType: "system", requestedByActorId: "recovery",
+      contextSnapshot: { issueId: sourceIssueId, taskId: sourceIssueId, ownerReturnActionId: action.id,
+        wakeReason: "issue_recovery_owner_return", source: "issue.recovery_owner_return" },
+    } as const;
+    if (mode === "concurrent") {
+      const [first, second] = await Promise.all([heartbeat.wakeup(coderId, options), heartbeat.wakeup(coderId, options)]);
+      expect(first?.id).toBeTruthy(); expect(second?.id).toBe(first!.id);
+    } else {
+      const first = await heartbeat.wakeup(coderId, options);
+      expect(first?.id).toBeTruthy();
+      await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, first!.id));
+      await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, sourceIssueId));
+      const second = await heartbeat.wakeup(coderId, options);
+      expect(second?.id).toBe(first!.id);
+    }
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.idempotencyKey, options.idempotencyKey),
+    ));
+    expect(wakes).toHaveLength(1);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wakes[0]!.runId!));
+    expect(run!.contextSnapshot).not.toHaveProperty("recoveryActionId");
+    expect(run!.contextSnapshot).not.toHaveProperty("recoveryIntent");
+    expect(run!.contextSnapshot).not.toHaveProperty("legacyDispositionEpisode");
+    expect(run!.contextSnapshot.wakeReason).toBe("issue_recovery_owner_return");
+  });
+
   it("delivers a reconciled execution once across concurrent sweeps without a deferred duplicate", async () => {
     const { action, heartbeat } = await seedReconciledDelivery();
     let entered = 0;
@@ -2353,19 +2389,19 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["clear", "approval", "dependency", "paused", "owner-changed", "unknown-effects"])("automatically returns only a safe exhausted repair (%s)", async gate => {
+  it.each(["clear", "approval", "dependency", "paused", "owner-changed", "unknown-effects", "missing-evidence", "reserved-retry"])("automatically returns only a safe exhausted repair (%s)", async gate => {
     const { companyId, coderId, managerId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
     await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "succeeded" });
     await db.update(heartbeatRuns).set({ finishedAt: new Date(), resultJson: { executionRecovery: gate === "unknown-effects"
-      ? { actionOutcomes: "unknown" } : { kind: "bootstrap", providerWorkStarted: false } },
+      ? { actionOutcomes: "unknown" } : gate === "missing-evidence" ? {} : { kind: "bootstrap", providerWorkStarted: false } },
     }).where(eq(heartbeatRuns.id, runId));
     await db.update(issues).set({ status: "blocked", assigneeAgentId: gate === "owner-changed" ? managerId : coderId }).where(eq(issues.id, sourceIssueId));
     const action = await issueRecoveryActionService(db).upsertSourceScoped({
       companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
       returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "safe-exhausted",
       evidence: { latestRunId: runId, terminalReason: "unchanged_source_state_exhausted" },
-      nextAction: "Inspect repair.", wakePolicy: { type: "board_escalation" },
+      nextAction: "Inspect repair.", wakePolicy: gate === "reserved-retry" ? { type: "bounded_owner_disposition_repair", scheduledRunId: randomUUID() } : { type: "board_escalation" },
     });
     if (gate === "approval") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId, kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Approve payment?" } });
     if (gate === "dependency") {
