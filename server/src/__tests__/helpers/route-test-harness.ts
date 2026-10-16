@@ -12,6 +12,7 @@ import { afterAll, afterEach, beforeAll, describe } from "vitest";
 import { errorHandler } from "../../middleware/index.js";
 import { ensureHumanRoleDefaultGrants } from "../../services/principal-access-compatibility.js";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./embedded-postgres.js";
@@ -39,7 +40,7 @@ export function useEmbeddedPostgres(
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase(prefix);
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   if (opts.resetEach) {
     const resetEach = opts.resetEach;
