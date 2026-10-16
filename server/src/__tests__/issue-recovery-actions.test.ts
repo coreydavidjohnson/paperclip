@@ -1876,6 +1876,48 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });
 
+  it("reconciles a settled execution hold while preserving dependencies and approvals without replay", async () => {
+    const { companyId, coderId, managerId, sourceIssueId, prefix } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(heartbeatRuns).set({ errorCode: "omnigent_rotation_not_ready", runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const blockerId = randomUUID();
+    await db.insert(issues).values({ id: blockerId, companyId, title: "Real dependency", status: "blocked",
+      assigneeAgentId: managerId, issueNumber: 2, identifier: `${prefix}-2` });
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: sourceIssueId, type: "blocks" });
+    const [approval] = await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+      kind: "request_confirmation", status: "pending", createdByAgentId: coderId,
+      payload: { version: 1, prompt: "Approve the separate sensitive action." } }).returning();
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", status: "resolved", outcome: "blocked", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+      nextAction: "Preserve recorded work without replay.", evidence: { runId,
+        automaticRecovery: { policy: "preserve_without_replay_v1", replay: "blocked", actionOutcome: "unknown" } } }).returning();
+    const before = (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0];
+    const wake = vi.fn(async () => null);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action!.id, outcome: "blocked", sourceIssueStatus: "blocked",
+      resolutionNote: "Only the obsolete execution hold is cleared; the dependency and approval remain.",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
+        outcomeEvidence: "The dispatch was rejected before a new turn; the historical runner is offline and cannot resume." } };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect((await request(app).get(`/api/issues/${sourceIssueId}`).expect(200)).body.executionBlocker).toBeNull();
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(before);
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId)))
+      .toEqual([expect.objectContaining({ issueId: blockerId, type: "blocks" })]);
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, approval!.id)))[0]).toEqual(approval);
+    const recorded = (await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]!;
+    expect(recorded.evidence).not.toHaveProperty("automaticRecovery");
+    expect(recorded.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "not_requested" });
+    await deliverReconciledExecutions(db, wake);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+    expect(wake).not.toHaveBeenCalled();
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(1);
+  });
+
   async function seedReconciledDelivery() {
     const fixture = await seedCompany();
     const { companyId, coderId, sourceIssueId } = fixture;
