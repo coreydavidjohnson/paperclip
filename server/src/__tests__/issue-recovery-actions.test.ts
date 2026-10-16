@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import express from "express";
 import request from "supertest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
@@ -2021,6 +2021,100 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await alertDeferredExecutionWakes(db, now)).toEqual({ alerted: 0 });
     await db.update(issues).set({ status: "done" }).where(eq(issues.id, sourceIssueId));
     expect(await alertDeferredExecutionWakes(db, new Date("2026-10-15T00:00:00Z"))).toEqual({ alerted: 0 });
+  });
+
+  it("reconciles a settled execution hold while preserving dependencies and approvals without replay", async () => {
+    const { companyId, coderId, managerId, sourceIssueId, prefix } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(heartbeatRuns).set({ errorCode: "omnigent_rotation_not_ready", runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const blockerId = randomUUID();
+    await db.insert(issues).values({ id: blockerId, companyId, title: "Real dependency", status: "blocked",
+      assigneeAgentId: managerId, issueNumber: 2, identifier: `${prefix}-2` });
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: sourceIssueId, type: "blocks" });
+    const [approval] = await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+      kind: "request_confirmation", status: "pending", createdByAgentId: coderId,
+      payload: { version: 1, prompt: "Approve the separate sensitive action." } }).returning();
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", status: "resolved", outcome: "blocked", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+      nextAction: "Preserve recorded work without replay.", evidence: { runId,
+        automaticRecovery: { policy: "preserve_without_replay_v1", replay: "blocked", actionOutcome: "unknown" } } }).returning();
+    const before = (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0];
+    const wake = vi.fn(async () => null);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action!.id, outcome: "blocked", sourceIssueStatus: "blocked",
+      resolutionNote: "Only the obsolete execution hold is cleared; the dependency and approval remain.",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
+        outcomeEvidence: "The dispatch was rejected before a new turn; the historical runner is offline and cannot resume." } };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ ...body, executionReconciliation: undefined }).expect(200);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(action);
+    const competing = await issueRecoveryActionService(db).upsertSourceScoped({ companyId, sourceIssueId,
+      kind: "missing_disposition", ownerType: "board", cause: "successful_run_missing_issue_disposition",
+      fingerprint: "different-current-action", nextAction: "Preserve this separate action." });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.id, competing.id));
+    const queuedRunId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: queuedRunId, issueId: sourceIssueId, status: "queued" });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, queuedRunId));
+    // Protected terminal states and detached controllers must keep their hold.
+    for (const protectedRun of [
+      { status: "cancelled", errorCode: "omnigent_cancelled" },
+      { status: "interrupted", errorCode: "omnigent_interrupted" },
+      { status: "failed", errorCode: "omnigent_controller_detached" },
+    ]) {
+      await db.update(heartbeatRuns).set(protectedRun).where(eq(heartbeatRuns.id, runId));
+      await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(action);
+    }
+    await db.update(heartbeatRuns).set({ status: "failed", errorCode: "omnigent_rotation_not_ready" }).where(eq(heartbeatRuns.id, runId));
+    await db.delete(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId));
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: sourceIssueId, type: "blocks" });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ ...body,
+      executionReconciliation: { ...body.executionReconciliation, runId: randomUUID() } }).expect(409);
+    // Keep the dependency relation itself locked until reconciliation commits.
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const reconciled = new Promise<void>((resolve) => { entered = resolve; });
+    const transaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementationOnce((callback, config) =>
+      transaction(async (tx) => {
+        const result = await callback(tx);
+        entered();
+        await held;
+        return result;
+      }, config));
+    const resolving = request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).then((response) => response);
+    try {
+      await reconciled;
+      await expect(db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '200ms'`);
+        await tx.delete(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId));
+      })).rejects.toMatchObject({ cause: { code: "55P03" } });
+    } finally {
+      release();
+      transactionSpy.mockRestore();
+    }
+    expect((await resolving).status).toBe(200);
+    expect((await request(app).get(`/api/issues/${sourceIssueId}`).expect(200)).body.executionBlocker).toBeNull();
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(before);
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId)))
+      .toEqual([expect.objectContaining({ issueId: blockerId, type: "blocks" })]);
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, approval!.id)))[0]).toEqual(approval);
+    const recorded = (await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]!;
+    expect(recorded.evidence).not.toHaveProperty("automaticRecovery");
+    expect(recorded.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "not_requested" });
+    await deliverReconciledExecutions(db, wake);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+    expect(wake).not.toHaveBeenCalled();
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(1);
   });
 
   async function seedReconciledDelivery() {

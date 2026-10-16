@@ -9131,8 +9131,8 @@ export function issueRoutes(
               assertBoard(req);
               if (
                 activeRecoveryAction ||
-                sourceIssueStatus !== "todo" ||
-                outcome !== "restored"
+                !((sourceIssueStatus === "todo" && outcome === "restored") ||
+                  (sourceIssueStatus === "blocked" && outcome === "blocked" && lockedIssue.status === "blocked" && settled.cause === "legacy_execution_requires_reconciliation"))
               ) {
                 throw conflict(
                   "Verified outcomes must restore this source recovery without replacing another active recovery action.",
@@ -9286,11 +9286,18 @@ export function issueRoutes(
         }
 
         if (
-          sourceIssueStatus === "todo" &&
+          (sourceIssueStatus === "todo" || (sourceIssueStatus === "blocked" && outcome === "blocked" && executionReconciliation)) &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
           assertBoard(req);
-          await validateExecutionReconciliation({
+          if (sourceIssueStatus === "blocked") {
+            // Serialize terminal-source inspection with any concurrent run update.
+            await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, lockedIssue.companyId),
+              eq(heartbeatRuns.id, executionReconciliation!.runId),
+            )).for("update");
+          }
+          const reconciledRun = await validateExecutionReconciliation({
             db: tx as unknown as Db,
             companyId: lockedIssue.companyId,
             issueId: lockedIssue.id,
@@ -9300,6 +9307,27 @@ export function issueRoutes(
               activeRecoveryAction.evidence.sourceRunId,
             decision: executionReconciliation,
           });
+          if (sourceIssueStatus === "blocked") {
+            // Clear only obsolete recoverable conversation holds. This is not
+            // admission to run: dependency, approval and operator waits stay put.
+            const remaining = await tx.select({ id: issueRows.id }).from(issueRelations)
+              .innerJoin(issueRows, eq(issueRelations.issueId, issueRows.id))
+              .where(and(eq(issueRelations.companyId, lockedIssue.companyId),
+                eq(issueRelations.relatedIssueId, lockedIssue.id), eq(issueRelations.type, "blocks"),
+                notInArray(issueRows.status, ["done", "cancelled"])))
+              .for("share");
+            const [liveRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, lockedIssue.companyId),
+              sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${lockedIssue.id}`,
+              inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+            )).limit(1);
+            if (liveRun || lockedIssue.status !== "blocked" || lockedIssue.executionRunId || lockedIssue.checkoutRunId || remaining.length === 0 ||
+                activeRecoveryAction.cause !== "legacy_execution_requires_reconciliation" ||
+                reconciledRun.runtimeMode !== "legacy" || reconciledRun.status !== "failed" ||
+                !["omnigent_empty_turn", "omnigent_rotation_not_ready", "paperclip_disposition_failed"].includes(reconciledRun.errorCode ?? "")) {
+              throw conflict("Only a failed recoverable legacy turn with a real unresolved dependency can clear its hold without continuation.");
+            }
+          }
         } else if (executionReconciliation) {
           throw conflict(
             "An execution reconciliation must target the current execution recovery action and continue the task.",
@@ -9362,6 +9390,7 @@ export function issueRoutes(
             chatRetry
               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
               : undefined,
+            sourceIssueStatus !== "blocked",
           );
         }
         let issue = lockedIssue;
