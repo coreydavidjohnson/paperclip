@@ -12,6 +12,8 @@ import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { requiresExecutionReconciliation } from "@paperclipai/shared";
 import {
   validateExecutionReconciliation,
+  hasNoExternalEffectEvidence,
+  platformExecutionHasStopped,
   markExecutionReconciliation,
 } from "../services/execution-recovery-resolution.js";
 import {
@@ -9164,6 +9166,22 @@ export function issueRoutes(
           { source: "recovery_action_resolution" },
         );
 
+        let cancellationEffectsSafe = true;
+        if (outcome === "cancelled" && activeRecoveryAction.kind === "deliberate_wait_without_target" &&
+            activeRecoveryAction.evidence.terminalReason === "unchanged_source_state_exhausted") {
+          const sourceRunId = activeRecoveryAction.evidence.latestRunId;
+          const [sourceRun] = typeof sourceRunId === "string" ? await tx.select().from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, lockedIssue.companyId), eq(heartbeatRuns.id, sourceRunId),
+          )).for("update") : [];
+          cancellationEffectsSafe = Boolean(sourceRun && sourceRun.status === "succeeded" &&
+            sourceRun.agentId === lockedIssue.assigneeAgentId &&
+            (sourceRun.nativeIssueId ?? sourceRun.contextSnapshot?.issueId) === lockedIssue.id &&
+            hasNoExternalEffectEvidence(sourceRun, activeRecoveryAction.evidence) &&
+            await platformExecutionHasStopped(tx as unknown as Db, sourceRun));
+          if (!cancellationEffectsSafe && sourceIssueStatus === "todo")
+            throw conflict("Cancellation cannot authorize replay with unverified external effects.");
+        }
+
         if (outcome === "cancelled" && sourceIssueStatus === "todo") {
           if (lockedIssue.assigneeAgentId !== activeRecoveryAction.returnOwnerAgentId ||
               !lockedIssue.assigneeAgentId || lockedIssue.unblockDescriptor ||
@@ -9179,7 +9197,7 @@ export function issueRoutes(
           await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: activeRecoveryAction });
         }
 
-        if (outcome === "cancelled" && sourceIssueStatus === "blocked" && lockedIssue.status === "blocked" &&
+        if (outcome === "cancelled" && cancellationEffectsSafe && sourceIssueStatus === "blocked" && lockedIssue.status === "blocked" &&
             activeRecoveryAction.returnOwnerAgentId === lockedIssue.assigneeAgentId && lockedIssue.assigneeAgentId &&
             !requiresExecutionReconciliation(activeRecoveryAction.cause) && !lockedIssue.unblockDescriptor) {
           const readiness = await svc.getDependencyReadiness(lockedIssue.id, tx);

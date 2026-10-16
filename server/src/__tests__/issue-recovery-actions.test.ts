@@ -1866,6 +1866,25 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]!.evidence.automaticRecovery).toMatchObject({ replay: "blocked" });
   });
 
+  it.each(["blocked", "todo"])("cancellation cannot replay exhausted work with unknown effects (%s)", async status => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "succeeded" });
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({ companyId, sourceIssueId,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target", fingerprint: "unsafe-cancel",
+      ownerType: "board", returnOwnerAgentId: coderId, nextAction: "Inspect effects",
+      evidence: { latestRunId: runId, terminalReason: "unchanged_source_state_exhausted" },
+      wakePolicy: { type: "board_escalation" },
+    });
+    const wake = vi.fn(async () => null);
+    await request(createApp(undefined, { recoveryActionEnqueueWakeup: wake }))
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "cancelled", sourceIssueStatus: status }).expect(status === "todo" ? 409 : 200);
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]!.status).toBe("blocked");
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("returns cancelled recovery work to the unchanged owner without an extra resume", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));

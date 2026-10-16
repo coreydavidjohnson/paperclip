@@ -32,6 +32,17 @@ import { collectDispositionRepairSourceState } from "./recovery/disposition-repa
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 
+/** Missing tool telemetry and success alone never establish absent side effects. */
+export function hasNoExternalEffectEvidence(run: typeof heartbeatRuns.$inferSelect, evidence: Record<string, unknown>): boolean {
+  const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  const reconciliation = evidence.executionReconciliation as Record<string, unknown> | undefined;
+  if (recovery?.actionOutcomes === "unknown") return false;
+  return (recovery?.kind === "bootstrap" && recovery.providerWorkStarted === false) ||
+    (reconciliation?.runId === run.id && reconciliation.providerStopped === true &&
+      reconciliation.actionOutcome === "not_performed" && typeof reconciliation.outcomeEvidence === "string" &&
+      reconciliation.outcomeEvidence.trim().length >= 20);
+}
+
 /** Read-only proof: terminal Paperclip status alone cannot stop a remote turn. */
 export async function platformExecutionHasStopped(db: Db, run: typeof heartbeatRuns.$inferSelect): Promise<boolean> {
   const evidence = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;

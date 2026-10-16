@@ -68,7 +68,7 @@ import {
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
-import { platformExecutionHasStopped } from "../execution-recovery-resolution.js";
+import { platformExecutionHasStopped, hasNoExternalEffectEvidence } from "../execution-recovery-resolution.js";
 import {
   isNativeRunnerOwnershipHeld,
   nativeRunnerOwnershipNotHeldCondition,
@@ -3407,13 +3407,8 @@ export function recoveryService(
           (deps.liveRunExecutions?.has(run.id) ?? runningProcesses.has(run.id)) ||
           (issue.checkoutRunId && issue.checkoutRunId !== run.id) ||
           (issue.executionRunId && issue.executionRunId !== run.id)) return false;
-      const recovery = parseObject(parseObject(run.resultJson).executionRecovery);
-      const reconciliation = parseObject(action.evidence.executionReconciliation);
-      // Success and missing tool telemetry alone never prove no external effects.
-      if (!(recovery.kind === "bootstrap" && recovery.providerWorkStarted === false) &&
-          !(reconciliation.runId === run.id && reconciliation.providerStopped === true &&
-            reconciliation.actionOutcome === "not_performed" && readNonEmptyString(reconciliation.outcomeEvidence))) return false;
-      if (recovery.actionOutcomes === "unknown" || !await platformExecutionHasStopped(tx as unknown as Db, run)) return false;
+      if (!hasNoExternalEffectEvidence(run, action.evidence) ||
+          !await platformExecutionHasStopped(tx as unknown as Db, run)) return false;
       const [state, agent, company, project, latest, blocker, paused, budget, stop] = await Promise.all([
         collectDispositionRepairSourceState(tx as unknown as Db, { issue }), getAgent(run.agentId),
         tx.select().from(companies).where(eq(companies.id, issue.companyId)).then(rows => rows[0]),

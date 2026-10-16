@@ -435,7 +435,6 @@ into the current fork image or supplied by a fork migration.
 - Retirement: drop when upstream supplies equivalently fenced admitted-turn
   observation/finalization; never relax the new-dispatch security guard.
 
-<<<<<<< HEAD
 ## Reset hints do not fail the live-event session (PER-619 / PER-608)
 
 - Valid own/peer reset envelopes advance bounded origin dedupe and request UI
@@ -679,7 +678,6 @@ into the current fork image or supplied by a fork migration.
   deployment and integration tests remain required, not implied by unit counts.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
-=======
 ## PER-475: terminal platform recovery and saved-wake liveness
 
 - Upstream checked at `66424362a85e80a9d8f1b1e2e94002eb1049b8ef`:
@@ -698,9 +696,12 @@ into the current fork image or supplied by a fork migration.
 - Close only the exact terminal reserved owner disposition retry, including
   failed retries; keep unrelated recovery and execution holds. Cancellation
   returns blocked work to its unchanged owner only through hand-back gates.
+- Safe exhausted succeeded repairs return through a durable ordinary-owner outbox
+  only with explicit no-effects evidence and all current gates; concurrent
+  sweeps and lost acknowledgements adopt the same successor. Repair budgets
+  are not replenished.
 - Regression runner: `bash scripts/smoke/per475-recovery/check.sh`.
   It uses digest-pinned disposable cluster compute and real PostgreSQL, with
   namespace deletion and absence readback. It is not a production canary.
 - Retirement: drop when upstream supplies equivalent retained-session recovery,
   evidence fencing, saved-message delivery and retry-action lifecycle handling.
->>>>>>> ebb044c3 (fix(recovery): reconcile platform failures and release saved wakes (PER-475))
