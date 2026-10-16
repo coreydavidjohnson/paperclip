@@ -2353,6 +2353,41 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["clear", "approval", "dependency", "paused", "owner-changed", "unknown-effects"])("automatically returns only a safe exhausted repair (%s)", async gate => {
+    const { companyId, coderId, managerId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "succeeded" });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(), resultJson: { executionRecovery: gate === "unknown-effects"
+      ? { actionOutcomes: "unknown" } : { kind: "bootstrap", providerWorkStarted: false } },
+    }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: gate === "owner-changed" ? managerId : coderId }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "safe-exhausted",
+      evidence: { latestRunId: runId, terminalReason: "unchanged_source_state_exhausted" },
+      nextAction: "Inspect repair.", wakePolicy: { type: "board_escalation" },
+    });
+    if (gate === "approval") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId, kind: "request_confirmation", status: "pending", payload: { version: 1, prompt: "Approve payment?" } });
+    if (gate === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Real prerequisite", status: "todo", priority: "medium" }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker!.id, relatedIssueId: sourceIssueId, type: "blocks" });
+    }
+    if (gate === "paused") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
+    const wake = vi.fn(async (_agentId: string, _opts?: Record<string, any>) => null);
+    const svc = recoveryService(db, { enqueueWakeup: wake });
+    await svc.reconcileStrandedAssignedIssues();
+    const [current] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    if (gate !== "clear") { expect(current!.status).toBe("active"); expect(issue!.status).toBe("blocked"); expect(wake).not.toHaveBeenCalled(); return; }
+    expect(current).toMatchObject({ status: "resolved", outcome: "handed_back", wakePolicy: null });
+    expect(issue).toMatchObject({ status: "todo", assigneeAgentId: coderId });
+    expect(wake).toHaveBeenCalledWith(coderId, expect.objectContaining({ reason: "issue_recovery_owner_return", contextSnapshot: expect.objectContaining({ wakeReason: "issue_recovery_owner_return" }) }));
+    const context = wake.mock.calls[0]![1]!.contextSnapshot!;
+    expect(context.recoveryActionId).toBeUndefined();
+    expect(context.retryReason).toBeUndefined();
+    expect(context.legacyDispositionEpisode).toBeUndefined();
+  });
+
   it("retries an exhausted disposition action once, preserving the owner and audit trail", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     await db.update(issues).set({ status: "blocked", assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));

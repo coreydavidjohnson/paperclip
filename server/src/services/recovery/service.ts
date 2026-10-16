@@ -57,6 +57,7 @@ import {
   issueRecoveryActions,
   issueRelations,
   issueThreadInteractions,
+  projects,
   issues,
   nativeRunFinalizations,
   nativeRunResults,
@@ -66,6 +67,8 @@ import {
 } from "@paperclipai/db";
 import { parseObject, asBoolean, asNumber } from "../../adapters/utils.js";
 import { runningProcesses } from "../../adapters/index.js";
+import { getExecutionBlocker } from "../execution-blocker.js";
+import { platformExecutionHasStopped } from "../execution-recovery-resolution.js";
 import {
   isNativeRunnerOwnershipHeld,
   nativeRunnerOwnershipNotHeldCondition,
@@ -3383,6 +3386,72 @@ export function recoveryService(
     });
   }
 
+  // The existing action is the outbox; delivery is ordinary work, not another repair.
+  async function returnSafeExhaustedDisposition(candidate: { id: string; companyId: string; sourceIssueId: string }) {
+    return db.transaction(async tx => {
+      const [issue] = await tx.select().from(issues).where(and(eq(issues.companyId, candidate.companyId), eq(issues.id, candidate.sourceIssueId))).for("update");
+      const [action] = await tx.select().from(issueRecoveryActions).where(and(eq(issueRecoveryActions.companyId, candidate.companyId), eq(issueRecoveryActions.id, candidate.id))).for("update");
+      if (!issue || !action || action.kind !== "deliberate_wait_without_target" ||
+          !["active", "escalated"].includes(action.status) ||
+          action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+          !["blocked", "todo", "in_progress"].includes(issue.status) ||
+          !action.returnOwnerAgentId || issue.assigneeAgentId !== action.returnOwnerAgentId || issue.assigneeUserId ||
+          issue.unblockDescriptor || issue.monitorNextCheckAt || issue.conversationAgentId ||
+          isPluginManagedIssueLifecycle(issue)) return false;
+      const runId = readNonEmptyString(action.evidence.latestRunId);
+      if (!runId) return false;
+      const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.id, runId))).for("update");
+      if (!run || run.status !== "succeeded" || run.runtimeMode === "native" || run.agentId !== issue.assigneeAgentId ||
+          (parseObject(run.contextSnapshot).issueId ?? parseObject(run.contextSnapshot).taskId) !== issue.id ||
+          (deps.liveRunExecutions?.has(run.id) ?? runningProcesses.has(run.id)) ||
+          (issue.checkoutRunId && issue.checkoutRunId !== run.id) ||
+          (issue.executionRunId && issue.executionRunId !== run.id)) return false;
+      const recovery = parseObject(parseObject(run.resultJson).executionRecovery);
+      const reconciliation = parseObject(action.evidence.executionReconciliation);
+      // Success and missing tool telemetry alone never prove no external effects.
+      if (!(recovery.kind === "bootstrap" && recovery.providerWorkStarted === false) &&
+          !(reconciliation.runId === run.id && reconciliation.providerStopped === true &&
+            reconciliation.actionOutcome === "not_performed" && readNonEmptyString(reconciliation.outcomeEvidence))) return false;
+      if (recovery.actionOutcomes === "unknown" || !await platformExecutionHasStopped(tx as unknown as Db, run)) return false;
+      const [state, agent, company, project, latest, blocker, paused, budget, stop] = await Promise.all([
+        collectDispositionRepairSourceState(tx as unknown as Db, { issue }), getAgent(run.agentId),
+        tx.select().from(companies).where(eq(companies.id, issue.companyId)).then(rows => rows[0]),
+        issue.projectId ? tx.select().from(projects).where(and(eq(projects.companyId, issue.companyId), eq(projects.id, issue.projectId))).then(rows => rows[0]) : null,
+        getLatestIssueRun(issue.companyId, issue.id), getExecutionBlocker(tx as unknown as Db, issue.companyId, issue.id),
+        isAutomaticRecoverySuppressedByPauseHold(tx as unknown as Db, issue.companyId, issue.id),
+        isInvocationBudgetBlocked(issue, run.agentId),
+        readChatControlRecoveryStop(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id, agentId: run.agentId, sourceRunId: run.id }),
+      ]);
+      if (state.hasActiveExecutionPath || state.hasDurableWaitingPath || latest?.id !== run.id ||
+          blocker || paused || budget || stop.kind !== "clear" || company?.status !== "active" || project?.pausedAt || project?.archivedAt ||
+          !agent || !await isAgentInvokable(agent) || !isHeartbeatWakeOnDemandEnabled(agent) ||
+          await hasPersistedDurableWaitPath(issue, run)) return false;
+      await tx.update(issues).set({ status: "todo", checkoutRunId: null, executionRunId: null, executionLockedAt: null, updatedAt: new Date() }).where(eq(issues.id, issue.id));
+      await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "handed_back", resolvedAt: new Date(), updatedAt: new Date(), wakePolicy: null, monitorPolicy: null,
+        evidence: { ...action.evidence, ownerReturnDelivery: "pending", ownerReturnSourceRunId: run.id },
+        resolutionNote: "Successful exhausted repair with verified no-effects evidence; normal owner continuation pending.",
+      }).where(eq(issueRecoveryActions.id, action.id));
+      return true;
+    });
+  }
+
+  async function deliverDispositionOwnerReturns() {
+    const pending = await db.select().from(issueRecoveryActions).where(and(eq(issueRecoveryActions.status, "resolved"), sql`${issueRecoveryActions.evidence}->>'ownerReturnDelivery' = 'pending'`));
+    for (const action of pending) {
+      const [issue] = await db.select().from(issues).where(and(eq(issues.companyId, action.companyId), eq(issues.id, action.sourceIssueId)));
+      if (!issue || issue.assigneeAgentId !== action.returnOwnerAgentId || !["todo", "in_progress"].includes(issue.status)) continue;
+      const run = await deps.enqueueWakeup(action.returnOwnerAgentId!, {
+        source: "automation", triggerDetail: "system", reason: "issue_recovery_owner_return",
+        idempotencyKey: `disposition-owner-return:${action.id}`,
+        issueStateGuard: { statuses: ["todo", "in_progress"], assigneeAgentId: action.returnOwnerAgentId! },
+        payload: { issueId: issue.id, ownerReturnActionId: action.id },
+        requestedByActorType: "system", requestedByActorId: "recovery",
+        contextSnapshot: withRecoveryContext({ issueId: issue.id, taskId: issue.id, wakeReason: "issue_recovery_owner_return", ownerReturnActionId: action.id, source: "issue.recovery_owner_return" }, "normal_model"),
+      });
+      if (run) await db.update(issueRecoveryActions).set({ evidence: sql`${issueRecoveryActions.evidence} || ${JSON.stringify({ ownerReturnDelivery: "delivered", ownerReturnRunId: run.id })}::jsonb` }).where(and(eq(issueRecoveryActions.id, action.id), sql`${issueRecoveryActions.evidence}->>'ownerReturnDelivery' = 'pending'`));
+    }
+  }
+
   async function reconcileActiveRecoveryActions() {
     const rows = await db
       .select({ action: issueRecoveryActions, issue: issues })
@@ -3404,11 +3473,17 @@ export function recoveryService(
       issueIds: [] as string[],
     };
     for (const { action, issue } of rows) {
+      if (await returnSafeExhaustedDisposition(action)) { result.requeued += 1; result.issueIds.push(issue.id); continue; }
       if (await closeTerminalDispositionRetry(action)) {
         result.resolved += 1; result.issueIds.push(issue.id); continue;
       }
       const wakePolicy = parseObject(action.wakePolicy);
       const wakePolicyType = readNonEmptyString(wakePolicy.type);
+      // Reserved retries belong to their exact run and owner, never generic cleanup.
+      if (action.kind === "deliberate_wait_without_target" &&
+          readNonEmptyString(wakePolicy.scheduledRunId)) {
+        result.skipped += 1; continue;
+      }
       if (
         wakePolicyType !== "bounded_recovery_owner" &&
         wakePolicyType !== "bounded_owner_disposition_repair" &&
@@ -4328,7 +4403,15 @@ export function recoveryService(
       inArray(issueRecoveryActions.status, ["active", "escalated"]),
     ));
     for (const action of retries) {
-      if (await closeTerminalDispositionRetry(action)) completedRetryIssues.add(action.sourceIssueId);
+      const closed = await closeTerminalDispositionRetry(action);
+      if (closed) {
+        const runId = readNonEmptyString(parseObject(action.wakePolicy).scheduledRunId);
+        // Keep the successful retry's persisted episode and exhausted budget.
+        if (runId) await reconcileLegacyContinuation(runId);
+      }
+      if (closed || readNonEmptyString(parseObject(action.wakePolicy).scheduledRunId)) {
+        completedRetryIssues.add(action.sourceIssueId);
+      }
     }
     const candidates = await db
       .select()
@@ -5527,6 +5610,7 @@ export function recoveryService(
     result.issueIds.push(...orphanBlockerRecovery.issueIds);
 
     const activeRecovery = await reconcileActiveRecoveryActions();
+    await deliverDispositionOwnerReturns();
     result.continuationRequeued += activeRecovery.requeued;
     result.escalated += activeRecovery.escalated;
     result.skipped += activeRecovery.skipped;
