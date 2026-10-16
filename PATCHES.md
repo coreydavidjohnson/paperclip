@@ -565,6 +565,11 @@ into the current fork image or supplied by a fork migration.
   narrow private-fork payload/query reduction, not a claim of sub-second p95.
   Retire when upstream offers equivalent explicit list projection with the
   default client contract and regression coverage preserved.
+- Local hand-off verification for this projection: token gates and TypeScript
+  syntax parsing passed; a dependency-free Node smoke exercised the actual
+  UI query functions and server projection helpers. Vitest/HTTP DB coverage
+  still requires the cluster dependency image (desktop has no node_modules or
+  pnpm); no latency improvement is claimed before that run and live measurement.
 
 ## Lean recovery and Slack run lookups (PER-826)
 
@@ -584,8 +589,3 @@ into the current fork image or supplied by a fork migration.
   lossless failure results and retry-accounting parity with embedded PostgreSQL.
 - Retire when an upstream release supplies equivalent lean projections and
   passes these contracts. No migration, dependency or permission changes.
-- Local hand-off verification for this projection: token gates and TypeScript
-  syntax parsing passed; a dependency-free Node smoke exercised the actual
-  UI query functions and server projection helpers. Vitest/HTTP DB coverage
-  still requires the cluster dependency image (desktop has no node_modules or
-  pnpm); no latency improvement is claimed before that run and live measurement.
