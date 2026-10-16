@@ -9128,8 +9128,8 @@ export function issueRoutes(
               assertBoard(req);
               if (
                 activeRecoveryAction ||
-                sourceIssueStatus !== "todo" ||
-                outcome !== "restored"
+                !((sourceIssueStatus === "todo" && outcome === "restored") ||
+                  (sourceIssueStatus === "blocked" && outcome === "blocked" && lockedIssue.status === "blocked"))
               ) {
                 throw conflict(
                   "Verified outcomes must restore this source recovery without replacing another active recovery action.",
@@ -9231,11 +9231,11 @@ export function issueRoutes(
         }
 
         if (
-          sourceIssueStatus === "todo" &&
+          (sourceIssueStatus === "todo" || (sourceIssueStatus === "blocked" && outcome === "blocked")) &&
           requiresExecutionReconciliation(activeRecoveryAction.cause)
         ) {
           assertBoard(req);
-          await validateExecutionReconciliation({
+          const reconciledRun = await validateExecutionReconciliation({
             db: tx as unknown as Db,
             companyId: lockedIssue.companyId,
             issueId: lockedIssue.id,
@@ -9245,6 +9245,17 @@ export function issueRoutes(
               activeRecoveryAction.evidence.sourceRunId,
             decision: executionReconciliation,
           });
+          if (sourceIssueStatus === "blocked") {
+            // Clear only obsolete recoverable conversation holds. This is not
+            // admission to run: dependency, approval and operator waits stay put.
+            const readiness = await svc.getDependencyReadiness(lockedIssue.id, tx);
+            if (lockedIssue.status !== "blocked" || readiness.unresolvedBlockerCount === 0 ||
+                activeRecoveryAction.cause !== "legacy_execution_requires_reconciliation" ||
+                reconciledRun.runtimeMode !== "legacy" || reconciledRun.status !== "failed" ||
+                !["omnigent_empty_turn", "omnigent_rotation_not_ready", "paperclip_disposition_failed"].includes(reconciledRun.errorCode ?? "")) {
+              throw conflict("Only a failed recoverable legacy turn with a real unresolved dependency can clear its hold without continuation.");
+            }
+          }
         } else if (executionReconciliation) {
           throw conflict(
             "An execution reconciliation must target the current execution recovery action and continue the task.",
@@ -9308,6 +9319,11 @@ export function issueRoutes(
               ? { kind: "chat_failed_run_retry", actionId: chatRetry.actionId }
               : undefined,
           );
+        }
+        if (executionReconciliation && sourceIssueStatus === "blocked") {
+          await tx.update(issueRecoveryActions).set({
+            evidence: sql`${issueRecoveryActions.evidence} || '{"continuationDelivery":"not_requested"}'::jsonb`,
+          }).where(and(eq(issueRecoveryActions.companyId, lockedIssue.companyId), eq(issueRecoveryActions.id, activeRecoveryAction.id)));
         }
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
