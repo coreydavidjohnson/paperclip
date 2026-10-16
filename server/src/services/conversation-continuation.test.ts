@@ -13,7 +13,7 @@ if (!support.supported) console.warn(`Skipping execution identity regressions: $
 describePostgres("execution identity query contracts", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: Db;
-  beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("execution-identity-"); db = createDb(database.connectionString); }, 20_000);
+  beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("execution-identity-"); db = createDb(database.connectionString); }, 120_000);
   afterAll(async () => { await db?.$client.end({ timeout: 0 }); await database?.cleanup(); });
   async function fixture() {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), otherIssueId = randomUUID();
@@ -62,7 +62,7 @@ describePostgres("execution identity query contracts", () => {
   });
   it("delivers canonical same-company task IDs and keeps malformed IDs private", async () => {
     const f = await fixture(), foreign = await fixture();
-    const contexts: unknown[] = [f.issueId, f.issueId.toUpperCase(), f.issueId.slice(0, 8).toUpperCase() + f.issueId.slice(8), "bad", `{${f.issueId}}`, f.issueId.replaceAll("-", ""), null, 42, {}, [f.issueId], foreign.issueId, randomUUID()];
+    const contexts: unknown[] = [f.issueId, f.issueId.toUpperCase(), f.issueId.slice(0, 8).toUpperCase() + f.issueId.slice(8), ` ${f.issueId}`, `${f.issueId} `, `${f.issueId}\n`, `urn:uuid:${f.issueId}`, "bad", `{${f.issueId}}`, f.issueId.replaceAll("-", ""), null, 42, {}, [f.issueId], foreign.issueId, randomUUID()];
     const expected = new Map<string, string | null>();
     for (const [index, issueId] of contexts.entries()) {
       const row = await run(f, { issueId });
