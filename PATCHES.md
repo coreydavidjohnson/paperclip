@@ -705,3 +705,11 @@ into the current fork image or supplied by a fork migration.
   namespace deletion and absence readback. It is not a production canary.
 - Retirement: drop when upstream supplies equivalent retained-session recovery,
   evidence fencing, saved-message delivery and retry-action lifecycle handling.
+
+### PER-475 image-gate startup budget
+
+- Reuse the existing 90-second embedded-Postgres test budget for the activity
+  and heartbeat-list startup hooks. Their hardcoded 20-second overrides timed
+  out in the exact-source BuildKit gate even with the fork Vitest config.
+- Only test hooks change; assertions, migrations and production code are unchanged.
+- Regression: run both affected suites in the exact-source image gate.
