@@ -37,7 +37,7 @@ function createDeferred(): Deferred {
   return { promise, resolve };
 }
 
-export function createInvalidationBatcher(
+function createWindowBatcher(
   queryClient: Pick<QueryClient, "invalidateQueries">,
   intervalMs: number = DEFAULT_INVALIDATION_INTERVAL_MS,
 ): InvalidationBatcher {
@@ -60,7 +60,14 @@ export function createInvalidationBatcher(
       deferred?.resolve();
       return;
     }
-    const filtersList = [...pending.values()];
+    const queued = [...pending.values()];
+    const filtersList = queued.filter((filters) => !queued.some((parent) =>
+      parent !== filters && !parent.predicate && !filters.predicate && !parent.exact &&
+      parent.refetchType === filters.refetchType && parent.type === filters.type &&
+      parent.stale === filters.stale && parent.fetchStatus === filters.fetchStatus &&
+      parent.queryKey && filters.queryKey && parent.queryKey.length < filters.queryKey.length &&
+      parent.queryKey.every((part, index) => JSON.stringify(part) === JSON.stringify(filters.queryKey![index])),
+    ));
     pending.clear();
     try {
       await Promise.all(filtersList.map((filters) => queryClient.invalidateQueries(
@@ -96,6 +103,26 @@ export function createInvalidationBatcher(
   return { schedule, flush, dispose };
 }
 
+// Company-wide projections need not follow transcript cadence.
+export function createInvalidationBatcher(
+  queryClient: Pick<QueryClient, "invalidateQueries">,
+  intervalMs: number = DEFAULT_INVALIDATION_INTERVAL_MS,
+  companyId?: string,
+): InvalidationBatcher {
+  const fast = createWindowBatcher(queryClient, intervalMs);
+  const lists = createWindowBatcher(queryClient, 10_000);
+  return {
+    schedule(filters) {
+      const key = filters.queryKey;
+      const companyList = companyId && key?.[1] === companyId &&
+        (key[0] === "issues" || key[0] === "attention");
+      return (companyList ? lists : fast).schedule(filters);
+    },
+    async flush() { await Promise.all([fast.flush(), lists.flush()]); },
+    dispose() { fast.dispose(); lists.dispose(); },
+  };
+}
+
 let uniqueFilterCounter = 0;
 
 function serializeFilters(filters: InvalidateQueryFilters): string {
@@ -113,6 +140,8 @@ function serializeFilters(filters: InvalidateQueryFilters): string {
       filters.refetchType ?? null,
       filters.exact ?? null,
       filters.type ?? null,
+      filters.stale ?? null,
+      filters.fetchStatus ?? null,
     ]);
   } catch {
     // Non-serializable filter (shouldn't happen for our query keys) — fall back

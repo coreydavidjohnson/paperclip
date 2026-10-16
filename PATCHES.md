@@ -541,3 +541,29 @@ into the current fork image or supplied by a fork migration.
 - Tests: tests/desktop-recovery (HTTP, policy, isolated DB/races/native services).
 - Removal: upstream provides the same restricted transport and native atomic
   fences; retire this patch instead of retaining a duplicate implementation.
+
+## PER-827. Bound company-list refreshes and reconcile issue polling
+
+- Why: every issue activity invalidated the company issue prefix plus covered
+  child keys in the 300 ms live-event batch. Open issues also polled live runs
+  every second and browser discovery every three seconds.
+- Upstream checked 2026-10-16: master `b294abb9eb96c33048b4f53a2a037e04886b7407`
+  and release `v2026.1012.0` retain the short company-list batch and hot polling;
+  no equivalent found in path/symptom history. Requested patch authorized by
+  Corey's PER-824 step 5 and PER-827 description; no upstream proposal.
+- Contract: company-scoped issue/attention live invalidations flush every ten
+  seconds during activity (no debounce starvation), while issue details keep
+  the existing 300 ms window. Covered child invalidations merge only when all
+  other query filters agree. Direct user mutation refreshes stay immediate.
+  Live-run, run-history and browser interval fallback is fifteen seconds.
+- Reuse private JSON validators for full issues and attention. Attention uses
+  a weak ETag excluding only top-level generatedAt; JSON bodies are unchanged.
+  Private no-cache requires authorization and validation before cache reuse.
+  This saves transfer, not the underlying feed generation work.
+- Tests: query-invalidation-batcher.test.ts reproduces 60 issue/attention
+  invalidations per minute before and six after, with 60 detail updates both
+  ways. private-json-etag.test.ts covers 304, changed feed and authorization.
+  issue-refresh-budget.test.ts guards interval settings. Live request counts,
+  deployment and integration tests remain required, not implied by unit counts.
+- Removal: drop on the next released upstream equivalent; re-evaluate these
+  paths and preserve authorization, mutation refresh and missed-event repair.
