@@ -27,7 +27,19 @@ export async function settleSlackConversation(db: Db, companyId: string, issueId
     const monitor = issue.executionState?.monitor;
     if (monitor && typeof monitor === "object" && "status" in monitor &&
       ["scheduled", "triggered"].includes(String(monitor.status))) return false;
-    const [run] = await tx.select().from(heartbeatRuns)
+    const [run] = await tx.select({
+      id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status,
+      finishedAt: heartbeatRuns.finishedAt, scheduledRetryAt: heartbeatRuns.scheduledRetryAt,
+      livenessState: heartbeatRuns.livenessState, runtimeMode: heartbeatRuns.runtimeMode,
+      resultJson: sql<Record<string, unknown> | null>`jsonb_build_object(
+        'finalizationReasonCode', ${heartbeatRuns.resultJson}->'finalizationReasonCode')`,
+      contextSnapshot: sql<Record<string, unknown> | null>`(
+        select to_jsonb(context) from jsonb_to_record(
+          case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+            then ${heartbeatRuns.contextSnapshot} end
+        ) as context("wakeCommentId" jsonb, "commentId" jsonb, "wakeCommentIds" jsonb)
+      )`,
+    }).from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.companyId, companyId),
         sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId', ${heartbeatRuns.nativeIssueId}::text) = ${issueId}`))
       .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);

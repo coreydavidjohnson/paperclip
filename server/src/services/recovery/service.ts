@@ -1,3 +1,4 @@
+import { recoveryRunSelect, retryAccountingRunSelect } from "../recovery-run-query.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { settleSlackConversation } from "../slack-conversation-lifecycle.js";
@@ -232,6 +233,7 @@ type LatestIssueRun =
       | "createdAt"
     > & {
       resultJson?: unknown;
+      contextSnapshotFingerprint?: string | null;
     })
   | null;
 type SuccessfulLatestIssueRun = NonNullable<LatestIssueRun> & {
@@ -950,18 +952,7 @@ export function recoveryService(
     issueId: string,
   ): Promise<LatestIssueRun> {
     return db
-      .select({
-        id: heartbeatRuns.id,
-        agentId: heartbeatRuns.agentId,
-        status: heartbeatRuns.status,
-        error: heartbeatRuns.error,
-        errorCode: heartbeatRuns.errorCode,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
-        livenessState: heartbeatRuns.livenessState,
-        resultJson: heartbeatRuns.resultJson,
-        startedAt: heartbeatRuns.startedAt,
-        createdAt: heartbeatRuns.createdAt,
-      })
+      .select(recoveryRunSelect)
       .from(heartbeatRuns)
       .where(
         and(
@@ -980,18 +971,7 @@ export function recoveryService(
     agentId: string,
   ): Promise<LatestIssueRun> {
     return db
-      .select({
-        id: heartbeatRuns.id,
-        agentId: heartbeatRuns.agentId,
-        status: heartbeatRuns.status,
-        error: heartbeatRuns.error,
-        errorCode: heartbeatRuns.errorCode,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
-        livenessState: heartbeatRuns.livenessState,
-        resultJson: heartbeatRuns.resultJson,
-        startedAt: heartbeatRuns.startedAt,
-        createdAt: heartbeatRuns.createdAt,
-      })
+      .select(recoveryRunSelect)
       .from(heartbeatRuns)
       .where(
         and(
@@ -1532,7 +1512,7 @@ export function recoveryService(
         return false;
 
       const source = await tx
-        .select()
+        .select(recoveryRunSelect)
         .from(heartbeatRuns)
         .where(
           and(
@@ -1548,8 +1528,7 @@ export function recoveryService(
         source.id !== latestRun.id ||
         source.agentId !== current.assigneeAgentId ||
         source.status !== "succeeded" ||
-        JSON.stringify(source.contextSnapshot) !==
-          JSON.stringify(latestRun.contextSnapshot)
+        source.contextSnapshotFingerprint !== latestRun.contextSnapshotFingerprint
       )
         return false;
       const proof = await nativeBlockedUnblockAction(
@@ -1811,18 +1790,7 @@ export function recoveryService(
     since: Date,
   ): Promise<LatestIssueRun> {
     return db
-      .select({
-        id: heartbeatRuns.id,
-        agentId: heartbeatRuns.agentId,
-        status: heartbeatRuns.status,
-        error: heartbeatRuns.error,
-        errorCode: heartbeatRuns.errorCode,
-        contextSnapshot: heartbeatRuns.contextSnapshot,
-        livenessState: heartbeatRuns.livenessState,
-        resultJson: heartbeatRuns.resultJson,
-        startedAt: heartbeatRuns.startedAt,
-        createdAt: heartbeatRuns.createdAt,
-      })
+      .select(recoveryRunSelect)
       .from(heartbeatRuns)
       .where(
         and(
@@ -3130,7 +3098,7 @@ export function recoveryService(
     if (!agentId) return null;
     // Preserve the initiating identity on the durable row, including while a
     // delayed repair is waiting to dispatch. Never substitute the issue owner.
-    const sourceRun = input.latestRun?.id ? await db.select()
+    const sourceRun = input.latestRun?.id ? await db.select(retryAccountingRunSelect)
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.latestRun.id), eq(heartbeatRuns.companyId, input.issue.companyId)))
       .limit(1).then(rows => rows[0]) : null;
     const timing = dispositionRepairDelayMs(input.attempt, input.fingerprint);
@@ -3337,7 +3305,7 @@ export function recoveryService(
     action: typeof issueRecoveryActions.$inferSelect,
   ) {
     return db
-      .select()
+      .select(recoveryRunSelect)
       .from(heartbeatRuns)
       .where(
         and(

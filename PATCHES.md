@@ -541,3 +541,46 @@ into the current fork image or supplied by a fork migration.
 - Tests: tests/desktop-recovery (HTTP, policy, isolated DB/races/native services).
 - Removal: upstream provides the same restricted transport and native atomic
   fences; retire this patch instead of retaining a duplicate implementation.
+
+## Opt-in omission of unused issue-list metadata (PER-826)
+
+- The standard UI list client explicitly sends `includeReviewAttention=false`
+  and `includeUnblockDescriptor=false`. The former skips review-path hydration
+  and omits `reviewAttention`; the latter projects SQL NULL instead of fetching
+  descriptor JSON. Default API/service callers retain both fields, and explicit
+  `true` restores them. Detail responses and governance/mutation paths are unchanged.
+- Production `ui/src` has no reads of either field. Keep description previews
+  (list rows/quicklook/inbox) and all `blockerAttention` data (StatusIcon,
+  inbox-live-descendants, TaskChatThread and task relations); do not remove these
+  based on payload size. The blocked-leaf sweep's default projection is unchanged.
+- Both ordinary/user-context and blocked-inbox list paths honor the flags.
+  The normalized flags participate in the existing actor-scoped request key,
+  separating full/slim responses; compact-view authorization and recovery
+  revalidation remain unchanged. Invalid boolean values are rejected with 400.
+- Tests: `server/src/__tests__/issue-list-metadata-routes.test.ts` and
+  `ui/src/api/issues.test.ts`; run with `pnpm exec vitest run` plus these paths.
+  Token gates: `pnpm check:token-gates`. No dependency/schema change.
+- Source finding: pinned upstream hydrates review metadata for every list but
+  only the detail endpoint's data is used by UI review controls. This is a
+  narrow private-fork payload/query reduction, not a claim of sub-second p95.
+  Retire when upstream offers equivalent explicit list projection with the
+  default client contract and regression coverage preserved.
+
+## Lean recovery and Slack run lookups (PER-826)
+
+- Why: recovery selected large prompt/history/result/usage payloads for status
+  decisions; indexed lookups were cheap in EXPLAIN but expensive to return.
+- Change: explicit recovery JSON/key and column projections; failed provider
+  results remain whole for arbitrary error classification and lossless updates.
+  Retry accounting retains its persisted counters. Slack settlement selects only
+  its exact evidence fields. Company predicates, ordering and locks stay intact.
+- The blocked-result repair retains an entire-context SHA-256 comparison under
+  the existing issue lock, so changes outside the projection still reject repair.
+- Upstream inspected 2026-10-16: master b294abb9eb96c33048b4f53a2a037e04886b7407
+  still selects complete context/results in these paths; latest release tag
+  v2026.1012.0 has no equivalent. Private reliability carry requested in PER-826.
+- Regression: server/src/__tests__/recovery-run-query-db.test.ts checks JSON
+  types/nested nulls, excluded large payloads, whole-context race detection,
+  lossless failure results and retry-accounting parity with embedded PostgreSQL.
+- Retire when an upstream release supplies equivalent lean projections and
+  passes these contracts. No migration, dependency or permission changes.
