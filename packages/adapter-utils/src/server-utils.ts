@@ -2538,6 +2538,14 @@ function renderPaperclipWakePromptBody(
         message.updatedAt === continuation.objectiveSource.revision &&
         !message.deleted,
       );
+    // Pending wake comments belong to current events. Remove only their exact
+    // history copies, retaining edits, deleted records, and foreign-issue data.
+    requestContextBase.messages = continuation.messages.filter((message) =>
+      continuation.issueId !== normalized.issue?.id || message.deleted ||
+      !normalized.comments.some((comment) =>
+        comment.id === message.id && typeof message.body === "string" && comment.body.trim() === message.body.trim(),
+      ),
+    );
     const requestContext = continuationObjectiveOwnedByAssignment(continuation) || objectiveOwnedByDisplayedSource
       ? { ...requestContextBase, ...(objectiveSource ? { objectiveSource } : {}) }
       : { ...requestContextBase, objective, ...(objectiveSource ? { objectiveSource } : {}) };
@@ -3123,19 +3131,7 @@ function renderPaperclipWakePromptBody(
       lines.push("");
     }
   };
-  const continuation = normalized.executionContinuation;
-  const continuationMessages = continuation && resumedSession && continuation.resumeDelta
-    ? continuation.resumeDelta.messages
-    : continuation?.messages ?? [];
-  const comments = normalized.comments
-    .filter((comment) => {
-      if (!continuation || continuation.issueId !== normalized.issue?.id) return true;
-      const message = continuationMessages.find(
-        (candidate) => candidate.id === comment.id && !candidate.deleted,
-      );
-      return !message || message.body.trim() !== comment.body.trim();
-    })
-    .map((comment, index) => ({
+  const comments = normalized.comments.map((comment, index) => ({
     index,
     comment,
   }));

@@ -3871,7 +3871,40 @@ describe("wake continuation comment ownership", () => {
     sourceTrust: "human",
   });
 
-  it("suppresses only an exact continuation owner and keeps same-body distinct IDs", () => {
+  it.each([false, true])(
+    "renders run-2757f0d9 pending comments exactly once in the wake section (resumed: %s)",
+    (resumedSession) => {
+      const comments = [
+        message("0e92f444", "Board direction: continue the assigned implementation."),
+        message("207bd85c", "Board direction: preserve the existing approval gate."),
+      ];
+      const history = [
+        ...Array.from({ length: 11 }, (_, index) => message(`history-${index}`, `Earlier message ${index}.`)),
+        ...comments,
+      ];
+      const prompt = renderPaperclipWakePrompt({
+        reason: "issue_commented",
+        issue: { id: "issue-1", identifier: "PER-772", title: "Task", description: null },
+        comments,
+        commentIds: comments.map((comment) => comment.id),
+        latestCommentId: comments[1].id,
+        commentWindow: { requestedCount: 2, includedCount: 2, missingCount: 0 },
+        fallbackFetchNeeded: false,
+        executionContinuation: continuation(history, comments),
+      }, { resumedSession });
+
+      expect(prompt).toContain("New comments in order:");
+      const wakeSection = prompt.slice(prompt.indexOf("New comments in order:"));
+      for (const comment of comments) {
+        expect(wakeSection).toContain(comment.body);
+        expect(prompt.split(comment.body)).toHaveLength(2);
+      }
+      expect(wakeSection.indexOf(comments[0].body)).toBeLessThan(wakeSection.indexOf(comments[1].body));
+      expect(prompt).toContain(resumedSession ? "task_history_delta" : "Earlier message 0.");
+    },
+  );
+
+  it("renders pending comments and keeps distinct IDs and edited history", () => {
     const prompt = renderPaperclipWakePrompt({
       reason: "issue_commented",
       issue: { id: "issue-1", identifier: "PAP-1", title: "Task", description: null },
@@ -3889,7 +3922,31 @@ describe("wake continuation comment ownership", () => {
     });
     expect(prompt).toContain("comment-b");
     expect(prompt).toContain("comment-edited");
-    expect(prompt).not.toContain("comment-a at");
+    expect(prompt).toContain("comment-a at");
+    expect(prompt.split("Repeat body")).toHaveLength(3);
+    expect(prompt).toContain("Original body");
+  });
+
+  it("does not mutate the envelope or discard foreign or legacy history", () => {
+    const source = message("comment-1", "Current direction.");
+    const legacy = { ...source, body: undefined };
+    const envelope = continuation([legacy]);
+    expect(() => renderPaperclipWakePrompt({
+      reason: "issue_commented",
+      issue: { id: "issue-1" },
+      comments: [source],
+      executionContinuation: envelope,
+    })).not.toThrow();
+    expect(envelope.messages).toEqual([legacy]);
+    const foreign = continuation([source]);
+    const prompt = renderPaperclipWakePrompt({
+      reason: "issue_commented",
+      issue: { id: "issue-2" },
+      comments: [source],
+      executionContinuation: foreign,
+    });
+    expect(prompt.split(source.body)).toHaveLength(3);
+    expect(foreign.messages).toEqual([source]);
   });
 
   it("does not suppress a current comment absent from the rendered resume delta", () => {
