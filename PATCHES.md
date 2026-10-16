@@ -505,3 +505,24 @@ into the current fork image or supplied by a fork migration.
 - Retire: drop when a released upstream equivalent passes the query ceiling and
   security regressions. Parent PER-711 owns image-gate wiring, integration,
   deployment and final latency; PER-705 owns phone acceptance.
+
+## Pending wake comments remain current events (PER-806)
+
+- Why: an assignment deliberately omits wake bodies, but adapter-utils also
+  removed pending comments found in continuation history. Agents saw IDs
+  without current-event bodies and ignored new board direction.
+- Change: always render pending comments in the wake section. Remove only
+  matching ID/body history copies from the displayed continuation snapshot or
+  resume delta so the pending body appears once. Do not mutate the envelope;
+  preserve edits, distinct IDs, deleted records, foreign-issue history and
+  existing objective/approval/source-trust guards.
+- Regression: `packages/adapter-utils/src/server-utils.test.ts`, run-2757f0d9
+  shape: 13 history messages, two pending comments, resumeDelta present; both
+  fresh and resumed prompts require each body once, in wake order. Existing
+  edited/distinct-ID and objective-source checks remain. 129 focused tests pass.
+- Upstream inspected 2026-10-16: master
+  78b833c4958465b5e345b0e337018011b00dab72 and release v2026.1012.0
+  retain the suppressing filter; no released equivalent to upgrade to.
+- Retire when an upstream release preserves pending wake bodies exactly once
+  with the regression passing. Requested private fork carry in PER-806;
+  no upstream communication or dependency/schema change.

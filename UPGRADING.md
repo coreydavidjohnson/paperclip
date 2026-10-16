@@ -97,3 +97,14 @@ same-company membership, implicit-board shortcuts or cross-request caching.
 Parent integration must include decision-queues-routes.test.ts in its image
 regression gate and preserve the pending reset-readiness carry in base 505f58abe.
 This implementation commit is not production deployment or phone acceptance.
+
+## Pending wake comment ownership (PER-806)
+
+Keep the run-2757f0d9 fresh/resume regression when rebasing adapter-utils.
+Pending comments must remain visible under the current-events wake section,
+not disappear merely because task history contains them. Exact history copies
+are omitted only from the displayed prompt; persisted continuation data and
+approval/objective provenance are unchanged. Retire the carry only with a
+released equivalent passing the exactly-once and edited/distinct-ID checks.
+The OmniGenT external adapter must use this same adapter-utils revision, not
+its older npm dependency copy; test the assembled image's buildPrompt too.
