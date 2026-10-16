@@ -9880,7 +9880,7 @@ export function issueRoutes(
               .where(and(eq(issueRelations.companyId, lockedIssue.companyId),
                 eq(issueRelations.relatedIssueId, lockedIssue.id), eq(issueRelations.type, "blocks"),
                 notInArray(issueRows.status, ["done", "cancelled"])))
-              .for("share", { of: issueRows });
+              .for("share");
             const [liveRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
               eq(heartbeatRuns.companyId, lockedIssue.companyId),
               sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${lockedIssue.id}`,
