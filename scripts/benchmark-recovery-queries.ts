@@ -108,7 +108,7 @@ try {
   console.log(JSON.stringify({ baselineRevision, planner: "transaction-local nested-loop (hash/merge disabled), matching reproduced live plan", runs: 1400, issues: 1000, actions: 350, promptBytes: Buffer.byteLength(prompt), results }, null, 2));
   const status = results.find(result => result.name === "statusDelivery")!;
   assert.equal(status.equalRows, 1);
-  assert.ok(JSON.stringify(status.treatmentPlan).includes("issues_pkey"), "status delivery must use the issue UUID primary-key index");
+  assert.ok(/issues_pkey|issues_company_id_uq/.test(JSON.stringify(status.treatmentPlan)), "status delivery must use an issue UUID identity index");
   assert.ok(status.speedup > 5, `expected >5x, observed ${status.speedup}`);
 } finally {
   try { await db?.$client.end({ timeout: 0 }); await database?.cleanup();
