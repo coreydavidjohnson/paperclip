@@ -908,8 +908,10 @@ export interface Issue {
   blockedBy?: IssueRelationIssueSummary[];
   blocks?: IssueRelationIssueSummary[];
   blockerAttention?: IssueBlockerAttention;
+  /** Omitted from lists requested with includeReviewAttention=false. */
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
+  /** List requests with includeUnblockDescriptor=false return null; detail is unchanged. */
   unblockDescriptor?: IssueUnblockDescriptor | null;
   blockedTransitionAt?: Date | null;
   blockedOwnerNotifiedAt?: Date | null;
@@ -986,6 +988,7 @@ export type CompactIssue = Pick<
   labels?: IssueLabel[];
   blockedBy?: IssueRelationIssueSummary[];
   blockerAttention?: IssueBlockerAttention;
+  /** Omitted from lists requested with includeReviewAttention=false. */
   reviewAttention?: IssueReviewAttention;
   blockedInboxAttention?: IssueBlockedInboxAttention | null;
   scheduledRetry?: IssueScheduledRetry | null;

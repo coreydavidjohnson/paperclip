@@ -1848,6 +1848,10 @@ export interface IssueFilters {
   includePluginOperations?: boolean;
   includeBlockedBy?: boolean;
   includeBlockedInboxAttention?: boolean;
+  /** Default true; the UI opts out of unused review-path hydration. */
+  includeReviewAttention?: boolean;
+  /** Default true; false selects NULL instead of the descriptor JSON. */
+  includeUnblockDescriptor?: boolean;
   includeLiveDescendantSummary?: boolean;
   hasPlanDocument?: boolean;
   lowTrustBoundary?: LowTrustBoundary & { companyId: string };
@@ -4947,6 +4951,26 @@ const issueListSelect = {
   updatedAt: issues.updatedAt,
 };
 
+function issueListSelectForFilters(filters?: IssueFilters) {
+  return {
+    ...issueListSelect,
+    // Keep the nullable row shape without fetching potentially large JSON.
+    unblockDescriptor:
+      filters?.includeUnblockDescriptor === false
+        ? sql<null>`null`
+        : issues.unblockDescriptor,
+  };
+}
+
+function issueListReviewAttentionFields(
+  filters: IssueFilters | undefined,
+  attention: IssueReviewAttention | undefined,
+): { reviewAttention?: IssueReviewAttention } {
+  return filters?.includeReviewAttention === false
+    ? {}
+    : { reviewAttention: attention ?? reviewAttentionNone() };
+}
+
 function withActiveRuns(
   issueRows: IssueWithLabels[],
   runMap: Map<string, IssueActiveRunRow>,
@@ -6383,7 +6407,7 @@ async function listBlockedInboxIssues(
 
   const rows = (
     await dbOrTx
-      .select(issueListSelect)
+      .select(issueListSelectForFilters(filters))
       .from(issues)
       .where(and(...conditions))
       .orderBy(
@@ -6427,7 +6451,9 @@ async function listBlockedInboxIssues(
     lastActivityStatsForIssues(dbOrTx, companyId, issueIds),
     blockedByMapForIssues(dbOrTx, companyId, issueIds),
     listIssueBlockerAttentionMap(dbOrTx, companyId, withRuns),
-    listIssueReviewAttentionMap(dbOrTx, companyId, withRuns),
+    filters?.includeReviewAttention === false
+      ? Promise.resolve(new Map<string, IssueReviewAttention>())
+      : listIssueReviewAttentionMap(dbOrTx, companyId, withRuns),
     listIssueBlockedInboxAttentionMap(dbOrTx, companyId, withRuns),
     includeLiveDescendantSummary
       ? liveDescendantCountMapForIssues(dbOrTx, companyId, issueIds)
@@ -6498,8 +6524,10 @@ async function listBlockedInboxIssues(
           ...(blockerAttentionByIssueId.has(row.id)
             ? { blockerAttention: blockerAttentionByIssueId.get(row.id) }
             : {}),
-          reviewAttention:
-            reviewAttentionByIssueId.get(row.id) ?? reviewAttentionNone(),
+          ...issueListReviewAttentionFields(
+            filters,
+            reviewAttentionByIssueId.get(row.id),
+          ),
           blockedInboxAttention,
           ...(includeLiveDescendantSummary
             ? {
@@ -8148,7 +8176,7 @@ export function issueService(db: Db) {
       }
       const priorityOrder = sql`CASE ${issues.priority} WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END`;
       const searchOrder = sql<number>`-task_search.score`;
-      const issueSource = db.select(issueListSelect).from(issues);
+      const issueSource = db.select(issueListSelectForFilters(filters)).from(issues);
       const searchedSource = hasSearch
         ? issueSource.innerJoin(sql`(
             ${taskSearchCtes(companyId, taskSearch, true, and(...conditions), filters?.readCondition)}
@@ -8229,7 +8257,9 @@ export function issueService(db: Db) {
         blockedInboxAttentionByIssueId,
       ] = await Promise.all([
         listIssueBlockerAttentionMap(db, companyId, withRuns),
-        listIssueReviewAttentionMap(db, companyId, withRuns),
+        filters?.includeReviewAttention === false
+          ? Promise.resolve(new Map<string, IssueReviewAttention>())
+          : listIssueReviewAttentionMap(db, companyId, withRuns),
         includeBlockedInboxAttention
           ? listIssueBlockedInboxAttentionMap(db, companyId, withRuns)
           : Promise.resolve(new Map<string, IssueBlockedInboxAttention>()),
@@ -8253,8 +8283,10 @@ export function issueService(db: Db) {
             ...(blockerAttentionByIssueId.has(row.id)
               ? { blockerAttention: blockerAttentionByIssueId.get(row.id) }
               : {}),
-            reviewAttention:
-              reviewAttentionByIssueId.get(row.id) ?? reviewAttentionNone(),
+            ...issueListReviewAttentionFields(
+            filters,
+            reviewAttentionByIssueId.get(row.id),
+          ),
             ...(includeBlockedInboxAttention
               ? {
                   blockedInboxAttention:
@@ -8296,8 +8328,10 @@ export function issueService(db: Db) {
           ...(blockerAttentionByIssueId.has(row.id)
             ? { blockerAttention: blockerAttentionByIssueId.get(row.id) }
             : {}),
-          reviewAttention:
-            reviewAttentionByIssueId.get(row.id) ?? reviewAttentionNone(),
+          ...issueListReviewAttentionFields(
+            filters,
+            reviewAttentionByIssueId.get(row.id),
+          ),
           ...(includeBlockedInboxAttention
             ? {
                 blockedInboxAttention:
