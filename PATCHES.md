@@ -678,3 +678,28 @@ into the current fork image or supplied by a fork migration.
   deployment and integration tests remain required, not implied by unit counts.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
+
+## PER-894. Reconcile obsolete execution holds without resuming blocked work
+
+- Root cause: resolved preserve_without_replay actions are omitted from the
+  active recovery list but still project an execution hold; the resolve API
+  formerly accepted new evidence only with restored/todo, conflicting with
+  a real dependency wait.
+- Own-fork repair: board-only exact-action reconciliation can retain blocked
+  status when a legacy failed recoverable OmniGenT turn has an unresolved
+  dependency. Keep native source/owner/process/lease validation, lock the
+  terminal source and dependency, reject live queued/running/retry work and
+  competing actions. Retain issue policy, approvals and relations unchanged.
+  Store continuationDelivery=not_requested atomically; never wake or replay.
+- Cancelled/interrupted/detached errors are outside this path. No automatic
+  recovery class or API authorization expansion. Approval-only waits remain
+  out of scope; this path requires an unresolved issue dependency.
+- Upstream checked: master 73659c6b27c1d97226f2da9ca39f256eefddac66 and release
+  v2026.1012.0 bba6a45f0d364cfd962ac59b3bdf2426a8222adb retain todo-only
+  settled reconciliation. Drop this patch when a released equivalent preserves
+  waits and does not schedule continuation.
+- Regression: issue-recovery-actions.test.ts, “reconciles a settled execution
+  hold while preserving dependencies and approvals without replay”. RED at
+  d0a35ab5afd3e8d8c5f07addc868e0723f6739a0: expected 200, got 409. Initial GREEN
+  passed; full 76-test recovery suite passed at e26dda62d9d89cb0a32907a9473af8fd82b7511b.
+  Final exact-source integration and live delivery remain separate gates.
