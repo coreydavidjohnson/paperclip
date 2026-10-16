@@ -62,13 +62,21 @@ describePostgres("execution identity query contracts", () => {
   });
   it("delivers canonical same-company task IDs and keeps malformed IDs private", async () => {
     const f = await fixture(), foreign = await fixture();
-    const contexts: unknown[] = [f.issueId, f.issueId.toUpperCase(), "bad", `{${f.issueId}}`, f.issueId.replaceAll("-", ""), null, 42, {}, [f.issueId], foreign.issueId];
+    const contexts: unknown[] = [f.issueId, f.issueId.toUpperCase(), f.issueId.slice(0, 8).toUpperCase() + f.issueId.slice(8), "bad", `{${f.issueId}}`, f.issueId.replaceAll("-", ""), null, 42, {}, [f.issueId], foreign.issueId, randomUUID()];
     const expected = new Map<string, string | null>();
     for (const [index, issueId] of contexts.entries()) {
       const row = await run(f, { issueId });
       await db.update(heartbeatRuns).set({ executionStatusDeliveryId: randomUUID() }).where(eq(heartbeatRuns.id, row.id));
       expected.set(row.id, index === 0 ? f.issueId : null);
     }
+    for (const context of [{}, null]) {
+      const missing = await run(f, context);
+      await db.update(heartbeatRuns).set({ executionStatusDeliveryId: randomUUID() }).where(eq(heartbeatRuns.id, missing.id));
+      expected.set(missing.id, null);
+    }
+    const foreignNative = await run(f, { issueId: f.issueId }, foreign.issueId);
+    await db.update(heartbeatRuns).set({ executionStatusDeliveryId: randomUUID() }).where(eq(heartbeatRuns.id, foreignNative.id));
+    expected.set(foreignNative.id, null);
     const native = await run(f, { issueId: f.otherIssueId }, f.issueId);
     await db.update(heartbeatRuns).set({ executionStatusDeliveryId: randomUUID() }).where(eq(heartbeatRuns.id, native.id));
     expected.set(native.id, f.issueId);
