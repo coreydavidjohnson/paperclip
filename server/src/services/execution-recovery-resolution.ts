@@ -142,6 +142,7 @@ export async function markExecutionReconciliation(
   decision: ExecutionReconciliation,
   actorId: string,
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
+  deliverContinuation = true,
 ) {
   if (deliveryOwner) {
     const [retry] = await db
@@ -187,7 +188,7 @@ export async function markExecutionReconciliation(
           actorId,
           recordedAt: new Date().toISOString(),
         },
-        continuationDelivery: deliveryOwner ? "delegated" : "pending",
+        continuationDelivery: !deliverContinuation ? "not_requested" : deliveryOwner ? "delegated" : "pending",
         ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
       },
     })

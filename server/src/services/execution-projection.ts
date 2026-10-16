@@ -202,6 +202,11 @@ export function projectExecution(
     recoveryAction?.status === "resolved" &&
     recoveryAction.evidence?.executionReconciliation
   ) {
+    if (recoveryAction.evidence.continuationDelivery === "not_requested") {
+      projection.cause = null;
+      projection.nextAction = "Execution reconciled without continuation; the task's existing waits remain in force.";
+      return set("completed", "Reconciled without continuation");
+    }
     if (recoveryAction.evidence.continuationDelivery === "invalidated") {
       projection.cause = "continuation_ownership_changed";
       projection.nextAction =
