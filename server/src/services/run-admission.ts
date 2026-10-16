@@ -107,7 +107,7 @@ export async function retireSuspendedOmnigentObservers(db: Db,
       const [saved] = await tx.update(heartbeatRuns).set({
         status: 'interrupted', errorCode: 'omnigent_observer_retired',
         error: 'Offline observer retired for queued continuation; earlier action outcomes remain unknown.',
-        finishedAt: new Date(), controllerLeaseExpiresAt: sql`clock_timestamp()`,
+        finishedAt: sql`clock_timestamp()`, controllerLeaseExpiresAt: sql`clock_timestamp()`,
         controllerBootId: sql`gen_random_uuid()`,
         resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
           jsonb_build_object('omnigentObserverRetirement', jsonb_build_object(
