@@ -678,3 +678,29 @@ into the current fork image or supplied by a fork migration.
   deployment and integration tests remain required, not implied by unit counts.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
+
+## Reason-coded readiness failures (PER-628)
+
+- Requested private fork repair on production base
+  `683f53c09e17fe3addbc3390a49ae8662086bdf8`: `/api/health/ready` returned
+  unexplained 503s, including swallowed database probe errors. Timing alone
+  does not establish the cause of the observed production failures.
+- Every readiness 503 now emits one warning with `event: readiness_failed`,
+  ordered `reasons` and `stage` (`preflight`, `database_probe`, `post_probe`).
+  Codes: `transport_not_ready`, `controller_draining`, `startup_not_ready`,
+  `auth_not_ready`, `database_missing`, `database_probe_timeout`,
+  `database_probe_error`. Post-probe state flips report the current blockers.
+  No error object/message, query details, headers, credentials or tenant data
+  are logged. Ready responses emit no failure warning.
+- Response status/body, fail-closed 2000ms deadline, one in-flight query and
+  reset/LISTEN transport semantics are unchanged. A timeout is identified by
+  a per-request error identity, never by a driver-controlled message.
+- Dependency-free focused check (Node 24):
+  `node --experimental-vm-modules --test scripts/health-readiness.test.mjs`.
+  Executes the complete real health module with mocked imports; covers each
+  503 path, simultaneous blockers, synchronous/rejected/late database errors,
+  deterministic and real-time deadlines, shared queries and ready recovery.
+- Retire when a released equivalent logs all readiness failure paths and
+  passes these regressions. No new upstream-equivalence claim is made here;
+  this is a narrow diagnostic extension to the existing downstream readiness
+  carry. Production rollout and live reason-log acceptance remain separate.
