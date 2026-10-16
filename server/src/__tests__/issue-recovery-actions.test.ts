@@ -1901,6 +1901,18 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       resolutionNote: "Only the obsolete execution hold is cleared; the dependency and approval remain.",
       executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
         outcomeEvidence: "The dispatch was rejected before a new turn; the historical runner is offline and cannot resume." } };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ ...body, executionReconciliation: undefined }).expect(200);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(action);
+    const competing = await issueRecoveryActionService(db).upsertSourceScoped({ companyId, sourceIssueId,
+      kind: "missing_disposition", ownerType: "board", cause: "successful_run_missing_issue_disposition",
+      fingerprint: "different-current-action", nextAction: "Preserve this separate action." });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    await db.delete(issueRecoveryActions).where(eq(issueRecoveryActions.id, competing.id));
+    const queuedRunId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: queuedRunId, issueId: sourceIssueId, status: "queued" });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, queuedRunId));
     // Protected terminal states and detached controllers must keep their hold.
     for (const protectedRun of [
       { status: "cancelled", errorCode: "omnigent_cancelled" },
