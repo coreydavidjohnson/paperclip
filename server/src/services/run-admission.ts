@@ -54,6 +54,7 @@ export async function suspendOmnigentAdmissions(db: Db,
         'suspendedAt', clock_timestamp(), 'reason', ${reason ?? 'bounded_external_observation'}))`,
   }).where(and(
     eq(heartbeatRuns.id, candidate.id),
+    sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${String(candidate.contextSnapshot?.issueId ?? "")}`,
     sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt' = ${JSON.stringify(candidate.resultJson?.omnigentDispatchReceipt ?? null)}::jsonb`,
     eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"),
     sql`${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'omnigent'`,
