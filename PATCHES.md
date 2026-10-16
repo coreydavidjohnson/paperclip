@@ -745,3 +745,12 @@ into the current fork image or supplied by a fork migration.
   harness and legacy-continuation-authority suite after both independently
   reproduced hardcoded 20-second hook timeouts under cluster load.
 - Keep all assertions and the native recovery gates intact.
+
+
+### PER-475 image-gate database hook consistency
+
+- The packaging-correct image passed 512 tests but issue-blocker-attention
+  still timed out at its hook-local 20-second startup limit. Align the seven
+  remaining short startup hooks in its route/attention/recovery peer group
+  with the already exported embedded-Postgres budget; assertions are unchanged.
+- Check: exact-source image gate and source budget-contract regression.

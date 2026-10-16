@@ -21,6 +21,7 @@ import {
 import { LOW_TRUST_REVIEW_PRESET } from "@paperclipai/shared";
 import type { AttentionItem } from "@paperclipai/shared";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -44,7 +45,7 @@ describeEmbeddedPostgres("decision queue routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-decision-queues-");
     db = createDb(tempDb.connectionString);
-  }, 30_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(decisionTriageEvents);

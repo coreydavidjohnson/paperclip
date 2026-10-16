@@ -15,6 +15,7 @@ import {
   issues,
 } from "@paperclipai/db";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
@@ -39,7 +40,7 @@ describeEmbeddedPostgres("issue blocker attention", () => {
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-issue-blocker-attention-");
     db = createDb(tempDb.connectionString);
     svc = issueService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueThreadInteractions);
