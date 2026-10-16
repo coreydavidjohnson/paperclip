@@ -1,3 +1,4 @@
+import { invalidateSkillListOnMutation } from "./company-skills-cache.js";
 import { and, asc, eq, max, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companySkills, folders, routines } from "@paperclipai/db";
@@ -603,15 +604,15 @@ export function folderService(db: Db, mutationLockHeld = false) {
 
   return {
     list,
-    create,
-    update,
-    moveFolder,
-    deleteFolder,
-    moveItem,
+    create: invalidateSkillListOnMutation(db, create),
+    update: invalidateSkillListOnMutation(db, update),
+    moveFolder: invalidateSkillListOnMutation(db, moveFolder),
+    deleteFolder: invalidateSkillListOnMutation(db, deleteFolder),
+    moveItem: invalidateSkillListOnMutation(db, moveItem),
     getFolder,
     descendantIds,
     validateSkillFolder,
-    ensureMyFolder,
+    ensureMyFolder: invalidateSkillListOnMutation(db, ensureMyFolder),
     ensureProjectFolder,
     ensureBundledCategory,
     pruneEmptyBundledCategories,

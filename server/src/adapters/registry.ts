@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { createAsyncTtlCache } from "../lib/async-ttl-cache.js";
 import type { AdapterRuntimeCommandSpec, ServerAdapterModule } from "./types.js";
 import { parseAdapterModelsEnv } from "../services/adapter-models-env.js";
 import { stampClaudeAgentIdHeader } from "./claude-agent-id-header.js";
@@ -1005,7 +1007,18 @@ export function waitForExternalAdapters(): Promise<void> {
   return externalAdaptersReady;
 }
 
+const externalModelsCache = createAsyncTtlCache<{ id: string; label: string }[]>(30_000);
+
+function externalModelsKey(type: string, context: string) {
+  // Plugins may read any environment variable. Never retain raw credentials.
+  const config = createHash("sha256").update(JSON.stringify(
+    Object.keys(process.env).sort().map((key) => [key, process.env[key]]),
+  )).digest("hex");
+  return JSON.stringify([type, context, config]);
+}
+
 export function registerServerAdapter(adapter: ServerAdapterModule): void {
+  externalModelsCache.clear();
   if (BUILTIN_ADAPTER_TYPES.has(adapter.type) && !builtinFallbacks.has(adapter.type)) {
     const existing = adaptersByType.get(adapter.type);
     if (existing) {
@@ -1016,6 +1029,7 @@ export function registerServerAdapter(adapter: ServerAdapterModule): void {
 }
 
 export function unregisterServerAdapter(type: string): void {
+  externalModelsCache.clear();
   if (type === processAdapter.type || type === httpAdapter.type) return;
   if (builtinFallbacks.has(type)) {
     pausedOverrides.delete(type);
@@ -1081,7 +1095,10 @@ function declaredModelsForAdapter(type: string): { id: string; label: string }[]
     : null;
 }
 
-export async function listAdapterModels(type: string): Promise<{ id: string; label: string }[]> {
+export async function listAdapterModels(type: string, cacheContext?: string): Promise<{ id: string; label: string }[]> {
+  if (cacheContext !== undefined && !BUILTIN_ADAPTER_TYPES.has(type)) {
+    return externalModelsCache.get(type, externalModelsKey(type, cacheContext), () => listAdapterModels(type));
+  }
   const declaredModels = declaredModelsForAdapter(type);
   if (declaredModels) return declaredModels;
   const adapter = findActiveServerAdapter(type);
@@ -1097,7 +1114,11 @@ export async function listAdapterModels(type: string): Promise<{ id: string; lab
   return adapter.models ?? [];
 }
 
-export async function refreshAdapterModels(type: string): Promise<{ id: string; label: string }[]> {
+export async function refreshAdapterModels(type: string, cacheContext?: string): Promise<{ id: string; label: string }[]> {
+  if (cacheContext !== undefined && !BUILTIN_ADAPTER_TYPES.has(type)) {
+    externalModelsCache.invalidate(type);
+    return externalModelsCache.get(type, externalModelsKey(type, cacheContext), () => refreshAdapterModels(type));
+  }
   const declaredModels = declaredModelsForAdapter(type);
   if (declaredModels) return declaredModels;
   if (findActiveServerAdapter(type) === codexLocalAdapter) return listAdapterModels(type);
@@ -1164,6 +1185,7 @@ export async function detectAdapterModel(
  * an override or was already in the requested state.
  */
 export function setOverridePaused(type: string, paused: boolean): boolean {
+  externalModelsCache.clear();
   if (!builtinFallbacks.has(type)) return false;
   const wasPaused = pausedOverrides.has(type);
   if (paused && !wasPaused) {

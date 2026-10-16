@@ -1,3 +1,4 @@
+import { invalidateSkillListOnMutation } from "./company-skills-cache.js";
 import { logger } from "../middleware/logger.js";
 import type { Db } from "@paperclipai/db";
 import * as lifecycle from "../modules/agent-lifecycle/index.js";
@@ -19,7 +20,10 @@ export function createAgentLifecycleEffects(hooks: BudgetServiceHooks = {}): lif
       const code = lifecycle.lifecycleFailureCode(error);
       logger.warn({ ...context, failureCode: code ?? "unclassified" }, "Agent lifecycle operation failed");
     },
-    transaction: withAccountingTransaction,
+    // PER-826: every agent create/update/terminate/remove/rollback commits through
+    // this company-scoped transaction; agent writes change skill-list visibility.
+    transaction: (db, companyId, fn) =>
+      invalidateSkillListOnMutation(db, () => withAccountingTransaction(db, companyId, fn))(companyId),
     deleteDependencies: deleteAgentDependencies,
     policyBlocks,
     setAgentBudget: (db, publications, companyId, agentId, amount, userId, isActive) =>
