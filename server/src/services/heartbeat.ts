@@ -25397,7 +25397,8 @@ export function heartbeatService(
           compressed: boolean;
         } | null = null;
         if (handle) {
-          logSummary = await completionTiming.measure("log_finalize", () => runLogStore.finalize(handle));
+          const logHandle = handle;
+          logSummary = await completionTiming.measure("log_finalize", () => runLogStore.finalize(logHandle));
         }
         const finalLogBytes = logSummary?.bytes;
         if (outputProgressState.pending && typeof finalLogBytes === "number") {
@@ -26117,8 +26118,9 @@ export function heartbeatService(
           compressed: boolean;
         } | null = null;
         if (handle) {
+          const logHandle = handle;
           try {
-            logSummary = await completionTiming.measure("log_finalize", () => runLogStore.finalize(handle));
+            logSummary = await completionTiming.measure("log_finalize", () => runLogStore.finalize(logHandle));
           } catch (finalizeErr) {
             logger.warn(
               { err: finalizeErr, runId },

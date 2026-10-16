@@ -55,3 +55,20 @@ packaged controller runtime tests were not run in this child. No CI receipt is
 claimed. This child does not update fork.lock.json, main, any image, configuration,
 reconciler or service. PER-731 owns actual-diff review and later normal delivery,
 the failed <10s criterion and the existing single-probe constraint.
+
+## Review correction: captured finalization handles
+
+Both success/error log-finalization callbacks now capture the narrowed handle in
+an immutable local before entering the timing closure. No non-null assertions,
+run-nullability edits, error handling changes or lifecycle changes are needed.
+The new semantic regression extracts both actual source blocks and the handle
+interface, then checks them with the installed TypeScript compiler in strict mode.
+Its fixture models the mutable outer handle; both TS2345 diagnostics were observed
+before the fix, and neither remains after it.
+
+    node --test --experimental-strip-types server/test/completion-timing.node.ts server/test/completion-timing-semantic.node.cjs
+
+Run the homelab script scripts/typecheck-paperclip-fork-candidate.sh on VM103
+against the exact corrected commit. It uses a disposable, digest-pinned dependency
+image and overlays owned source; record all diagnostics and cleanup, not only
+completion-timing lines. It is not a packaged-runtime acceptance test.
