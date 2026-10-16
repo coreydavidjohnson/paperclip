@@ -589,3 +589,43 @@ into the current fork image or supplied by a fork migration.
   lossless failure results and retry-accounting parity with embedded PostgreSQL.
 - Retire when an upstream release supplies equivalent lean projections and
   passes these contracts. No migration, dependency or permission changes.
+
+## Bounded skills and external adapter model caches (PER-826)
+
+- Upstream inspected: master `b294abb9eb96c33048b4f53a2a037e04886b7407`
+  still calls the full skills listing and external `listModels` for each GET.
+  Existing inventory coalescing only covers a concurrent inventory refresh;
+  existing request memoization cannot reuse results across HTTP requests.
+- Contract: process-local successful responses only, 256 entries per cache.
+  Company skill lists live five seconds after completion and are partitioned
+  by database, company, actor context and validated query. External adapter
+  models (including OmniGenT) live 30 seconds, partitioned by adapter, company,
+  actor, environment/provider and a hash of process configuration. Built-in
+  model discovery keeps its existing behavior. Auth checks run on every GET.
+- Concurrent cold requests share a promise. Rejections are evicted; invalidated
+  in-flight loads cannot republish. Refresh invalidates model entries before
+  discovery, including failed refreshes. Adapter register/unregister/pause clears
+  model caches. Skill/source route writes, skill service writes, folder writes
+  and agent create/update/remove/terminate invalidate skill lists before and
+  after mutations, including partial failures; overlapping writes bypass reads.
+  Filesystem, transaction-scoped and out-of-process changes are bounded by TTL.
+- No response shape, schema, permission, dependency or client changes.
+- Files: `server/src/lib/async-ttl-cache.ts`,
+  `server/src/services/company-skills-cache.ts`, skills/agents routes,
+  adapter registry, skills/folders/agents services and four focused test files.
+- Tests: `pnpm --filter @paperclipai/server exec vitest run
+  --hookTimeout=120000 --testTimeout=60000 src/lib/async-ttl-cache.test.ts
+  src/services/company-skills-cache.test.ts
+  src/__tests__/company-skills-routes.test.ts
+  src/__tests__/adapter-model-refresh-routes.test.ts`.
+  Larger timeouts cover cold module transformation in the cluster image.
+  Run `pnpm check:token-gates` before carrying this patch.
+- Removal condition: upstream ships equivalent bounded/coalesced caches with
+  tenant/config boundaries, mutation invalidation and failure/race regressions.
+- Verification: cluster dependency image, four files / 72 tests passed
+  (`CACHE_VITEST_EXIT=0`, 56.43s). Executed directly with
+  `cd /app/server && node /app/node_modules/vitest/vitest.mjs run` plus the
+  arguments above to avoid Corepack network bootstrap in the isolated Job.
+  All owned test namespaces were deleted and absence verified. Token gates,
+  changed-source syntax and standalone cache typecheck passed. Full integration
+  typecheck/build remains the parent integration gate; no live latency claim.

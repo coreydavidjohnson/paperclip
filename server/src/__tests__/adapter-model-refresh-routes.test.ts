@@ -103,7 +103,7 @@ function registerModuleMocks() {
 
 const refreshableAdapterType = "refreshable_adapter_route_test";
 
-async function createApp() {
+async function createApp(source = "local_implicit") {
   const [{ agentRoutes }, { errorHandler }] = await Promise.all([
     vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
     vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
@@ -115,7 +115,7 @@ async function createApp() {
       type: "board",
       userId: "local-board",
       companyIds: ["company-1"],
-      source: "local_implicit",
+      source,
       isInstanceAdmin: false,
     };
     next();
@@ -181,6 +181,55 @@ describe("adapter model refresh route", () => {
 
   afterEach(async () => {
     await unregisterTestAdapter(refreshableAdapterType);
+  });
+
+  it("coalesces and caches external models, bypasses on refresh and tracks environment config", async () => {
+    const listModels = vi.fn(async () => [{ id: "cached-model", label: "cached-model" }]);
+    const refreshModels = vi.fn(async () => [{ id: "fresh-model", label: "fresh-model" }]);
+    const { registerServerAdapter } = await import("../adapters/index.js");
+    const adapter: ServerAdapterModule = {
+      type: refreshableAdapterType,
+      execute: async () => ({ exitCode: 0, signal: null, timedOut: false }),
+      testEnvironment: async () => ({ adapterType: refreshableAdapterType, status: "pass", checks: [], testedAt: new Date(0).toISOString() }),
+      listModels, refreshModels,
+    };
+    registerServerAdapter(adapter);
+    const app = await createApp("session");
+    const url = `/api/companies/company-1/adapters/${refreshableAdapterType}/models`;
+    const get = (suffix = "") => requestApp(app, (base) => request(base).get(url + suffix));
+    const cold = await Promise.all([get(), get()]);
+    expect(cold.map((res) => res.status)).toEqual([200, 200]);
+    await get();
+    expect(listModels).toHaveBeenCalledTimes(1);
+    expect((await get("?refresh=1")).body[0].id).toBe("fresh-model");
+    expect((await get()).body[0].id).toBe("fresh-model");
+    expect(refreshModels).toHaveBeenCalledTimes(1);
+    vi.stubEnv("PER826_MODEL_CONFIG_TEST", "changed");
+    try { await get(); } finally { vi.unstubAllEnvs(); }
+    expect(listModels).toHaveBeenCalledTimes(2);
+    const denied = await requestApp(app, (base) => request(base).get(url.replace("company-1", "company-2")));
+    expect(denied.status).toBe(403);
+    expect(listModels).toHaveBeenCalledTimes(2);
+    registerServerAdapter({ ...adapter, listModels: vi.fn(async () => [{ id: "replacement", label: "replacement" }]) });
+    expect((await get()).body[0].id).toBe("replacement");
+  }, 60_000);
+
+  it("retries external model discovery after refresh fails instead of serving stale success", async () => {
+    const listModels = vi.fn(async () => [{ id: "cached-model", label: "cached-model" }]);
+    const { registerServerAdapter } = await import("../adapters/index.js");
+    registerServerAdapter({
+      type: refreshableAdapterType,
+      execute: async () => ({ exitCode: 0, signal: null, timedOut: false }),
+      testEnvironment: async () => ({ adapterType: refreshableAdapterType, status: "pass", checks: [], testedAt: new Date(0).toISOString() }),
+      listModels, refreshModels: async () => { throw new Error("offline"); },
+    });
+    const app = await createApp();
+    const url = `/api/companies/company-1/adapters/${refreshableAdapterType}/models`;
+    const get = (suffix = "") => requestApp(app, (base) => request(base).get(url + suffix));
+    expect((await get()).status).toBe(200);
+    expect((await get("?refresh=1")).status).toBe(500);
+    expect((await get()).status).toBe(200);
+    expect(listModels).toHaveBeenCalledTimes(2);
   });
 
   it("uses refreshModels when refresh=1 is requested", async () => {

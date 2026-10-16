@@ -3265,9 +3265,10 @@ export function agentRoutes(
       res.json(requireServerAdapter(modelAdapterType).models ?? []);
       return;
     }
+    const cacheContext = JSON.stringify([companyId, req.actor, environment, provider]);
     const models = refresh
-      ? await refreshAdapterModels(modelAdapterType)
-      : await listAdapterModels(modelAdapterType);
+      ? await refreshAdapterModels(modelAdapterType, cacheContext)
+      : await listAdapterModels(modelAdapterType, cacheContext);
     res.json(models);
   });
 

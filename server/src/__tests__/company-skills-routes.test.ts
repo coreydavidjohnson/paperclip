@@ -224,6 +224,43 @@ describe("company skill mutation permissions", () => {
     return app;
   }
 
+  it("caches skill lists per company, actor and parsed query while rechecking authorization", async () => {
+    const actor = { type: "board", userId: "cache-user", companyIds: ["company-1", "company-2"], source: "session" };
+    const app = createApp(actor);
+    const url = "/api/companies/company-1/skills";
+    mockCompanySkillService.list.mockResolvedValue([{ id: "skill-cache" }]);
+    const responses = await Promise.all([request(app).get(url), request(app).get(url)]);
+    expect(responses.map((res) => res.status)).toEqual([200, 200]);
+    await request(app).get(url).expect(200);
+    expect(mockCompanySkillService.list).toHaveBeenCalledTimes(1);
+    await request(app).get(url + "?q=other").expect(200);
+    await request(app).get("/api/companies/company-2/skills").expect(200);
+    actor.userId = "another-user";
+    await request(app).get(url).expect(200);
+    expect(mockCompanySkillService.list).toHaveBeenCalledTimes(4);
+    actor.companyIds = [];
+    await request(app).get(url).expect(403);
+    expect(mockCompanySkillService.list).toHaveBeenCalledTimes(4);
+  });
+
+  it("invalidates list cache after successful or failed skill mutations and does not retain list failures", async () => {
+    const app = createApp({ type: "board", userId: "cache-user", source: "local_implicit" });
+    const url = "/api/companies/company-1/skills";
+    mockCompanySkillService.list.mockRejectedValueOnce(new Error("unavailable"));
+    await request(app).get(url).expect(500);
+    mockCompanySkillService.list.mockResolvedValue([]);
+    await request(app).get(url).expect(200);
+    await request(app).get(url).expect(200);
+    expect(mockCompanySkillService.list).toHaveBeenCalledTimes(2);
+    await request(app).post(url).send({ name: "Cache test", description: "Cache test" });
+    await request(app).get(url).expect(200);
+    expect(mockCompanySkillService.list).toHaveBeenCalledTimes(3);
+    mockCompanySkillService.createLocalSkill.mockRejectedValueOnce(new Error("partial failure"));
+    await request(app).post(url).send({ name: "Cache test", description: "Cache test" });
+    await request(app).get(url).expect(200);
+    expect(mockCompanySkillService.list).toHaveBeenCalledTimes(4);
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillSourceService.sourceForSkill.mockResolvedValue(null);

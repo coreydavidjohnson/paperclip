@@ -1,3 +1,4 @@
+import { companySkillsCache } from "../services/company-skills-cache.js";
 import { skillSourceService, type SkillSourceContext } from "../services/skill-sources.js";
 import { skillSourceGitHubReader } from "../services/skill-source-github-access.js";
 import { toolAccessService } from "../services/tool-access.js";
@@ -103,6 +104,18 @@ export function companySkillRoutes(db: Db) {
   const issues = issueService(db);
   const heartbeat = heartbeatService(db);
   const skillPolicies = companySkillPolicyService(db);
+
+  // Include source operations (some write through transaction-scoped services).
+  // Invalidate even on failures/closed connections after a partial write.
+  router.use("/companies/:companyId", (req, res, next) => {
+    if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+    const finish = companySkillsCache(db).beginMutation(req.params.companyId as string);
+    let finished = false;
+    const done = () => { if (!finished) { finished = true; finish(); } };
+    res.once("finish", done);
+    res.once("close", done);
+    next();
+  });
 
   function asString(value: unknown): string | null {
     if (typeof value !== "string") return null;
@@ -421,7 +434,7 @@ export function companySkillRoutes(db: Db) {
   router.get("/companies/:companyId/skills", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
-    const result = await svc.list(companyId, companySkillListQuerySchema.parse({
+    const query = companySkillListQuerySchema.parse({
       q: firstQueryString(req.query.q),
       sort: firstQueryString(req.query.sort),
       categories: [
@@ -439,7 +452,9 @@ export function companySkillRoutes(db: Db) {
       ],
       folderId: firstQueryString(req.query.folderId),
       includeSubtree: optionalQueryBoolean(req.query.includeSubtree),
-    }));
+    });
+    const key = JSON.stringify([req.actor, query]);
+    const result = await companySkillsCache(db).get(companyId, key, () => svc.list(companyId, query));
     res.json(result);
   });
 

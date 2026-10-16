@@ -1,3 +1,4 @@
+import { invalidateSkillListOnMutation } from "./company-skills-cache.js";
 import { agentAppearanceSchema, randomAgentAppearance, resolveAgentAppearance, agentAvatarUrl } from "@paperclipai/shared";
 import { createHash, randomBytes } from "node:crypto";
 import { and, desc, eq, gte, inArray, lt, ne, or, sql } from "drizzle-orm";
@@ -875,7 +876,7 @@ export function agentService(db: Db) {
 
     getById,
 
-    create: async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">, options?: CreateAgentOptions) => {
+    create: invalidateSkillListOnMutation(db, async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">, options?: CreateAgentOptions) => {
       assertBuiltInAgentMetadataMutationAllowed(null, data.metadata, options);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
@@ -944,9 +945,13 @@ export function agentService(db: Db) {
         }
         return normalizedCreated;
       });
-    },
+    }),
 
-    update: updateAgent,
+    update: async (...args: Parameters<typeof updateAgent>) => {
+      const existing = await getById(args[0]);
+      if (!existing) return null;
+      return invalidateSkillListOnMutation(db, async (_companyId: string) => updateAgent(...args))(existing.companyId);
+    },
 
     pause: async (id: string, reason: "manual" | "budget" | "system" = "manual") => {
       const existing = await getById(id);
@@ -1025,23 +1030,25 @@ export function agentService(db: Db) {
       const existing = await getById(id);
       if (!existing) return null;
 
-      await db
-        .update(agents)
-        .set({
-          status: "terminated",
-          pauseReason: null,
-          pausedAt: null,
-          errorReason: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(agents.id, id));
+      return invalidateSkillListOnMutation(db, async (_companyId: string) => {
+        await db
+          .update(agents)
+          .set({
+            status: "terminated",
+            pauseReason: null,
+            pausedAt: null,
+            errorReason: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(agents.id, id));
 
-      await db
-        .update(agentApiKeys)
-        .set({ revokedAt: new Date() })
-        .where(eq(agentApiKeys.agentId, id));
+        await db
+          .update(agentApiKeys)
+          .set({ revokedAt: new Date() })
+          .where(eq(agentApiKeys.agentId, id));
 
-      return getById(id);
+        return getById(id);
+      })(existing.companyId);
     },
 
     remove: async (id: string) => {
@@ -1056,7 +1063,7 @@ export function agentService(db: Db) {
         });
       }
 
-      return db.transaction(async (tx) => {
+      return invalidateSkillListOnMutation(db, async (_companyId: string) => db.transaction(async (tx) => {
         await tx
           .select({ id: agents.id })
           .from(agents)
@@ -1089,7 +1096,7 @@ export function agentService(db: Db) {
           .returning()
           .then((rows) => rows[0] ?? null);
         return deleted ? normalizeAgentRow(deleted) : null;
-      });
+      }))(existing.companyId);
     },
 
     activatePendingApproval: async (id: string, approvedPayload?: Record<string, unknown> | null) => {
