@@ -1480,7 +1480,8 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queryKey: queryKeys.issues.liveRuns(issueQueryRef),
     queryFn: () => heartbeatsApi.liveRunsForIssue(issueQueryRef),
     enabled: !!issueId,
-    refetchInterval: 1000,
+    // Live events handle prompt updates; this is missed-event reconciliation.
+    refetchInterval: 15_000,
     placeholderData:
       keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(issueQueryRef),
   });
@@ -1497,7 +1498,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queryKey: queryKeys.issues.activeRun(issueQueryRef),
     queryFn: () => heartbeatsApi.activeRunForIssue(issueQueryRef),
     enabled: activeRunQueryEnabled,
-    refetchInterval: liveRunCount > 0 ? false : 1000,
+    refetchInterval: liveRunCount > 0 ? false : 15_000,
     placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(
       issueQueryRef,
     ),
@@ -1583,7 +1584,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queryFn: () => activityApi.runsForIssue(issueQueryRef),
     enabled: !!issueId,
     refetchInterval:
-      hasLiveRuns || issueStatus === "in_progress" ? 1000 : false,
+      hasLiveRuns || issueStatus === "in_progress" ? 15_000 : false,
     placeholderData: keepPreviousDataForSameQueryTail<RunForIssue[]>(issueQueryRef),
   });
   const resolvedActivity = activity ?? [];
@@ -3368,7 +3369,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       queryKey: queryKeys.issues.liveRuns(issueId!),
       queryFn: () => heartbeatsApi.liveRunsForIssue(issueId!),
       enabled: !!issueId,
-      refetchInterval: 3000,
+      refetchInterval: 15_000,
       select: (runs) => runs.length,
       placeholderData: keepPreviousDataForSameQueryTail<LiveRunForIssue[]>(
         issueId ?? "pending",
@@ -3385,7 +3386,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     queryFn: () => heartbeatsApi.activeRunForIssue(issueId!),
     enabled:
       !!issueId && (!!issue?.executionRunId || issue?.status === "in_progress"),
-    refetchInterval: liveRunCount > 0 ? false : 3000,
+    refetchInterval: liveRunCount > 0 ? false : 15_000,
     select: (run) => !!run,
     placeholderData: keepPreviousDataForSameQueryTail<ActiveRunForIssue | null>(
       issueId ?? "pending",

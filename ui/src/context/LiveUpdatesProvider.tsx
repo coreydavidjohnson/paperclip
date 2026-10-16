@@ -1941,10 +1941,10 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
 
   // Coalesce the per-event invalidation storm. Optimistic setQueryData writes
   // still pass straight through (immediate); only invalidateQueries is batched
-  // and flushed at most a few times per second.
+  // with a short detail window and a ten-second company-list window.
   const invalidationBatcher = useMemo(
-    () => createInvalidationBatcher(queryClient),
-    [queryClient],
+    () => createInvalidationBatcher(queryClient, undefined, liveCompanyId ?? undefined),
+    [queryClient, liveCompanyId],
   );
   const coalescingClient = useMemo(
     () => createCoalescingQueryClient(queryClient, invalidationBatcher),

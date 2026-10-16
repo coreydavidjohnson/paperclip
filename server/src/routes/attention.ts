@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { privateJsonEtag } from "../middleware/private-json-etag.js";
 import type { Db } from "@paperclipai/db";
 import type { AttentionSortMode } from "@paperclipai/shared";
 import { attentionService } from "../services/attention.js";
@@ -15,7 +16,7 @@ export function attentionRoutes(db: Db) {
   const router = Router();
   const svc = attentionService(db);
 
-  router.get("/companies/:companyId/attention", async (req, res) => {
+  router.get("/companies/:companyId/attention", privateJsonEtag({ omitGeneratedAt: true }), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
