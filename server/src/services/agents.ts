@@ -876,7 +876,7 @@ export function agentService(db: Db) {
 
     getById,
 
-    create: invalidateSkillListOnMutation(db, async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">, options?: CreateAgentOptions) => {
+    create: invalidateSkillListOnMutation(db, async (companyId: string, data: Omit<typeof agents.$inferInsert, "companyId">, options?: CreateAgentOptions): Promise<NonNullable<Awaited<ReturnType<typeof getById>>>> => {
       assertBuiltInAgentMetadataMutationAllowed(null, data.metadata, options);
       if (data.reportsTo) {
         await ensureManager(companyId, data.reportsTo);
