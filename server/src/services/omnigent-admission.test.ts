@@ -115,4 +115,26 @@ const support = await getEmbeddedPostgresTestSupport();
   else await db.update(heartbeatRuns).set({resultJson:{omnigentDispatchReceipt:kind==='missing'?null:{...receipt,...(kind==='wrong-session'?{omnigentSessionId:''}:kind==='wrong-run'?{runId:randomUUID()}:kind==='wrong-company'?{companyId:randomUUID()}:{agentId:randomUUID()})}}}).where(eq(heartbeatRuns.id,run.id));
   expect((await suspendOmnigentAdmissions(db)).some(row=>row.id===run.id)).toBe(false);
  });
+ it.each(['not_found','runner_offline'])('releases two-hour silent %s with exact fence',async reason=>{
+  const {run,receipt,issueId}=await seed(7500,'in_progress');
+  const probe=async()=>reason as 'not_found'|'runner_offline';
+  expect((await suspendOmnigentAdmissions(db,probe)).some(r=>r.id===run.id)).toBe(true);
+  expect(await countAdmittedRunsForAgent(db,run.agentId)).toBe(0);
+  const [saved]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,run.id));
+  expect(saved.status).toBe('running');expect(saved.resultJson?.omnigentDispatchReceipt).toEqual(receipt);
+  expect(await db.transaction(tx=>admitAgentRun(tx as unknown as typeof db,run.companyId,run.agentId,1,{id:randomUUID(),issueId}))).toBe(false);
+ });
+ it('keeps unknown quiet work admitted without a negative probe',async()=>{
+  const {run}=await seed(7500,'in_progress');
+  await suspendOmnigentAdmissions(db,async()=>null);
+  expect(await countAdmittedRunsForAgent(db,run.agentId)).toBe(1);
+ });
+ it('rejects stale evidence when output advances during the probe',async()=>{
+  const {run}=await seed(7500,'in_progress');
+  await suspendOmnigentAdmissions(db,async candidate=>{
+   if(candidate.id===run.id)await db.update(heartbeatRuns).set({lastOutputAt:new Date()}).where(eq(heartbeatRuns.id,run.id));
+   return 'runner_offline';
+  });
+  expect(await countAdmittedRunsForAgent(db,run.agentId)).toBe(1);
+ });
 });
