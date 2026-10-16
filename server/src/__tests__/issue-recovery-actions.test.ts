@@ -1885,6 +1885,27 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).not.toHaveBeenCalled();
   });
 
+  it.each(["blocked", "todo"])("cancellation cannot use stale no-effects evidence (%s)", async status => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const sourceRunId = randomUUID(), newerRunId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: sourceRunId, issueId: sourceIssueId, status: "succeeded" });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(), resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } }).where(eq(heartbeatRuns.id, sourceRunId));
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: newerRunId, issueId: sourceIssueId, status: "succeeded" });
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({ companyId, sourceIssueId,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target", fingerprint: "stale-cancel",
+      ownerType: "board", returnOwnerAgentId: coderId, nextAction: "Inspect effects",
+      evidence: { latestRunId: sourceRunId, terminalReason: "unchanged_source_state_exhausted" },
+      wakePolicy: { type: "board_escalation" },
+    });
+    const wake = vi.fn(async () => null);
+    await request(createApp(undefined, { recoveryActionEnqueueWakeup: wake }))
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "cancelled", sourceIssueStatus: status }).expect(status === "todo" ? 409 : 200);
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]!.status).toBe("blocked");
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("returns cancelled recovery work to the unchanged owner without an extra resume", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
@@ -2075,7 +2096,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const { action, heartbeat, companyId, coderId, sourceIssueId } = await seedReconciledDelivery();
     await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
     await db.update(issueRecoveryActions).set({ kind: "deliberate_wait_without_target", outcome: "handed_back",
-      evidence: { ownerReturnDelivery: "pending" },
+      evidence: { ownerReturnDelivery: "pending", ownerReturnSourceRunId: (action.evidence.executionReconciliation as { runId: string }).runId },
     }).where(eq(issueRecoveryActions.id, action.id));
     const options = {
       source: "automation", triggerDetail: "system", reason: "issue_recovery_owner_return",
@@ -2105,6 +2126,29 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(run!.contextSnapshot).not.toHaveProperty("recoveryIntent");
     expect(run!.contextSnapshot).not.toHaveProperty("legacyDispositionEpisode");
     expect(run!.contextSnapshot.wakeReason).toBe("issue_recovery_owner_return");
+  });
+
+  it("supersedes owner return if ordinary work already continued", async () => {
+    const { action, heartbeat, companyId, coderId, sourceIssueId } = await seedReconciledDelivery();
+    const sourceRunId = (action.evidence.executionReconciliation as { runId: string }).runId;
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+    await db.update(issueRecoveryActions).set({ kind: "deliberate_wait_without_target", outcome: "handed_back",
+      evidence: { ownerReturnDelivery: "pending", ownerReturnSourceRunId: sourceRunId },
+    }).where(eq(issueRecoveryActions.id, action.id));
+    const newerRunId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: newerRunId, issueId: sourceIssueId, status: "succeeded" });
+    const result = await heartbeat.wakeup(coderId, {
+      source: "automation", triggerDetail: "system", reason: "issue_recovery_owner_return",
+      idempotencyKey: `disposition-owner-return:${action.id}`,
+      payload: { issueId: sourceIssueId, ownerReturnActionId: action.id },
+      requestedByActorType: "system", requestedByActorId: "recovery",
+      contextSnapshot: { issueId: sourceIssueId, taskId: sourceIssueId, ownerReturnActionId: action.id,
+        wakeReason: "issue_recovery_owner_return", source: "issue.recovery_owner_return" },
+    });
+    expect(result).toBeNull();
+    const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(receipt!.evidence).toMatchObject({ ownerReturnDelivery: "superseded", ownerReturnSupersededByRunId: newerRunId });
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `disposition-owner-return:${action.id}`))).toHaveLength(0);
   });
 
   it("delivers a reconciled execution once across concurrent sweeps without a deferred duplicate", async () => {

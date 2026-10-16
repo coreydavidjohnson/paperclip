@@ -27701,6 +27701,20 @@ export function heartbeatService(
               return { kind: "replayed" as const, run: successor };
             }
             if (action.evidence.ownerReturnDelivery !== "pending") return { kind: "skipped" as const };
+            const sourceRunId = readNonEmptyString(action.evidence.ownerReturnSourceRunId);
+            const [latest] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId') = ${issue.id}`,
+            )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+            if (!sourceRunId || latest?.id !== sourceRunId ||
+                (issue.checkoutRunId && issue.checkoutRunId !== sourceRunId) ||
+                (issue.executionRunId && issue.executionRunId !== sourceRunId)) {
+              await tx.update(issueRecoveryActions).set({ evidence: {
+                ...action.evidence, ownerReturnDelivery: "superseded",
+                ownerReturnSupersededByRunId: latest?.id ?? null,
+              }, updatedAt: new Date() }).where(eq(issueRecoveryActions.id, action.id));
+              return { kind: "skipped" as const };
+            }
           }
 
           let reconciledSourceRunId: string | null = null;

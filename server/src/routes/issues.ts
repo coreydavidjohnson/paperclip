@@ -9173,7 +9173,14 @@ export function issueRoutes(
           const [sourceRun] = typeof sourceRunId === "string" ? await tx.select().from(heartbeatRuns).where(and(
             eq(heartbeatRuns.companyId, lockedIssue.companyId), eq(heartbeatRuns.id, sourceRunId),
           )).for("update") : [];
+          const [latestRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, lockedIssue.companyId),
+            sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId', ${heartbeatRuns.contextSnapshot}->>'taskId') = ${lockedIssue.id}`,
+          )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
           cancellationEffectsSafe = Boolean(sourceRun && sourceRun.status === "succeeded" &&
+            latestRun?.id === sourceRun.id &&
+            (!lockedIssue.checkoutRunId || lockedIssue.checkoutRunId === sourceRun.id) &&
+            (!lockedIssue.executionRunId || lockedIssue.executionRunId === sourceRun.id) &&
             sourceRun.agentId === lockedIssue.assigneeAgentId &&
             (sourceRun.nativeIssueId ?? sourceRun.contextSnapshot?.issueId) === lockedIssue.id &&
             hasNoExternalEffectEvidence(sourceRun, activeRecoveryAction.evidence) &&
