@@ -149,3 +149,41 @@ describe("createCoalescingQueryClient", () => {
     expect(realInvalidate).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("company list request budget", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+  it("bounds a minute of activity to six list refreshes without delaying detail", async () => {
+    const { client, calls } = fakeClient();
+    const batcher = createInvalidationBatcher(client, undefined, "company-1");
+    for (let second = 0; second < 60; second++) {
+      void batcher.schedule({ queryKey: ["issues", "company-1"] });
+      void batcher.schedule({ queryKey: ["issues", "company-1", "mine-by-me"] });
+      void batcher.schedule({ queryKey: ["attention", "company-1"] });
+      void batcher.schedule({ queryKey: ["issues", "detail", "issue-1"] });
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    const matching = (key: unknown[]) => calls.filter((call: any) => JSON.stringify(call.queryKey) === JSON.stringify(key)).length;
+    console.info(JSON.stringify({ issuesPerMinute: matching(["issues", "company-1"]), attentionPerMinute: matching(["attention", "company-1"]), detailPerMinute: matching(["issues", "detail", "issue-1"]) }));
+    expect(matching(["issues", "company-1"])).toBe(6);
+    expect(matching(["attention", "company-1"])).toBe(6);
+    expect(matching(["issues", "company-1", "mine-by-me"])).toBe(0);
+    expect(matching(["issues", "detail", "issue-1"])).toBe(60);
+    batcher.dispose();
+  });
+});
+
+describe("prefix filter safety", () => {
+  it.each([
+    [{ stale: true }, { stale: false }],
+    [{ fetchStatus: "fetching" }, { fetchStatus: "idle" }],
+  ])("keeps parent and child with different filters", async (parent, child) => {
+    const { client } = fakeClient();
+    const batcher = createInvalidationBatcher(client, 1);
+    void batcher.schedule({ queryKey: ["issues", "company-1"], ...parent } as any);
+    void batcher.schedule({ queryKey: ["issues", "company-1", "mine"], ...child } as any);
+    await batcher.flush();
+    expect(client.invalidateQueries).toHaveBeenCalledTimes(2);
+    batcher.dispose();
+  });
+});

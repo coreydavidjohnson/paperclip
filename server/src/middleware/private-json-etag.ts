@@ -5,11 +5,11 @@ function matchesEtag(header: string | undefined, etag: string) {
   if (!header) return false;
   return header.split(",").some((candidate) => {
     const normalized = candidate.trim();
-    return normalized === "*" || normalized === etag || normalized === `W/${etag}`;
+    return normalized === "*" || normalized === etag || normalized.replace(/^W\//, "") === etag.replace(/^W\//, "");
   });
 }
 
-export function privateJsonEtag(): RequestHandler {
+export function privateJsonEtag(options: { omitGeneratedAt?: boolean } = {}): RequestHandler {
   return (req, res, next) => {
     if (req.method !== "GET") {
       next();
@@ -26,8 +26,12 @@ export function privateJsonEtag(): RequestHandler {
         || !contentType.includes("application/json")
       ) return originalSend(body);
       const serialized = typeof body === "string" ? body : JSON.stringify(body);
-      const etag = `"${createHash("sha256").update(serialized).digest("base64url")}"`;
-      res.setHeader("Cache-Control", "private, must-revalidate");
+      // Generation time is metadata, not a semantic attention feed change.
+      const representation = options.omitGeneratedAt
+        ? JSON.stringify({ ...JSON.parse(serialized), generatedAt: undefined })
+        : serialized;
+      const etag = `${options.omitGeneratedAt ? "W/" : ""}"${createHash("sha256").update(representation).digest("base64url")}"`;
+      res.setHeader("Cache-Control", "private, no-cache");
       res.setHeader("ETag", etag);
       if (matchesEtag(req.header("if-none-match"), etag)) {
         res.status(304).end();
