@@ -7779,7 +7779,7 @@ export function issueRoutes(
     res.json(result);
   });
 
-  router.get("/companies/:companyId/issues", async (req, res) => {
+  router.get("/companies/:companyId/issues", privateJsonEtag(), async (req, res) => {
     const startedAt = Date.now();
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
