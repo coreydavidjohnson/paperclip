@@ -1929,7 +1929,31 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: sourceIssueId, type: "blocks" });
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ ...body,
       executionReconciliation: { ...body.executionReconciliation, runId: randomUUID() } }).expect(409);
-    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    // Keep the dependency relation itself locked until reconciliation commits.
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const reconciled = new Promise<void>((resolve) => { entered = resolve; });
+    const transaction = db.transaction.bind(db);
+    const transactionSpy = vi.spyOn(db, "transaction").mockImplementationOnce((callback, config) =>
+      transaction(async (tx) => {
+        const result = await callback(tx);
+        entered();
+        await held;
+        return result;
+      }, config));
+    const resolving = request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).then((response) => response);
+    try {
+      await reconciled;
+      await expect(db.transaction(async (tx) => {
+        await tx.execute(sql`SET LOCAL lock_timeout = '200ms'`);
+        await tx.delete(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId));
+      })).rejects.toMatchObject({ cause: { code: "55P03" } });
+    } finally {
+      release();
+      transactionSpy.mockRestore();
+    }
+    expect((await resolving).status).toBe(200);
     expect((await request(app).get(`/api/issues/${sourceIssueId}`).expect(200)).body.executionBlocker).toBeNull();
     expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(before);
     expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId)))
