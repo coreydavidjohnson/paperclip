@@ -29011,7 +29011,7 @@ export function heartbeatService(
             ? eq(agentWakeupRequests.companyId, input.companyId)
             : undefined,
           eq(agentWakeupRequests.requestedByActorType, "system"),
-          eq(agentWakeupRequests.requestedByActorId, "native-status-committer"),
+          inArray(agentWakeupRequests.requestedByActorId, ["native-status-committer", "desktop-recovery"]),
           inArray(agentWakeupRequests.status, ["queued", "claimed"]),
           isNull(agentWakeupRequests.runId),
         ),
@@ -29129,6 +29129,7 @@ export function heartbeatService(
       }
 
       let completedOnboardingGuard: WakeupOptions["issueStateGuard"];
+      const desktopRecovery = candidate.requestedByActorId === "desktop-recovery";
       if (issueId) {
         const targetIssue = await db
           .select({
@@ -29155,6 +29156,11 @@ export function heartbeatService(
           companyId: candidate.companyId, issueId, agentId: candidate.agentId,
           reason: candidate.reason, contextSnapshot: wakeContext,
         });
+        if (desktopRecovery) {
+          const guard = parseObject(payload.desktopRecoveryGuard);
+          if (guard.assigneeAgentId !== candidate.agentId || !Number.isSafeInteger(guard.statusVersion)) throw new Error('desktop_recovery_guard_missing');
+          completedOnboardingGuard = { assigneeAgentId: candidate.agentId, statuses: ['todo'], statusVersion: guard.statusVersion as number };
+        }
         if (onboardingResultReport) completedOnboardingGuard = { assigneeAgentId: candidate.agentId, statuses: ["done"], statusVersion: targetIssue!.statusVersion };
         if (
           !targetIssue ||
@@ -29195,8 +29201,8 @@ export function heartbeatService(
             ...wakeContext,
             ...(issueId ? { issueId, taskId: issueId } : {}),
             wakeReason: candidate.reason,
-            source: "native_status_decision",
-            statusDecisionSource: "native_status_decision",
+            source: desktopRecovery ? "desktop_recovery" : "native_status_decision",
+            ...(desktopRecovery ? {} : { statusDecisionSource: "native_status_decision" }),
             nativeStatusWakeIntentId: candidate.id,
           },
         });
