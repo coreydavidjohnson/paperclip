@@ -35,15 +35,26 @@ export async function countAdmittedRunsForAgent(db: Db, agentId: string) {
  * blocked status and a dead controller never authorize cancelling that work.
  * ponytail: one sweep over running legacy observers; index if fleet size demands.
  */
-export async function suspendOmnigentAdmissions(db: Db) {
-  return db.update(heartbeatRuns).set({
+export async function suspendOmnigentAdmissions(db: Db,
+  probe: (run: typeof heartbeatRuns.$inferSelect) => Promise<"not_found" | "runner_offline" | null> = async () => null) {
+  const candidates = await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"),
+    sql`${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'omnigent'`,
+    sql`${heartbeatRuns.runnerProfileJson}->'omnigentAdmissionSuspension' is null`));
+  const suspended: Array<typeof heartbeatRuns.$inferSelect> = [];
+  for (const candidate of candidates) {
+    const quiet = Math.max(candidate.startedAt?.getTime() ?? Date.now(), candidate.lastOutputAt?.getTime() ?? 0) <= Date.now() - 7200000;
+    const reason = quiet ? await probe(candidate).catch(() => null) : null;
+    const saved = await db.update(heartbeatRuns).set({
     runnerProfileJson: sql`coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) ||
       jsonb_build_object('omnigentAdmissionSuspension', jsonb_build_object(
         'version', 1, 'runId', ${heartbeatRuns.id}, 'companyId', ${heartbeatRuns.companyId},
         'agentId', ${heartbeatRuns.agentId}, 'issueId', ${heartbeatRuns.contextSnapshot}->>'issueId',
         'omnigentSessionId', ${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'omnigentSessionId',
-        'suspendedAt', clock_timestamp(), 'reason', 'bounded_external_observation'))`,
+        'suspendedAt', clock_timestamp(), 'reason', ${reason ?? 'bounded_external_observation'}))`,
   }).where(and(
+    eq(heartbeatRuns.id, candidate.id),
+    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt' = ${JSON.stringify(candidate.resultJson?.omnigentDispatchReceipt ?? null)}::jsonb`,
     eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"),
     sql`${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'omnigent'`,
     sql`${heartbeatRuns.executionStage} in ('dispatching', 'external_attached', 'awaiting_external_evidence')`,
@@ -57,11 +68,14 @@ export async function suspendOmnigentAdmissions(db: Db) {
     sql`exists (select 1 from ${issues} where ${issues.id}::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
       and ${issues.companyId} = ${heartbeatRuns.companyId} and ${issues.assigneeAgentId} = ${heartbeatRuns.agentId}
       and ${issues.status} != 'cancelled'
-      and (greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) < clock_timestamp() - interval '5 minutes'
+      and ((${Boolean(reason)} and greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) <= clock_timestamp() - interval '2 hours')
         or (${issues.status} in ('blocked', 'in_review', 'done')
           and ${issues.updatedAt} < clock_timestamp() - interval '30 seconds'
           and ${heartbeatRuns.startedAt} < clock_timestamp() - interval '30 seconds')))`,
   )).returning();
+    suspended.push(...saved);
+  }
+  return suspended;
 }
 
 /** Inside the SAME transaction as every queued -> running claim, after the

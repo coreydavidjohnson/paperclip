@@ -28,6 +28,7 @@ import { PROCESS_IDENTITY_RECORDED, recordNativeLocalProcessStop } from "./nativ
 import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopIntent, isAcknowledgedNativeStop, acknowledgedNativeStopExecutionHasStopped } from "./acknowledged-native-stop.js";
 import { isControllerDraining } from "../controller-drain.js";
 import { saveOmnigentDispatchReceipt, claimOmnigentAttachment, releaseOmnigentAttachment, loadOwnedOmnigentObservation, finalizeOwnedOmnigentObservation } from "./omnigent-attachment.js";
+import { probeOmnigentAdmission } from "./omnigent-admission-probe.js";
 import { admitAgentRun, countAdmittedRunsForAgent, suspendOmnigentAdmissions } from "./run-admission.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
@@ -18923,7 +18924,12 @@ export function heartbeatService(
   async function reapOrphanedRuns(opts?: { staleThresholdMs?: number }) {
     const staleThresholdMs = opts?.staleThresholdMs ?? 0;
     const now = new Date();
-    for (const suspended of await suspendOmnigentAdmissions(db)) {
+    for (const suspended of await suspendOmnigentAdmissions(db, async candidate => {
+      const agent = await getAgent(candidate.agentId);
+      if (!agent || agent.adapterType !== "omnigent") return null;
+      const { config } = await secretsSvc.resolveAdapterConfigForRuntime(candidate.companyId, parseObject(agent.adapterConfig));
+      return probeOmnigentAdmission(candidate, config);
+    })) {
       await appendRunEvent(suspended, {
         eventType: "lifecycle", stream: "system", level: "warn",
         message: "Admission suspended; original external work and issue ownership retained. No prompt replay or provider stop.",

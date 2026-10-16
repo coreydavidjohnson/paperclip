@@ -47,12 +47,12 @@ const support = await getEmbeddedPostgresTestSupport();
   const otherAgent=randomUUID();await db.insert(agents).values({id:otherAgent,companyId:run.companyId,name:'Reviewer',role:'general'});
   expect(await db.transaction(tx=>admitAgentRun(tx as unknown as typeof db,run.companyId,otherAgent,1,claim))).toBe(false);
  });
- it('bounds blocked finishing at 30 seconds and silence at five minutes, not stop evidence',async()=>{
+ it('bounds blocked finishing but requires negative evidence for silent active work',async()=>{
   const fresh=await seed(5);const finishing=await seed(45);const quiet=await seed(600,'in_progress');const thinking=await seed(60,'in_progress');
   await suspendOmnigentAdmissions(db);
   expect(await countAdmittedRunsForAgent(db,fresh.run.agentId)).toBe(1);
   expect(await countAdmittedRunsForAgent(db,finishing.run.agentId)).toBe(0);
-  expect(await countAdmittedRunsForAgent(db,quiet.run.agentId)).toBe(0);
+  expect(await countAdmittedRunsForAgent(db,quiet.run.agentId)).toBe(1);
   expect(await countAdmittedRunsForAgent(db,thinking.run.agentId)).toBe(1);
  });
  it('bounds blocked finishing even while the provider still emits output',async()=>{
