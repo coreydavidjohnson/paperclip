@@ -1,3 +1,4 @@
+import { validOmnigentReceipt } from "./omnigent-attachment.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
@@ -14,9 +15,26 @@ import { issueService } from "./issues.js";
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
 
+/** Server-written retirement permits a fresh turn, not replay of old actions. */
+export function isRetiredOmnigentObserver(run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson"> & Partial<Pick<Run, "id" | "companyId" | "agentId" | "contextSnapshot">>): boolean {
+  if (run.runtimeMode !== 'legacy') return false;
+  const retirement = run.resultJson?.omnigentObserverRetirement as Record<string,unknown> | undefined;
+  const receipt = run.resultJson?.omnigentDispatchReceipt as Record<string,unknown> | undefined;
+  // Interrupted observation is not successful execution or action replay.
+  if (run.status === 'interrupted' && run.errorCode === 'omnigent_observer_retired' &&
+      run.id && run.companyId && run.agentId && validOmnigentReceipt({id:run.id,companyId:run.companyId,agentId:run.agentId},receipt) &&
+      retirement?.version === 1 && retirement.runId === run.id &&
+      retirement.companyId === run.companyId && retirement.agentId === run.agentId &&
+      retirement.omnigentSessionId === receipt?.omnigentSessionId &&
+      retirement.issueId === run.contextSnapshot?.issueId && typeof retirement.issueId === 'string' &&
+      retirement.actionOutcomes === 'unknown' && retirement.providerStopped === false &&
+      ['not_found','runner_offline'].includes(String(retirement.reason))) return true;
+  return false;
+}
+
 /** Error families describe availability, not whether earlier actions happened. */
 export function legacyExecutionNeedsReconciliation(
-  run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson"> & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot">>,
+  run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson"> & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot" | "id" | "companyId" | "agentId">>,
 ): boolean {
   if (
     run.runtimeMode === "native" ||
@@ -25,6 +43,7 @@ export function legacyExecutionNeedsReconciliation(
     return false;
   // A fresh model turn cannot repair or verify unrestored files.
   if (run.resultJson?.workspaceRestoreFailure === "restore_unsafe_archive") return true;
+  if (isRetiredOmnigentObserver(run)) return false;
   // A fresh conversation turn lets the agent decide what remains. The retry
   // scheduler, not an action-outcome hold, owns the automatic attempt limit.
   if (hasConversationContinuationPolicy(run.resultJson)) return false;

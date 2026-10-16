@@ -678,3 +678,16 @@ into the current fork image or supplied by a fork migration.
   deployment and integration tests remain required, not implied by unit counts.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
+
+## Suspended-observer wake ownership handoff (PER-902)
+
+- Upstream checked at 9a3290fe10fb1dbe950b91028b58b038b812169a: no
+  OmniGenT observer-retirement equivalent. Remove this private integration
+  when upstream ships matching semantics and passes these regression tests.
+- Fresh identity-bound offline/404 evidence plus a queued wake retires only
+  the two-hour-silent observer. Evidence and unknown action outcomes remain;
+  no provider stop or prompt retry. Normal release/claim and safety gates apply.
+- Crash recovery retries release. Successors use a fresh generation with an
+  inspect-before-mutation warning. Admission/recovery and adapter regression
+  tests cover preserved receipts, fresh output races, native identity, online
+  and pending-approval denial, and zero interrupt/retry effects.
