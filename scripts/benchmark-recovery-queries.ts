@@ -74,15 +74,21 @@ try {
     return query;
   }
   async function measure(query: Query) {
+    return db!.$client.begin(async client => {
+    // Reproduce the production nested-loop plan, not the synthetic hash-join alternative.
+    await client.unsafe("SET LOCAL enable_hashjoin=off");
+    await client.unsafe("SET LOCAL enable_mergejoin=off");
+    await client.unsafe("SET LOCAL statement_timeout='15s'");
     const samples: number[] = []; let rows: unknown[] = [];
     for (let n = 0; n < 7; n++) {
       const start = performance.now();
-      rows = await db!.$client.unsafe(query.sql, query.params as never[]).values();
+      rows = await client.unsafe(query.sql, query.params as never[]).values();
       if (n > 1) samples.push(performance.now() - start);
     }
-    const [plan] = await db!.$client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query.sql}`, query.params as never[]);
+    const [plan] = await client.unsafe(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${query.sql}`, query.params as never[]);
     samples.sort((a, b) => a - b);
     return { medianMs: samples[2], rows, plan: plan["QUERY PLAN"] };
+    });
   }
   const pairs = [
     { name: "ownership", before: (d: Db) => oldConversation.getConversationOwnershipBlocker(d, companyId, issueId),
@@ -99,7 +105,7 @@ try {
     results.push({ name: pair.name, equalRows: after.rows.length, baselineMs: before.medianMs, treatmentMs: after.medianMs,
       speedup: before.medianMs / after.medianMs, baselinePlan: before.plan, treatmentPlan: after.plan });
   }
-  console.log(JSON.stringify({ baselineRevision, runs: 1400, issues: 1000, actions: 350, promptBytes: Buffer.byteLength(prompt), results }, null, 2));
+  console.log(JSON.stringify({ baselineRevision, planner: "transaction-local nested-loop (hash/merge disabled), matching reproduced live plan", runs: 1400, issues: 1000, actions: 350, promptBytes: Buffer.byteLength(prompt), results }, null, 2));
   const status = results.find(result => result.name === "statusDelivery")!;
   assert.equal(status.equalRows, 1);
   assert.ok(JSON.stringify(status.treatmentPlan).includes("issues_pkey"), "status delivery must use the issue UUID primary-key index");
