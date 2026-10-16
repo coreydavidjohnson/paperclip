@@ -484,3 +484,22 @@ reservation cannot silently disappear. Failed cleanup or an ambiguous storage
 write requires operator reconciliation before an unattached reservation is
 removed. The table stores no response bodies. See `doc/runner-api-tools.md` for
 limits and the operator override.
+
+
+### Execution recovery query performance
+
+Conversation recovery keeps indexed run and task UUID columns as UUIDs. Saved
+JSON identifiers pass a canonical lowercase UUID guard before conversion.
+Malformed, uppercase, numeric and cross-company values retain their old behavior.
+Ownership candidate reads split native and legacy issue bindings so existing
+indexes can filter candidates before reading large contexts. Native bindings
+continue to override legacy context IDs. No new index or migration is needed.
+
+```sh
+pnpm --filter @paperclipai/server exec tsx ../scripts/benchmark-recovery-queries.ts --baseline-ref=1e731520bb
+```
+
+This disposable fixture compares the real ownership, recovery-action and status
+delivery queries, including complete positional results and database plans.
+All data is synthetic. Query timings exclude process liveness probes, HTTP and
+provider work.
