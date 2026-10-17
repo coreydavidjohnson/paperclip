@@ -159,7 +159,9 @@ RUN pnpm --filter @paperclipai/ui exec vitest run \
     src/api/issues.test.ts \
     src/lib/query-invalidation-batcher.test.ts \
     src/lib/issue-refresh-budget.test.ts \
-    src/context/LiveUpdatesProvider.test.ts
+    src/context/LiveUpdatesProvider.test.ts \
+    src/hooks/useTaskBrowsers.test.ts \
+    src/components/WorkspaceFileMarkdownBody.availability.test.tsx
 RUN pnpm --filter @paperclipai/adapter-utils exec vitest run src/server-utils.test.ts
 RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home \
   && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \

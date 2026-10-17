@@ -130,6 +130,8 @@ function chipPaths() {
 beforeEach(() => {
   mockAvailability.mockReset();
   mockNavigate.mockReset();
+  // Luma FileViewer guard ignores navigation when window.location left the routed task.
+  window.history.replaceState(null, "", "/PAP/issues/PAP-1");
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);

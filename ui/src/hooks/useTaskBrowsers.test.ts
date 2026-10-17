@@ -51,10 +51,10 @@ it("starts browser polling when a chat draft becomes a saved task and stops on t
   rerender(taskId);
   await act(async () => { await vi.advanceTimersByTimeAsync(1); });
   expect(list).toHaveBeenCalledExactlyOnceWith(taskId);
-  await act(async () => { await vi.advanceTimersByTimeAsync(3000); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
   expect(list).toHaveBeenCalledTimes(2);
   rerender(`chat:${taskId}`);
-  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
   expect(list).toHaveBeenCalledTimes(2);
   unmount();
   client.clear();
