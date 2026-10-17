@@ -287,7 +287,7 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("queued");
     const repair = (await f.runs()).find(r => r.id !== f.runId)!;
     expect(repair.contextSnapshot?.routingParentHandback).toBeUndefined();
-    expect(repair.contextSnapshot?.wakeReason).toBe("issue_disposition_repair_retry");
+    expect(repair.contextSnapshot?.wakeReason).toBe("issue_disposition_repair");
   });
   async function routingHandbackFixture() {
     const f = await fixture();
@@ -313,10 +313,11 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("queued");
     const repair = (await f.runs()).find(r => r.id !== f.runId)!;
     expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBeNull();
+    const [before] = await db.select().from(issues).where(eq(issues.id, f.issueId));
     const later = new Date(Date.now() + 1000);
     await db.update(issues).set({
       ...(mutation === "descriptor" ? { unblockDescriptor: { owner: "board" as const, action: "Wait for independent decision" } } : {}),
-      ...(mutation === "status-version" ? { statusVersion: 1 } : {}),
+      ...(mutation === "status-version" ? { statusVersion: before.statusVersion + 1 } : {}),
       ...(mutation === "blocked-transition" ? { blockedTransitionAt: later } : {}),
       ...(mutation === "updated-at" ? { updatedAt: later } : {}),
     }).where(eq(issues.id, f.issueId));
