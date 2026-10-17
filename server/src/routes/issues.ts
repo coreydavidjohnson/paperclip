@@ -8997,10 +8997,23 @@ export function issueRoutes(
       trigger: "read_projection",
       actor: getActorInfo(req),
     });
-    res.json({
-      active,
-      actions: active ? [active] : [],
-    });
+    const actionId = req.query.actionId;
+    if (actionId !== undefined && (typeof actionId !== "string" || !isUuidLike(actionId))) {
+      throw badRequest("actionId must be a UUID");
+    }
+    // A restored wake refers to an already settled action. Keep active semantics
+    // unchanged, but expose bounded history or the exact source-scoped record.
+    const rows = await db.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.companyId, issue.companyId),
+      eq(issueRecoveryActions.sourceIssueId, issue.id),
+      ...(actionId ? [eq(issueRecoveryActions.id, actionId)] : []),
+    )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(actionId ? 1 : 51);
+    if (actionId && rows.length === 0) throw notFound("Recovery action not found");
+    const history = rows.map(issueRecoveryActionReadModel);
+    const actions = !actionId && active
+      ? [active, ...history.filter(action => action.id !== active.id)].slice(0, 50)
+      : history.slice(0, 50);
+    res.json({ active, actions, hasMore: rows.length > 50 });
   });
 
   router.post("/issues/:id/recovery-actions/retry-workspace-export", validate(retryWorkspaceExportSchema), async (req, res) => {
@@ -9142,6 +9155,30 @@ export function issueRoutes(
                 .returning();
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
+              const notes = (settled.resolutionNote ?? "").split(String.fromCharCode(10, 10));
+              if (resolutionNote && !notes.includes(resolutionNote)) {
+                // Late disposition evidence is annotation, not another resolution:
+                // retain the original outcome, timestamps and note; never replay.
+                assertBoard(req);
+                if (activeRecoveryAction || sourceIssueStatus !== lockedIssue.status ||
+                    settled.status !== "resolved" || settled.kind !== "deliberate_wait_without_target") {
+                  throw conflict("Late recovery notes require the current source disposition, a settled disposition action and no newer active recovery.");
+                }
+                const note = [...notes.filter(Boolean), resolutionNote].join(String.fromCharCode(10, 10));
+                if (note.length > 12000) throw unprocessable("Recovery resolution notes exceed the retained note limit");
+                const [annotated] = await tx.update(issueRecoveryActions).set({ resolutionNote: note })
+                  .where(and(eq(issueRecoveryActions.id, settled.id), eq(issueRecoveryActions.companyId, lockedIssue.companyId),
+                    eq(issueRecoveryActions.sourceIssueId, lockedIssue.id), eq(issueRecoveryActions.status, "resolved")))
+                  .returning();
+                if (!annotated) throw conflict("Recovery action changed before annotation");
+                await logActivity(tx as unknown as Db, {
+                  companyId: lockedIssue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+                  agentId: actor.agentId, runId: actor.runId, action: "issue.recovery_action_note_added",
+                  entityType: "issue", entityId: lockedIssue.id,
+                  details: { recoveryActionId: settled.id, sourceIssueStatus, outcome, resolutionNote },
+                });
+                return { issue: lockedIssue, recoveryAction: annotated, replayed: true };
+              }
               return {
                 issue: lockedIssue,
                 recoveryAction: settled,
