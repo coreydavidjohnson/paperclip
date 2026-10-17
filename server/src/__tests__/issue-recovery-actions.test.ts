@@ -2253,6 +2253,52 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await service.getActiveForIssue(companyId, sourceIssueId)).toMatchObject({ id: newer.id });
   });
 
+  it("retains original empty paragraphs and deduplicates whole late notes across intervening annotations", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "per436:late-notes",
+      nextAction: "Repair the disposition.", wakePolicy: { type: "board_escalation" },
+    });
+    const wake = vi.fn(async () => null);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const separator = String.fromCharCode(10, 10);
+    const originalNote = "Original disposition." + separator + separator + "Retain the original empty paragraph.";
+    const endpoint = `/api/issues/${sourceIssueId}/recovery-actions/resolve`;
+    await request(app).post(endpoint).send({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: originalNote,
+    }).expect(200);
+    const [originalAction] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const [originalIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    expect(originalAction.resolutionNote).toBe(originalNote);
+    const firstNote = "Verified the source disposition." + separator + "No execution was repeated.";
+    // This distinct note contains the first verbatim; containment is not identity.
+    const secondNote = firstNote + " A separate observation.";
+    const payload = (resolutionNote: string) => ({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote,
+    });
+    await request(app).post(endpoint).send(payload(firstNote)).expect(200);
+    await request(app).post(endpoint).send(payload(secondNote)).expect(200);
+    // Concurrent retries must also share the durable identity under the issue lock.
+    await Promise.all([firstNote, firstNote, secondNote, originalNote].map(async (note) => {
+      await request(app).post(endpoint).send(payload(note)).expect(200);
+    }));
+    const [annotated] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const [source] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect.soft(annotated.resolutionNote).toBe(originalNote + separator + firstNote + separator + secondNote);
+    expect.soft(annotated).toEqual({ ...originalAction, resolutionNote: annotated.resolutionNote });
+    expect.soft(source).toEqual(originalIssue);
+    expect.soft(wake).toHaveBeenCalledTimes(1);
+    const annotations = logs.filter(entry => entry.action === "issue.recovery_action_note_added");
+    expect.soft(annotations).toHaveLength(2);
+    for (const note of [firstNote, secondNote]) {
+      expect.soft(annotations.filter(entry => entry.details?.resolutionNote === note && entry.details?.recoveryActionId === action.id)).toHaveLength(1);
+    }
+    expect.soft(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
+  });
+
   it("resolves an active recovery action and removes it from active projections", async () => {
     const { companyId, managerId, sourceIssueId } = await seedCompany();
     const recoveryActionSvc = issueRecoveryActionService(db);
