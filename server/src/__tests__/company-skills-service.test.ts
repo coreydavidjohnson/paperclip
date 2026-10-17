@@ -682,6 +682,32 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     expect(await db.select().from(folders).where(eq(folders.id, folderId)).then(rows => rows[0]?.name)).toBe("Paperclip Core");
   });
 
+  it("keeps interleaved bundled import categories and companies separate", async () => {
+    const first = randomUUID();
+    const second = randomUUID();
+    for (const companyId of [first, second]) {
+      await db.insert(companies).values({ id: companyId, name: "Category isolation", issuePrefix: `T${companyId.slice(0, 6)}` });
+      const files: Record<string, string> = {};
+      for (const [slug, category] of [["one", "alpha"], ["two", "beta"], ["three", "alpha"], ["four", "beta"]]) {
+        files[`skills/${slug}/SKILL.md`] = ["---", `name: ${slug}`, `key: paperclipai/bundled/${category}/${slug}`, "---", "# Fixture"].join(String.fromCharCode(10));
+      }
+      await svc.importPackageFiles(companyId, files);
+      const rows = await svc.list(companyId);
+      const alpha = rows.filter(skill => skill.key.startsWith("paperclipai/bundled/alpha/"));
+      const beta = rows.filter(skill => skill.key.startsWith("paperclipai/bundled/beta/"));
+      expect(alpha).toHaveLength(2);
+      expect(beta).toHaveLength(2);
+      expect(new Set(alpha.map(skill => skill.folderId)).size).toBe(1);
+      expect(new Set(beta.map(skill => skill.folderId)).size).toBe(1);
+      expect(alpha[0]!.folderId).not.toBe(beta[0]!.folderId);
+      expect(alpha.every(skill => skill.folderPath === "bundled/alpha")).toBe(true);
+      expect(beta.every(skill => skill.folderPath === "bundled/beta")).toBe(true);
+    }
+    const firstFolders = await db.select().from(folders).where(eq(folders.companyId, first));
+    const secondFolders = await db.select().from(folders).where(eq(folders.companyId, second));
+    expect(firstFolders.every(folder => !secondFolders.some(other => other.id === folder.id))).toBe(true);
+  });
+
   it("does not retouch unchanged bundled skills during list refresh", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({

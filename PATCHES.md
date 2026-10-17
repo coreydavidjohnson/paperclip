@@ -711,3 +711,26 @@ into the current fork image or supplied by a fork migration.
 - Preserve PER-894 no-continuation delivery and dependency locks plus combined admission/UI/payload/cache history.
 - Regression uses real disposable PostgreSQL with malformed/noncanonical/missing/foreign bindings, native precedence, existing status-delivery/recovery suites and 192KiB contexts with 1000 same-company issues. The benchmark disables hash/merge joins transaction-locally to reproduce the observed live nested-loop shape; its timings are not production/API/browser latency claims.
 - Retire the backport when the next complete upstream upgrade includes this commit and passes the private contracts.
+
+## PER-959: Coalesce bundled category repair within one import
+
+- Upstream checked: master `2723168083ad9a460f35199357d5d4c5d53f02d6`
+  and stable `v2026.1005.0` retain one locked ensure per imported skill.
+  Master's inventory-before-runtime-lock carry does not remove this list cost.
+- Why: disposable six-load profile with 28 skills, 20 local sources x100
+  supporting files and 40 agents measured bundled import median 251 ms of
+  437 ms total; individual repeated folder ensures median 17 ms each.
+- Change: reuse the resolved category folder only for this upsert invocation.
+  Company, database, ordered persistence, per-refresh repair, source validation,
+  local file discovery, release snapshot comparison and error retry are unchanged.
+  No TTL extension, process cache, background refresh or authorization change.
+- Tests: company-skills-service.test.ts budget red is 10 transactions vs <=3;
+  green passes, repeated external folder edits repair on each refresh.
+  Interleaved categories and company isolation are covered alongside existing
+  root repair, release inventory, local-source, filtering and mutation tests.
+- Review: Opus 5.5 found no blocker; requested multi-category coverage added.
+  Folder FK remains enforced, and subsequent reconciliation repairs membership.
+- Retire when a released equivalent passes these freshness and inventory tests.
+- Profile: scripts/diagnostics/profile-skills-inventory.py (VM103 disposable
+  CI runner, exact SHA payload); phase instrumentation never enters production.
+  Profile is synthetic attribution, not production latency acceptance.
