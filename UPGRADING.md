@@ -140,3 +140,5 @@ Do not simplify externalConversationStateSql for this candidate. Its repeated
 predicate was not the dominant cost in the bounded blocked-row plan; all
 Slack liveness guards are retained. Endpoint benefit, attention <200ms,
 combined pre-ship cross-review, CI/staging and deployment remain unverified.
+
+PER-378 fixture note: company-skills-detail beforeAll uses the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS90s cost-class budget. Preserve the one-second service-detail response check and both column-selection/runtime-probe assertions. Cold initdb+migrations measured20.792s on the cluster; do not restore an arbitrary20s setup limit without fresh cold-builder evidence.

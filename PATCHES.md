@@ -793,3 +793,7 @@ benefit, packaging and deployment gates remain pending; do not label this live.
   no upstream communication.
 - Removal condition: a released equivalent preserves these membership,
   attribution, tenant/order/redaction contracts with comparable measurements.
+
+## Bounded company-skill detail fixture startup (PER-378)
+
+The real candidate image gate twice failed company-skills-detail beforeAll at20s with763 other server tests passing. A diagnostic pinned-image run measured18.336s initdb,155ms start,2.095s migrations and20.792s total startup; unchanged assertions both passed. Reuse the existing shared90s embedded-Postgres test budget for this one setup hook, not application latency or test-body deadlines. No dependencies, runtime behavior or security contracts change. Retire when upstream/the maintained fixture budget supersedes this hook. Verify company-skills-detail.test.ts and the full image gate; diagnostic instrumentation is not shipped.
