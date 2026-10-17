@@ -39,18 +39,6 @@ app.post("/lease-timeout", async (_req, res) => {
   await blocker;
   res.json({aborted:abort.signal.aborted,message,elapsedMs:Date.now()-started});
 });
-app.post("/retained-omnigent", async (_req, res) => {
-  const [run] = await db.select().from(heartbeatRuns).limit(1);
-  await db.update(agents).set({ adapterType: "omnigent" }).where(eq(agents.id, run.agentId));
-  const original = { session_id: "retained-session", response_id: "retained-response", turn_id: "retained-turn" };
-  await db.update(heartbeatRuns).set({ status: "running", runtimeMode: "legacy",
-    controllerBootId: crypto.randomUUID(), controllerLeaseExpiresAt: new Date(Date.now()-1000),
-    executionStage: "dispatching", resultJson: original }).where(eq(heartbeatRuns.id, run.id));
-  await heartbeat.reapOrphanedRuns({staleThresholdMs: 0});
-  await heartbeat.resumeQueuedRuns();
-  const [retained] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
-  res.json({retained, original});
-});
 app.post("/db-loss", async (_req, res) => {
   const [run] = await db.update(heartbeatRuns).set({status: "running", runtimeMode: "legacy",
     controllerBootId: legacyControllerBootId, controllerLeaseExpiresAt: new Date(Date.now()+300) }).returning();

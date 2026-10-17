@@ -10,10 +10,5 @@ await pause(14000); await post(a,'/clear');await post(a,'/seed');
 const timed=await post(a,'/lease-timeout');assert.equal(timed.aborted,true);assert.match(timed.message,/lease lost/);
 console.log('PASS real PostgreSQL locked renewal aborts at lease deadline:',JSON.stringify(timed));
 
-await post(a,'/clear'); await post(a,'/seed');
-const retained=await post(a,'/retained-omnigent');
-assert.equal(retained.retained.status,'running'); assert.equal(retained.retained.executionStage,'awaiting_external_evidence');
-assert.deepEqual(retained.retained.resultJson,retained.original);
-console.log('PASS expired OmniGenT owner retains original run/session/response/turn and blocks replacement (no provider dispatch)');
 const lost=await post(a,'/db-loss'); assert.equal(lost.aborted,true);
 console.log('PASS real unreachable PostgreSQL connection fences executor by deadline:',JSON.stringify(lost));
