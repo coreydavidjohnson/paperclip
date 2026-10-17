@@ -855,3 +855,14 @@ The real candidate image gate twice failed company-skills-detail beforeAll at20s
 
 
 PER-378 follow-up: real expanded image gate reproduced 20s cold-start hook failures in company-skills-service and issue-comment-redaction. Reuse the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS setup budget in those two hooks only. Service cold setup measured 20.403s; isolated combined check passed all 120 service/redaction/conversation tests. Conversation test deadline and every assertion remain unchanged. Upstream master 4415665d still has both 20s hooks. No runtime, dependency or response limit change; exact-source image, staging and live acceptance remain required.
+
+## Deterministic execution identity fixture (PER-968)
+
+The expanded combined image gate failed one of 797 server tests because an
+all-digit random UUID prefix is unchanged by uppercase conversion. The test
+incorrectly expected that byte-identical canonical identifier to be private.
+A fixed numeric-prefix reproduction failed before correction. Parameterize
+numeric/alphabetic prefixes with unique random suffixes and derive expected
+delivery from exact byte identity; malformed and cross-company cases retain
+all assertions. Runtime validation and normalization are unchanged. Retire
+when upstream ships equivalent deterministic coverage.

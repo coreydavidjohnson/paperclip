@@ -15,8 +15,8 @@ describePostgres("execution identity query contracts", () => {
   let db: Db;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("execution-identity-"); db = createDb(database.connectionString); }, 120_000);
   afterAll(async () => { await db?.$client.end({ timeout: 0 }); await database?.cleanup(); });
-  async function fixture() {
-    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), otherIssueId = randomUUID();
+  async function fixture(issueId = randomUUID()) {
+    const companyId = randomUUID(), agentId = randomUUID(), otherIssueId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Identity", issuePrefix: `I${companyId.slice(0, 7)}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Fixture", adapterType: "codex_local" });
     await db.insert(issues).values([{ id: issueId, companyId, title: "Target" }, { id: otherIssueId, companyId, title: "Other" }]);
@@ -60,14 +60,15 @@ describePostgres("execution identity query contracts", () => {
     await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, legacy.id));
     expect(await getConversationOwnershipBlocker(db, f.companyId, f.issueId)).toBeNull();
   });
-  it("delivers canonical same-company task IDs and keeps malformed IDs private", async () => {
-    const f = await fixture(), foreign = await fixture();
+  it.each(["12345678", "abcdefab"])("delivers canonical same-company task IDs and keeps malformed IDs private (%s)", async (prefix) => {
+    const f = await fixture(prefix + randomUUID().slice(8)), foreign = await fixture();
     const contexts: unknown[] = [f.issueId, f.issueId.toUpperCase(), f.issueId.slice(0, 8).toUpperCase() + f.issueId.slice(8), ` ${f.issueId}`, `${f.issueId} `, `${f.issueId}\n`, `urn:uuid:${f.issueId}`, "bad", `{${f.issueId}}`, f.issueId.replaceAll("-", ""), null, 42, {}, [f.issueId], foreign.issueId, randomUUID()];
     const expected = new Map<string, string | null>();
-    for (const [index, issueId] of contexts.entries()) {
+    for (const issueId of contexts) {
       const row = await run(f, { issueId });
       await db.update(heartbeatRuns).set({ executionStatusDeliveryId: randomUUID() }).where(eq(heartbeatRuns.id, row.id));
-      expected.set(row.id, index === 0 ? f.issueId : null);
+      // Case conversion of an all-digit prefix is a no-op, not malformed input.
+      expected.set(row.id, issueId === f.issueId ? f.issueId : null);
     }
     for (const context of [{}, null]) {
       const missing = await run(f, context);
