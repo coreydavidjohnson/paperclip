@@ -2322,8 +2322,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await settings.updateGeneral({ censorUsernameInLogs: true });
     try {
       const username = os.userInfo().username;
-      const originalNote = redaction === "JWT-shaped domain" ? "original.internal.com" : `Original disposition by ${username}.`;
-      const firstNote = redaction === "JWT-shaped domain" ? "example.internal.com" : `Verified disposition by ${username}.`;
+      const originalNote = redaction === "JWT-shaped domain" ? "original.internal.com" : `Original disposition by ${username} (operator).`;
+      const firstNote = redaction === "JWT-shaped domain" ? "example.internal.com" : `Verified disposition by ${username} (operator).`;
       const secondNote = redaction === "JWT-shaped domain" ? "another.internal.com" : "A separate observation.";
       const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
       const payload = (resolutionNote: string) => ({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote });
