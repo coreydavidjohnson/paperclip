@@ -11,4 +11,7 @@ raise SystemExit(runner.run(str(Path.home()/"tasks/per959/paperclip"), "SOURCE_S
 '''
 sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
 remote = remote.replace("SOURCE_SHA", sha)
+if __import__("os").environ.get("PER959_REGRESSION"):
+    remote = remote.replace("company-skills-inventory-profile.test.ts", "company-skills-service.test.ts -t ensures")
 raise SystemExit(subprocess.run(["ssh", "agents", "python3", "-"], input=remote, text=True).returncode)
+

@@ -661,6 +661,27 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     });
   });
 
+  it("ensures each bundled category once per refresh without retaining stale folder state", async () => {
+    const companyId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Folder budget", issuePrefix: `T${companyId.slice(0, 6)}` });
+    const initial = await svc.list(companyId);
+    const bundled = initial.filter(skill => skill.key.startsWith("paperclipai/paperclip/"));
+    expect(bundled.length).toBeGreaterThan(1);
+    const folderId = bundled[0]!.folderId!;
+    await db.update(folders).set({ name: "Out of date" }).where(eq(folders.id, folderId));
+    const transactions = vi.spyOn(db, "transaction");
+    try {
+      const refreshed = await companySkillService(db).list(companyId);
+      expect(refreshed.map(skill => skill.key)).toEqual(initial.map(skill => skill.key));
+      expect(refreshed.filter(skill => skill.key.startsWith("paperclipai/paperclip/")).every(skill => skill.folderId === folderId)).toBe(true);
+      expect(await db.select().from(folders).where(eq(folders.id, folderId)).then(rows => rows[0]?.name)).toBe("Paperclip Core");
+      expect(transactions.mock.calls.length).toBeLessThanOrEqual(3);
+    } finally { transactions.mockRestore(); }
+    await db.update(folders).set({ name: "Changed again" }).where(eq(folders.id, folderId));
+    await svc.list(companyId);
+    expect(await db.select().from(folders).where(eq(folders.id, folderId)).then(rows => rows[0]?.name)).toBe("Paperclip Core");
+  });
+
   it("does not retouch unchanged bundled skills during list refresh", async () => {
     const companyId = randomUUID();
     await db.insert(companies).values({
