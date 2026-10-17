@@ -766,3 +766,80 @@ into the current fork image or supplied by a fork migration.
 - Current upstream master2723168083ad9a460f35199357d5d4c5d53f02d6 retains the20-second override; re-evaluate/remove this carried test-only adjustment on upstream equivalent. Four route suites share this helper. Full exact image gates must pass before delivery.
 
 - Integration with PER-902: retain its newer explicit60-second shared fixture startup budget instead of reverting it to the earlier inherited30-second budget. Assertions and production behavior are unchanged; observer handoff/admission and indexed-query changes are preserved. Rebuild and exact revision gates remain required.
+## Execution run-context candidate (PER-358; not deployed)
+
+- Why: existing execution projection independently extracts three fields from
+  potentially TOASTed run snapshots. Author intent for this extraction shape
+  is not established; preserve the downstream execution/liveness contract.
+  Inspected upstream master 2c17d3ca and released v2026.1012.0 retain the old
+  extraction. This is a private candidate, not an upstream submission.
+- Guarded LEFT JOIN LATERAL jsonb_to_record with quoted JSONB fields retains
+  every selected run scalar, tenant/id predicates and downstream behavior.
+  jsonb_build_object retains explicit-null/missing-key output equivalence.
+  No schema, migration, dependencies, secret registry or caching change.
+- Verification: three focused tests passed and server tsc --noEmit passed
+  in pinned dependency-image BuildKit with Node heap capped at 1536 MiB.
+  Fixtures include JSON scalars/nested values/large context, SQL NULL,
+  one-row membership, actual Drizzle query and cross-company isolation.
+  Full selected-field read-only comparison on 80 PER-99 runs: zero differences;
+  SQL pairs original 151/141 ms versus candidate 102/99 ms. Not API acceptance.
+- Fable pre-ship review requires exact endpoint benefit and full query tests.
+  Query tests now pass; endpoint benefit and packaging are still unverified.
+  Current production API p50 fails runs/comments/attention, and full render
+  under one second is unverified. Candidate MUST NOT be called deployed.
+- Packaging must compile/copy execution-projection.js and execution-run-context.js
+  together and run their tests/typecheck. Current homelab narrow overlay does
+  not deliver these files. Preserve existing overlays and full Argo hooks.
+- Remove when a released upstream equivalent preserves these contracts and
+  meets comparable endpoint measurements. No upstream issue/PR is authorized.
+
+## PER-378 candidate: issue-run context single decode (not deployed)
+
+The issue-run history projection now extracts wakeCommentIds as JSONB and
+wakeCommentId/commentId/issueId as text in one guarded LEFT JOIN LATERAL.
+Company predicates, membership, order, result/usage projection, redaction and
+execution/liveness decoration are unchanged. Malformed/non-object contexts
+retain one row with null fields. The database contract test compares all four
+fields and unusual JSON types. Dependency lockfile is unchanged. Endpoint
+benefit, packaging and deployment gates remain pending; do not label this live.
+
+## 14. Indexed comment attribution membership (PER-382 candidate)
+
+- Status: committed candidate only, not deployed. PER-378 owns combined
+  pre-ship review, image overlay/CI/staging and main-first full Argo rollout.
+- Why: comment attribution's company-scoped context OR correlated activity
+  membership repeatedly detoasted unrelated run context. Reuse the existing
+  PER-218 `issueRunIdsCondition` indexed UNION; do not invent another index.
+- Files: `server/src/services/issues.ts` and the two
+  `comment-attribution-query*.test.ts` tests. No dependency, lockfile, schema,
+  secret-registry, log-reading or Slack liveness change.
+- Contract: same context/activity membership, outer company scope, inclusive
+  coalesced timestamp bounds, unconditional explicit own-run IDs and descending
+  creation-time order. No widening to taskId/native issue membership. Genuine
+  human exclusion, lossless log attribution and redaction remain unchanged.
+- Evidence: production REPEATABLE READ READ ONLY exact JavaScript millisecond
+  bounds returned 78 vs 78 rows, zero bidirectional eight-field differences and
+  identical full ordered arrays. Three SQL pairs were 306.815/314.211/381.003 ms
+  original versus 3.273/3.145/3.586 ms candidate. These are SQL timings, not
+  endpoint benefit. Generic-plan checks retain indexed membership; both IDs
+  are UUID. Statistics were not reset.
+- Tests: pinned upstream dependency image, nine focused/tenant/order/redaction/
+  blocker/review/Slack test files (106 passed), fifteen selected actual
+  issue-service attribution/run-ID/order tests passed and full server noEmit
+  typecheck passed. The shape test failed before the source change. Full
+  repository build/test and staging endpoint benefit are not claimed.
+- Cross-review: Fable accepted semantic equivalence as a candidate, requiring
+  bidirectional diff, index/type and generic-plan evidence; these SQL checks
+  were completed. This is not combined release approval.
+- Upstream observation: master `2c17d3ca` and released `v2026.1012.0` unchanged
+  from the exact search recorded in PER-378. Private fork authorization only;
+  no upstream communication.
+- Removal condition: a released equivalent preserves these membership,
+  attribution, tenant/order/redaction contracts with comparable measurements.
+
+## Bounded company-skill detail fixture startup (PER-378)
+
+The real candidate image gate twice failed company-skills-detail beforeAll at20s with763 other server tests passing. A diagnostic pinned-image run measured18.336s initdb,155ms start,2.095s migrations and20.792s total startup; unchanged assertions both passed. Reuse the existing shared90s embedded-Postgres test budget for this one setup hook, not application latency or test-body deadlines. No dependencies, runtime behavior or security contracts change. Retire when upstream/the maintained fixture budget supersedes this hook. Verify company-skills-detail.test.ts and the full image gate; diagnostic instrumentation is not shipped.
+
+
+PER-378 follow-up: real expanded image gate reproduced 20s cold-start hook failures in company-skills-service and issue-comment-redaction. Reuse the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS setup budget in those two hooks only. Service cold setup measured 20.403s; isolated combined check passed all 120 service/redaction/conversation tests. Conversation test deadline and every assertion remain unchanged. Upstream master 4415665d still has both 20s hooks. No runtime, dependency or response limit change; exact-source image, staging and live acceptance remain required.
