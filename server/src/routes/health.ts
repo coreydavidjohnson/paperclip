@@ -1,3 +1,4 @@
+import { beginControllerDrain, isControllerDraining } from "../controller-drain.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
@@ -136,6 +137,32 @@ export function healthRoutes(
   },
 ) {
   const router = Router();
+  // Share an outstanding probe: a hung pool must not accumulate one query per kubelet poll.
+  let readinessProbe: Promise<unknown> | null = null;
+  // Kubelet exec preStop calls loopback; never trust forwarded headers.
+  router.post("/drain", (req, res) => {
+    if (!["127.0.0.1", "::1", "::ffff:127.0.0.1"].includes(req.socket.remoteAddress ?? "")) {
+      res.status(403).json({ error: "loopback_required" });
+      return;
+    }
+    res.json({ draining: true, deadline: beginControllerDrain() });
+  });
+  router.get("/ready", async (_req, res) => {
+    if (isControllerDraining() || getStartupRecoveryState().phase !== "ready" || !opts.authReady || !db) {
+      res.status(503).json({ ready: false });
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      readinessProbe ??= Promise.resolve(db.execute(sql`select 1`)).finally(() => { readinessProbe = null; });
+      await Promise.race([readinessProbe, new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("readiness_database_timeout")), 2000);
+      })]);
+      const ready = !isControllerDraining() && getStartupRecoveryState().phase === "ready";
+      res.status(ready ? 200 : 503).json({ ready });
+    } catch { res.status(503).json({ ready: false }); }
+    finally { if (timer) clearTimeout(timer); }
+  });
 
   router.post("/dev-server/restart", async (req, res) => {
     const actorType = "actor" in req ? req.actor?.type : null;

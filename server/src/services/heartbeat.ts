@@ -1,3 +1,4 @@
+import { isControllerDraining } from "../controller-drain.js";
 import { dotRunnerBroker } from "./dot-runner-broker.js";
 import { withRunExecutionTiming, measureRunPhase, measureWorkspaceSyncPhase, isWorkspaceSyncDetailPhase } from "./execution-preparation-timing.js";
 import { createHeartbeatPreparationTiming } from "./heartbeat/preparation-timing.js";
@@ -786,7 +787,7 @@ export function resolveHeartbeatSchedulingSuppression(
   ) {
     return { suppressed: true, reason: "database_restore_in_progress" };
   }
-  if (readTaskDrain(new Date()) !== null) {
+  if (isControllerDraining() || readTaskDrain(new Date()) !== null) {
     return { suppressed: true, reason: "task_drain" };
   }
   return { suppressed: false, reason: null };
@@ -885,6 +886,7 @@ export function heartbeatService(
     return cachedWorktreeRunExecutionOverride;
   };
   const getSchedulingSuppression = async () => {
+    if (isControllerDraining()) return { suppressed: true as const, reason: "task_drain" as const };
     const override = await resolveWorktreeRunExecutionOverride();
     return resolveHeartbeatSchedulingSuppression(runtimeEnv, {
       allowWorktreeRunExecution: override.allowed,

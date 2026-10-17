@@ -144,6 +144,7 @@ import {
 import { readContinuationAttempt } from "../recovery/index.js";
 import { allowsIssueInteractionWake } from "../../modules/run-dispatch/index.js";
 import { withAgentStartLock } from "../agent-start-lock.js";
+import { admitAgentRun } from "../run-admission.js";
 import {
   evaluateAgentInvokability,
   shouldCancelRunsForNonInvokableAgent,
@@ -967,6 +968,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
 
     const agent = await getAgent(run.agentId);
+    const claimSlot = (tx: Db) => agent
+      ? admitAgentRun(tx, run.companyId, run.agentId, parseHeartbeatPolicy(agent).maxConcurrentRuns)
+      : Promise.resolve(false);
     if (!agent) {
       await cancelRunInternal(
         run.id,
@@ -1254,6 +1258,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 .for("update")
                 .limit(1)
                 .then((rows) => rows[0] ?? null);
+              if (!await claimSlot(tx as unknown as Db)) return { kind: "stale" as const, run: null };
               if (
                 !wake ||
                 wake.status !== "queued" ||
@@ -1545,9 +1550,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return claimQueuedNativeReviewRun(tx, {
               run, claimedAt, claimValues,
               agentNameKey: normalizeAgentNameKey(agent.name),
+              admit: claimSlot,
             });
           }
           return tx.transaction(async (claimTx) => {
+            if (!await claimSlot(claimTx as unknown as Db)) return null;
             const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
             if (issueClaim.blocked) return null;
             const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(

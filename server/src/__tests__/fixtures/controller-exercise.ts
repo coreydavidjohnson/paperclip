@@ -1,0 +1,50 @@
+import assert from 'node:assert/strict';
+const a = 'http://'+process.env.CONTROLLER_A+':3210';
+const b = 'http://'+process.env.CONTROLLER_B+':3210';
+const pause = (ms:number) => new Promise(r=>setTimeout(r,ms));
+async function post(base:string,path:string,body={}) {
+ const r=await fetch(base+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ assert.equal(r.status,200,await r.clone().text()); return r.json();
+}
+async function runs() { return (await fetch(a+'/runs')).json() as Promise<any[]>; }
+assert.equal((await fetch(a+'/api/health/drain',{method:'POST'})).status,403);
+await post(a,'/clear');
+const seeded=await post(a,'/seed');
+const admissions=await Promise.all([post(a,'/resume'),post(b,'/resume')]);
+assert.notEqual(admissions[0].boot,admissions[1].boot);
+await pause(1500);
+let rows=await runs();
+assert.equal(rows.filter(r=>r.status==='running').length,1,JSON.stringify(rows));
+assert.equal(rows.filter(r=>r.status==='queued').length,1);
+const owner=rows.find(r=>r.status==='running')!;
+const owning=owner.controllerBootId===admissions[0].boot?a:b;
+const other=owning===a?b:a;
+await post(other,'/reap');
+assert.equal((await runs()).find(r=>r.id===owner.id)!.status,'running');
+for(const pod of [a,b]) assert.equal((await fetch(pod+'/api/health/ready')).status,200);
+// Both pods continue answering run-scoped API reads during a long provider turn.
+assert.equal((await fetch(other+'/runs')).status,200);
+const drain=post(owning,'/shutdown',{graceMs:20000});
+await pause(100);
+assert.equal((await fetch(owning+'/api/health/ready')).status,503);
+await post(owning,'/release-task-drain');
+assert.equal((await fetch(owning+'/api/health/ready')).status,503);
+const outcome=await drain;
+assert.equal(outcome.result,'drained');
+rows=await runs();
+assert.equal(rows.find(r=>r.id===owner.id)!.status,'succeeded',JSON.stringify(rows));
+assert.equal(rows.find(r=>r.id!==owner.id)!.status,'queued');
+console.log('PASS simultaneous cross-pod admission: distinct boots, exactly one running, one queued');
+console.log('PASS overlapping startup reaper preserves live foreign owner');
+console.log('PASS 12-second real process turn completes on original run; drain finalization cannot dispatch successor');
+console.log('PASS readiness fails during one-way drain; both pods serve shared run reads');
+await post(other,'/resume');
+await pause(1000);
+assert.equal((await runs()).filter(r=>r.status==='running').length,1);
+const began=Date.now(); const timeout=await post(other,'/shutdown',{graceMs:250});
+assert.equal(timeout.result,'timed_out');assert.ok(Date.now()-began<3000);
+assert.equal((await runs()).filter(r=>r.status==='running').length,1);
+console.log('PASS bounded drain timeout retains unfinished original run, no retry');
+const before=await post(other,'/loopback-drain');
+const repeated=await post(other,'/loopback-drain'); assert.equal(before.deadline,repeated.deadline);
+console.log('PASS preStop drain denies nonloopback and preserves first deadline on loopback');

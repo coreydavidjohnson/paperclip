@@ -1,3 +1,4 @@
+import { beginControllerDrain, controllerDrainRemainingMs, isControllerDraining } from "./controller-drain.js";
 import { timeStartupRecovery } from "./startup-recovery-timing.js";
 import { skillSourceSyncService } from "./services/skill-source-sync.js";
 import {
@@ -135,8 +136,7 @@ import { ensureDecisionSigningSecret } from "./services/decision-signing.js";
 import { createDecisionRetentionNotifyOriginAgent, createDecisionWakeOriginAgent } from "./services/decision-wakeup.js";
 import {
   closeHttpListenerForShutdown,
-  coordinateHeartbeatSchedulerShutdown,
-  drainRunExecutionFinalizersForShutdown,
+  completeControllerTurnsForShutdown,
   finalizeServerShutdown,
   loadWithoutCoordinatedShutdownSignalHooks,
 } from "./shutdown.js";
@@ -1203,7 +1203,7 @@ async function startServerWithDatabaseTeardown(
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
   ] as const;
   const sweepExecutionControl = () => {
-    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;
+    if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped || isWarmStandby()) return;
     // Independent durable queues must not block one another. Each queue remains
     // single-flight; a later sweep observes committed transitions from its peers.
     for (const [queue, work] of executionControlSweeps) {
@@ -1225,7 +1225,7 @@ async function startServerWithDatabaseTeardown(
   };
   const skillSourceSync = skillSourceSyncService(db as any);
   const sweepSkillSources = () => {
-    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;
+    if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped || isWarmStandby()) return;
     trackHeartbeatSchedulerWork(skillSourceSync.tick().catch(err => {
       logger.error({ err }, "skill source synchronization failed");
     }));
@@ -1240,12 +1240,12 @@ async function startServerWithDatabaseTeardown(
     dryRun: config.skillVersionRetentionDryRun,
     keepNewest: config.skillVersionRetentionKeepNewest,
     graceMs: config.skillVersionRetentionGraceMinutes * 60 * 1000,
-    shouldContinue: () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isWarmStandby(),
+    shouldContinue: () => !heartbeatSchedulerStopped && !isIdleTaskDrainActive() && !isControllerDraining() && !isWarmStandby(),
   });
   let skillVersionRetentionInFlight = false;
   let skillVersionRetentionContinuation: ReturnType<typeof setTimeout> | undefined;
   const sweepSkillVersionSnapshots = () => {
-    if (!config.skillVersionRetentionEnabled || skillVersionRetentionInFlight || isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;
+    if (!config.skillVersionRetentionEnabled || skillVersionRetentionInFlight || isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped || isWarmStandby()) return;
     skillVersionRetentionInFlight = true;
     trackHeartbeatSchedulerWork(skillVersionRetention.tick()
       .then((result) => {
@@ -1272,7 +1272,7 @@ async function startServerWithDatabaseTeardown(
   });
   const scheduleExternalObjectRefreshSweep = (now = new Date()) => {
     sweepSkillSources();
-    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+    if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
     trackHeartbeatSchedulerWork(externalObjects
       .refreshDueObjectsForActiveCompanies(50, now)
       .then((result) => {
@@ -1334,7 +1334,7 @@ async function startServerWithDatabaseTeardown(
   // Preserve the existing task-scoped activity fast path. Claims in the
   // delivery service arbitrate with the coordinator's startup/recovery sweep.
   const unsubscribeChatCompletions = subscribeAllCompanyLiveEvents(event => {
-    if (isIdleTaskDrainActive() || isWarmStandby() || heartbeatSchedulerStopped || event.type !== "activity.logged" ||
+    if (isIdleTaskDrainActive() || isControllerDraining() || isWarmStandby() || heartbeatSchedulerStopped || event.type !== "activity.logged" ||
       event.payload.action !== "issue.updated" || typeof event.payload.entityId !== "string") return;
     trackHeartbeatSchedulerWork(chatCompletionDeliveries.sweepPending({ companyId: event.companyId, taskId: event.payload.entityId })
       .catch(err => logger.error({ err }, "post-commit chat completion delivery failed")));
@@ -1348,7 +1348,7 @@ async function startServerWithDatabaseTeardown(
   });
   let nextHistoricalCleanupCheck = 0;
   const scheduleHistoricalCleanupVerification = () => {
-    if (!isCloudManagedInstance() || isIdleTaskDrainActive() || isWarmStandby() || heartbeatSchedulerStopped ||
+    if (!isCloudManagedInstance() || isIdleTaskDrainActive() || isControllerDraining() || isWarmStandby() || heartbeatSchedulerStopped ||
         Date.now() < nextHistoricalCleanupCheck) return;
     nextHistoricalCleanupCheck = Date.now() + 5 * 60_000;
     // Provider reads never delay readiness or the ordinary cleanup sweep.
@@ -1369,7 +1369,7 @@ async function startServerWithDatabaseTeardown(
         logger.error({ err }, "environment lease cleanup sweep failed");
       });
   const scheduleEnvironmentLeaseCleanupSweep = () => {
-    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+    if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
     trackHeartbeatSchedulerWork(runEnvironmentLeaseCleanupSweep(ENVIRONMENT_LEASE_CLEANUP_SWEEP_BACKOFF_MS));
   };
   const githubConnectionEvents = githubConnectionEventService(db as any, {
@@ -1383,7 +1383,7 @@ async function startServerWithDatabaseTeardown(
       ?? null,
   });
   const scheduleGitHubConnectionEventPoll = () => {
-    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+    if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
     trackHeartbeatSchedulerWork(githubConnectionEvents.pollOnce()
       .then((result) => {
         if (result.leased > 0 || result.failed > 0) {
@@ -1395,7 +1395,7 @@ async function startServerWithDatabaseTeardown(
       }));
   };
   const scheduleGitHubConnectionContinuitySweep = () => {
-    if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+    if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
     trackHeartbeatSchedulerWork(tools.sweepGitHubConnectionContinuity()
       .then((result) => {
         if (result.due > 0 || result.failed > 0) {
@@ -1428,7 +1428,7 @@ async function startServerWithDatabaseTeardown(
     const routines = routineService(db as any, { pluginWorkerManager });
     let nextRoutineStatusReconcile = 0;
     const scheduleRoutineStatusReconcile = () => {
-      if (!isCloudManagedInstance() || isWarmStandby() || isIdleTaskDrainActive() || heartbeatSchedulerStopped ||
+      if (!isCloudManagedInstance() || isWarmStandby() || isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped ||
           Date.now() < nextRoutineStatusReconcile) return;
       nextRoutineStatusReconcile = Date.now() + 5 * 60_000;
       trackHeartbeatSchedulerWork(routines.reconcileExecutionRunStatuses().then(result => {
@@ -1451,7 +1451,7 @@ async function startServerWithDatabaseTeardown(
       terminalWorkspaceInspectionBackoffMs: TERMINAL_WORKSPACE_RETRY_MS,
     });
     const scheduleMergedPullRequestConfirmationSweep = () => {
-      if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+      if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
       trackHeartbeatSchedulerWork(mergedPullRequestConfirmations
         .sweepMergedPullRequestConfirmations()
         .then((result) => {
@@ -1476,7 +1476,7 @@ async function startServerWithDatabaseTeardown(
         }
         return result;
       },
-    }, () => !isIdleTaskDrainActive() && !isWarmStandby() && !heartbeatSchedulerStopped);
+    }, () => !isIdleTaskDrainActive() && !isControllerDraining() && !isWarmStandby() && !heartbeatSchedulerStopped);
     unregisterTerminalWorkspaceProbe = registerIdleLocalWorkProbe(() => terminalWorkspaceWorker.hasUnrecoveredWork() ? "present" : "none");
     await terminalWorkspaceWorker.ready;
 
@@ -1506,7 +1506,7 @@ async function startServerWithDatabaseTeardown(
       }
     };
     const scheduleAdapterLoginReaperSweep = () => {
-      if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+      if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
       trackHeartbeatSchedulerWork(adapterLoginReaper
         .sweep()
         .then(logAdapterLoginReaperResult)
@@ -1532,7 +1532,7 @@ async function startServerWithDatabaseTeardown(
       }
     };
     const scheduleSetupTokenReaperSweep = () => {
-      if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+      if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
       trackHeartbeatSchedulerWork(setupTokenReaper
         .sweep()
         .then(logSetupTokenReaperResult)
@@ -1752,7 +1752,7 @@ async function startServerWithDatabaseTeardown(
       // can then wait through an already-running suppression check before it
       // captures the authoritative set of running heartbeat rows.
       trackHeartbeatSchedulerWork((async () => {
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         scheduleRoutineStatusReconcile();
         trackHeartbeatSchedulerWork(decisionExecutor.sweepExpired().catch((err: unknown) => {
           logger.error({ err }, "decision expiry sweep failed");
@@ -1770,10 +1770,10 @@ async function startServerWithDatabaseTeardown(
 
         scheduled.timers.wake();
 
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         scheduleExternalObjectRefreshSweep(new Date());
 
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         scheduleMergedPullRequestConfirmationSweep();
         scheduleGitHubConnectionEventPoll();
         scheduleGitHubConnectionContinuitySweep();
@@ -1781,10 +1781,10 @@ async function startServerWithDatabaseTeardown(
         scheduleSetupTokenReaperSweep();
         scheduleEnvironmentLeaseCleanupSweep();
 
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         scheduled.routines.wake();
 
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork((async () => {
           const experimental = await instanceSettingsService(db).getExperimental();
           if (experimental.enableStatusCards !== true) return;
@@ -1813,7 +1813,7 @@ async function startServerWithDatabaseTeardown(
           logger.error({ err }, "status-card scheduler tick failed");
         }));
 
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork(environmentCustomImages
           .cleanupExpiredSetupSessions()
           .then((result) => {
@@ -1825,7 +1825,7 @@ async function startServerWithDatabaseTeardown(
             logger.error({ err }, "environment customImage setup cleanup failed");
           }));
 
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         trackHeartbeatSchedulerWork(tools
           .sweepConnectionHealth()
           .then((swept) => {
@@ -1850,7 +1850,7 @@ async function startServerWithDatabaseTeardown(
         trackHeartbeatSchedulerWork(app.locals.toolGateway.sweepActionReviews().catch((err: unknown) => logger.error({ err }, "tool review recovery failed")));
         trackHeartbeatSchedulerWork(app.locals.toolGateway.cleanupExpiredSessions().catch((err: unknown) => logger.error({ err }, "gateway token cleanup failed")));
 
-        if (isIdleTaskDrainActive() || heartbeatSchedulerStopped) return;
+        if (isIdleTaskDrainActive() || isControllerDraining() || heartbeatSchedulerStopped) return;
         if (!(await heartbeat.resolveSchedulingSuppression()).suppressed) {
           // Periodically reap orphaned runs (5-min staleness threshold) and make sure
           // persisted queued work is still being driven forward.
@@ -2040,8 +2040,15 @@ async function startServerWithDatabaseTeardown(
     signal: "SIGINT" | "SIGTERM",
     exitProcess: boolean,
   ) => {
-    await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
+    beginControllerDrain();
+    // Bound all teardown, including telemetry/HTTP/DB hangs after turn drain.
+    // No adapter cancellation or replacement is authorized by this deadline.
+    const forceExit = exitProcess ? setTimeout(() => {
+      logger.error({ signal }, "controller shutdown deadline reached; exiting with unfinished work retained");
+      process.exit(1);
+    }, controllerDrainRemainingMs() + 10_000) : null;
     heartbeatSchedulerStopped = true;
+    await systemdNotify(["--stopping", `--status=Stopping after ${signal}`]);
     clearInterval(skillSourceSyncInterval);
     clearInterval(skillVersionRetentionInterval);
     clearTimeout(skillVersionRetentionStartup);
@@ -2057,46 +2064,20 @@ async function startServerWithDatabaseTeardown(
       heartbeatSchedulerInterval = null;
     }
 
-    const heartbeatShutdown = await coordinateHeartbeatSchedulerShutdown({
-      signal,
-      prepareHotRestartShutdown,
-      waitForHeartbeatSchedulerIdle,
+    // PER-282: admitted turns finish within the preStop deadline; shutdown
+    // never interrupts or replays them. HTTP and the pool stay up meanwhile.
+    const completed = await completeControllerTurnsForShutdown({
+      signal, waitForSchedulerIdle: waitForHeartbeatSchedulerIdle,
+      drain: drainHeartbeatExecutionFinalizers, log: logger,
     });
-    const skipHeartbeatDrain = heartbeatShutdown.hotRestart?.skipDrain === true;
-    const selectiveDrainRunIds = heartbeatShutdown.hotRestart?.drainRunIds ?? null;
-    if (skipHeartbeatDrain) {
-      logger.info(
-        { signal, hotRestart: heartbeatShutdown.hotRestart },
-        "hot-restart shutdown prepared after scheduler quiescence; skipping graceful run drain",
-      );
-    } else if (heartbeatShutdown.preparationError) {
-      logger.error(
-        { err: heartbeatShutdown.preparationError, signal },
-        "hot-restart shutdown preparation failed; falling back to graceful heartbeat run drain",
-      );
+    if (completed !== "drained") {
+      logger.warn({ signal }, "controller drain deadline reached; unfinished runs retained, no replacement dispatched");
     }
 
     const telemetryClient = getTelemetryClient();
     if (telemetryClient) {
       telemetryClient.stop();
       await telemetryClient.flush();
-    }
-
-    if (!skipHeartbeatDrain && drainHeartbeatRunsForShutdown) {
-      try {
-        const drain = await drainHeartbeatRunsForShutdown(signal, selectiveDrainRunIds);
-        logger.info({ signal, drain }, "graceful heartbeat run drain complete");
-      } catch (err) {
-        logger.error({ err, signal }, "graceful heartbeat run drain failed");
-      }
-    }
-
-    if (!skipHeartbeatDrain) {
-      await drainRunExecutionFinalizersForShutdown({
-        signal,
-        drain: drainHeartbeatExecutionFinalizers,
-        log: logger,
-      });
     }
 
     // Whatever the drain did not finalize (timed-out runs, the hot-restart
@@ -2150,6 +2131,7 @@ async function startServerWithDatabaseTeardown(
       });
     }
 
+    if (forceExit) clearTimeout(forceExit);
     if (exitProcess) process.exit(0);
   };
 
