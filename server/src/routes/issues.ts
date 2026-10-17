@@ -9090,6 +9090,10 @@ export function issueRoutes(
 
       const actor = getActorInfo(req);
       const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
+      // Identity is over the exact whole note, never its redacted audit presentation.
+      const resolutionNoteDigest = resolutionNote
+        ? createHash("sha256").update(resolutionNote).digest("hex")
+        : null;
       const postCommitActivityPublications: ActivityPublication[] = [];
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const result = await db.transaction(async (tx) => {
@@ -9165,7 +9169,7 @@ export function issueRoutes(
                   eq(activityLog.entityId, lockedIssue.id),
                   inArray(activityLog.action, ["issue.recovery_action_resolved", "issue.recovery_action_note_added"]),
                   eq(sql`${activityLog.details}->>'recoveryActionId'`, settled.id),
-                  eq(sql`${activityLog.details}->>'resolutionNote'`, resolutionNote),
+                  eq(sql`${activityLog.details}->>'resolutionNoteDigest'`, resolutionNoteDigest),
                 )).limit(1);
                 if (settled.resolutionNote === resolutionNote || recordedNote) {
                   return { issue: lockedIssue, recoveryAction: settled, replayed: true };
@@ -9189,8 +9193,8 @@ export function issueRoutes(
                   companyId: lockedIssue.companyId, actorType: actor.actorType, actorId: actor.actorId,
                   agentId: actor.agentId, runId: actor.runId, action: "issue.recovery_action_note_added",
                   entityType: "issue", entityId: lockedIssue.id,
-                  details: { recoveryActionId: settled.id, sourceIssueStatus, outcome, resolutionNote },
-                });
+                  details: { recoveryActionId: settled.id, sourceIssueStatus, outcome, resolutionNote, resolutionNoteDigest },
+                }, postCommitActivityPublications);
                 return { issue: lockedIssue, recoveryAction: annotated, replayed: true };
               }
               return {
@@ -9548,8 +9552,32 @@ export function issueRoutes(
         );
         if (!recoveryAction) throw notFound("Active recovery action not found");
 
+        // Persist whole-note identity with the disposition, before fallible post-commit work.
+        await logActivity(tx as unknown as Db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action: "issue.recovery_action_resolved",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            recoveryActionId: recoveryAction.id,
+            recoveryActionStatus: recoveryAction.status,
+            outcome: recoveryAction.outcome,
+            sourceIssueStatus: sourceIssueStatus ?? null,
+            resolutionNote: recoveryAction.resolutionNote,
+            resolutionNoteDigest,
+          },
+        }, postCommitActivityPublications);
+
         return { issue, recoveryAction, chatRetry };
       });
+      for (const publication of postCommitActivityPublications)
+        publishActivity(publication);
       if (result.replayed) {
         res.json({
           issue: result.issue,
@@ -9557,8 +9585,6 @@ export function issueRoutes(
         });
         return;
       }
-      for (const publication of postCommitActivityPublications)
-        publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
 
       await routinesSvc.syncRunStatusForIssue(result.issue.id);
@@ -9586,25 +9612,7 @@ export function issueRoutes(
         });
       }
 
-      await logActivity(db, {
-        companyId: result.issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "issue.recovery_action_resolved",
-        entityType: "issue",
-        entityId: result.issue.id,
-        details: {
-          identifier: result.issue.identifier,
-          recoveryActionId: result.recoveryAction.id,
-          recoveryActionStatus: result.recoveryAction.status,
-          outcome: result.recoveryAction.outcome,
-          sourceIssueStatus: sourceIssueStatus ?? null,
-          resolutionNote: result.recoveryAction.resolutionNote,
-        },
-      });
+
 
       if (result.chatRetry) {
         // The intent is committed with recovery resolution. A lost immediate
