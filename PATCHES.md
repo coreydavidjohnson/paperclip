@@ -676,6 +676,20 @@ into the current fork image or supplied by a fork migration.
   ways. private-json-etag.test.ts covers 304, changed feed and authorization.
   issue-refresh-budget.test.ts guards interval settings. Live request counts,
   deployment and integration tests remain required, not implied by unit counts.
+- Follow-up 2026-10-17: initial/reconnected sockets, return-to-visible and
+  disconnected polling bypassed the event batch via all-active invalidation.
+  Transport overflow can repeatedly reconnect a focused page. Route these
+  missed-event repairs through one helper: details reconcile immediately,
+  company issue/attention projections share the event ten-second budget.
+  Explicit mutation refreshes remain untouched. No stream payload is dropped.
+- Upstream rechecked: master `190080642ee4ea33336b6cd97b608b6c0534bddb`
+  and release `v2026.1012.0` retain all three all-active bypasses; no equivalent.
+- Regressions: reconnect-only repair and mixed reconnect/live-event repairs
+  each produce six company projection invalidations per minute, with sixty
+  immediate detail repairs. Source wiring covers all three lifecycle paths.
+  Hidden/dispose/visible reuse and in-flight mutation refresh regressions also
+  pass. Budgeted list flushes preserve in-flight requests (cancelRefetch:false).
+  These are deterministic invalidations, not live browser request acceptance.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
 
