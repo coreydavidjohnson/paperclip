@@ -36,7 +36,7 @@ async function click(label: string) {
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 }
 
-function render(onAssigneeChange: (value: string) => void, onSettingsChange: (settings: ComposerRunSettings) => void, useCatalog = false, props: Partial<ComponentProps<typeof ComposerRunSettingsPicker>> = {}, insideDialog = false, selectedAgent = agent, settings: ComposerRunSettings = { model: "gpt-6-sol", effort: "high", fast: true }) {
+function render(onAssigneeChange: (value: string) => void, onSettingsChange: (settings: ComposerRunSettings | null) => void, useCatalog = false, props: Partial<ComponentProps<typeof ComposerRunSettingsPicker>> = {}, insideDialog = false, selectedAgent = agent, settings: ComposerRunSettings = { model: "gpt-6-sol", effort: "high", fast: true }) {
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
