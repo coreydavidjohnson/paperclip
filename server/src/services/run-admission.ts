@@ -62,6 +62,16 @@ export async function suspendOmnigentAdmissions(db: Db,
   for (const candidate of candidates) {
     const quiet = Math.max(candidate.startedAt?.getTime() ?? Date.now(), candidate.lastOutputAt?.getTime() ?? 0) <= Date.now() - 7200000;
     const reason = quiet ? await probe(candidate).catch(() => null) : null;
+    // Without a probe reason only a finishing issue can qualify. Check that
+    // cheaply first: the guarded UPDATE below detoasts run JSON and ran for
+    // every observer on every tick while matching ~1 % of them (PER-963).
+    // The UPDATE predicate stays authoritative.
+    if (!reason) {
+      const [issue] = await db.select({ status: issues.status }).from(issues).where(and(
+        sql`${issues.id}::text = ${String(candidate.contextSnapshot?.issueId ?? "")}`,
+        eq(issues.companyId, candidate.companyId)));
+      if (!issue || !["blocked", "in_review", "done"].includes(issue.status)) continue;
+    }
     const saved = await db.update(heartbeatRuns).set({
     runnerProfileJson: sql`coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) ||
       jsonb_build_object('omnigentAdmissionSuspension', jsonb_build_object(
