@@ -1699,6 +1699,9 @@ describe("activity toast attribution", () => {
     const toast = build(new QueryClient(), "company", { ...payload, actorType: "system", actorName: undefined }, { userId: "user-1", agentId: null });
     expect(toast?.title).toBe("System created Task task-1");
     expect(toast?.actor).toBeUndefined();
+  });
+});
+
 describe("global UI hints", () => {
   it("refreshes plugins without leaking company events or dispatching global hints to company components", () => {
     const client = new QueryClient();
