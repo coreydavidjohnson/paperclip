@@ -146,6 +146,52 @@ RUN pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
 
+# Luma fork gate (PATCHES.md): every carried patch's regression suite and the
+# full workspace typecheck must pass before the production image is assembled.
+FROM build AS luma-patch-tests
+ENV NODE_OPTIONS=--max-old-space-size=8192
+RUN pnpm -r typecheck
+RUN pnpm check:token-gates
+RUN pnpm --filter @paperclipai/ui exec vitest run \
+    src/components/task-chat/composer-run-settings.test.ts \
+    src/components/task-chat/ComposerRunSettingsPicker.test.tsx \
+    src/context/FileViewerContext.test.ts \
+    src/api/issues.test.ts \
+    src/lib/query-invalidation-batcher.test.ts \
+    src/lib/issue-refresh-budget.test.ts \
+    src/context/LiveUpdatesProvider.test.ts
+RUN pnpm --filter @paperclipai/adapter-utils exec vitest run src/server-utils.test.ts
+RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home \
+  && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
+    --hookTimeout=120000 --testTimeout=60000 \
+    src/controller-drain.test.ts \
+    src/services/heartbeat/queue.test.ts \
+    src/__tests__/heartbeat-process-recovery.test.ts \
+    src/__tests__/live-events-transport.test.ts \
+    src/__tests__/live-events-ws.test.ts \
+    src/__tests__/home-lab-delegation.test.ts \
+    src/__tests__/home-lab-delegation-db.test.ts \
+    src/__tests__/issue-assignee-invokability-routes.test.ts \
+    src/__tests__/run-history-query.test.ts \
+    src/__tests__/run-history-query-db.test.ts \
+    src/__tests__/activity-service.test.ts \
+    src/__tests__/heartbeat-list.test.ts \
+    src/__tests__/attention-service.test.ts \
+    src/__tests__/issue-blocker-attention.test.ts \
+    src/__tests__/issue-review-attention.test.ts \
+    src/__tests__/decision-queues-routes.test.ts \
+    src/__tests__/authorization-service.test.ts \
+    src/__tests__/decision-retention-service.test.ts \
+    src/__tests__/recovery-run-query-db.test.ts \
+    src/__tests__/issue-recovery-actions.test.ts \
+    src/__tests__/issue-list-metadata-routes.test.ts \
+    src/__tests__/private-json-etag.test.ts \
+    src/lib/async-ttl-cache.test.ts \
+    src/services/company-skills-cache.test.ts \
+    src/__tests__/company-skills-routes.test.ts \
+    src/__tests__/adapter-model-refresh-routes.test.ts \
+  && chown -R root:root /app
+
 # Remote OpenCode and ACPX runs require a controller-owned provider pack to
 # verify the sandbox installation or stage matching assets. Ship it in the
 # standard image so downstream Cloud compositions inherit the same artifacts.
@@ -184,7 +230,7 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-COPY --chown=node:node --from=build /app /app
+COPY --chown=node:node --from=luma-patch-tests /app /app
 
 COPY --from=runner-provider-pack /provider-pack /opt/paperclip-runner/provider-pack
 # Managed deployments can remap node's UID at startup. This immutable pack
