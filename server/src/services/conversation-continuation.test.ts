@@ -15,7 +15,7 @@ describePostgres("execution identity query contracts", () => {
   let db: Db;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("execution-identity-"); db = createDb(database.connectionString); }, 120_000);
   afterAll(async () => { await db?.$client.end({ timeout: 0 }); await database?.cleanup(); });
-  async function fixture(issueId = randomUUID()) {
+  async function fixture(issueId: string = randomUUID()) {
     const companyId = randomUUID(), agentId = randomUUID(), otherIssueId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Identity", issuePrefix: `I${companyId.slice(0, 7)}` });
     await db.insert(agents).values({ id: agentId, companyId, name: "Fixture", adapterType: "codex_local" });
