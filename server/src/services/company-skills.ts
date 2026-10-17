@@ -6217,6 +6217,8 @@ export function companySkillService(db: Db) {
     database: DbOrTransaction = db,
   ): Promise<CompanySkill[]> {
     const out: CompanySkill[] = [];
+    // Reuse only within this import: the next refresh must repair external edits.
+    const bundledFolders = new Map<string, Awaited<ReturnType<typeof folderSvc.ensureBundledCategory>>>();
     for (const skill of imported) {
       assertImportedSkillKeyAllowed(skill);
       assertImportedSkillSourceAllowed(skill);
@@ -6244,9 +6246,11 @@ export function companySkillService(db: Db) {
       const parsed = parseFrontmatterMarkdown(skill.markdown);
       const storeMetadata = readSkillStoreMetadata(parsed.frontmatter, metadata);
       const bundledCategory = paperclipBundledFolderCategory(skill.key, incomingMeta);
-      const bundledFolder = bundledCategory
-        ? await folderSvc.ensureBundledCategory(companyId, bundledFolderLabel(bundledCategory))
-        : null;
+      let bundledFolder = bundledCategory ? bundledFolders.get(bundledCategory) ?? null : null;
+      if (bundledCategory && !bundledFolder) {
+        bundledFolder = await folderSvc.ensureBundledCategory(companyId, bundledFolderLabel(bundledCategory));
+        bundledFolders.set(bundledCategory, bundledFolder);
+      }
       const projectId = asString(incomingMeta.projectId);
       const projectName = asString(incomingMeta.projectName);
       const projectFolder = !existing && incomingKind === "project_scan" && projectId && projectName
