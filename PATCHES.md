@@ -717,3 +717,11 @@ into the current fork image or supplied by a fork migration.
   d0a35ab5afd3e8d8c5f07addc868e0723f6739a0: expected 200, got 409. Initial GREEN
   passed; full 76-test recovery suite passed at e26dda62d9d89cb0a32907a9473af8fd82b7511b.
   Final exact-source integration and live delivery remain separate gates.
+
+## Indexed execution identity queries (PER-912)
+
+- Adopt upstream bd64eb27b060cd54d3c3b8cbbee06aadfe0ae024 (#16291), inspected on master 564d4e1bce10b4e18f6daff09ebd4690e686872d. Latest release v2026.1012.0 exists; a whole-version upgrade is outside this independent fix and risks replacing combined private behavior.
+- Apply upstream canonical lowercase UUID SQL guard, indexed status/recovery joins and split native/legacy ownership predicates. No migration, index, permission, delivery CAS, hold or replay change. Resolve older-base import/doc context only; do not import unrelated workspace-recovery behavior.
+- Preserve PER-894 no-continuation delivery and dependency locks plus combined admission/UI/payload/cache history.
+- Regression uses real disposable PostgreSQL with malformed/noncanonical/missing/foreign bindings, native precedence, existing status-delivery/recovery suites and 192KiB contexts with 1000 same-company issues. The benchmark disables hash/merge joins transaction-locally to reproduce the observed live nested-loop shape; its timings are not production/API/browser latency claims.
+- Retire the backport when the next complete upstream upgrade includes this commit and passes the private contracts.
