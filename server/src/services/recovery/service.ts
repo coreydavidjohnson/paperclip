@@ -1343,6 +1343,30 @@ export function recoveryService(
     }
   }
 
+  // Remove only explicitly typed routing edges. Real prerequisites, human
+  // decisions and side-effect replay gates remain owned by existing admission.
+  async function removeRoutingChildBlockers(issue: typeof issues.$inferSelect) {
+    await db.transaction(async tx => {
+      await tx.select({id: issues.id}).from(issues).where(and(
+        eq(issues.companyId, issue.companyId), eq(issues.id, issue.id),
+      )).for("update");
+      const children = await tx.select({id: issues.id}).from(issues).where(and(
+        eq(issues.companyId, issue.companyId), eq(issues.parentId, issue.id),
+        inArray(issues.originKind, ["routing_child", "coordination_child"]),
+      ));
+      if (!children.length) return;
+      const removed = await tx.delete(issueRelations).where(and(
+        eq(issueRelations.companyId, issue.companyId), eq(issueRelations.relatedIssueId, issue.id),
+        eq(issueRelations.type, "blocks"), inArray(issueRelations.issueId, children.map(child => child.id)),
+      )).returning({id: issueRelations.issueId});
+      if (removed.length) await logActivity(tx as unknown as Db, {
+        companyId: issue.companyId, actorType: "system", actorId: "recovery", agentId: null,
+        action: "issue.routing_child_blocker_removed", entityType: "issue", entityId: issue.id,
+        details: {routingChildIds: removed.map(child => child.id)},
+      });
+    });
+  }
+
   async function hasPersistedDurableWaitPath(
     issue: typeof issues.$inferSelect,
     latestRun: LatestIssueRun,
@@ -2838,6 +2862,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          notInArray(issues.originKind, ["routing_child", "coordination_child"]),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
         ),
@@ -2853,6 +2878,7 @@ export function recoveryService(
         and(
           eq(issues.companyId, issue.companyId),
           eq(issues.parentId, issue.id),
+          notInArray(issues.originKind, ["routing_child", "coordination_child"]),
           ...(sameWorkspaceOnly ? [eq(issues.projectWorkspaceId, issue.projectWorkspaceId!)] : []),
           visibleIssueCondition(),
           notInArray(issues.status, ["done", "cancelled"]),
@@ -3101,6 +3127,11 @@ export function recoveryService(
     const sourceRun = input.latestRun?.id ? await db.select(retryAccountingRunSelect)
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.latestRun.id), eq(heartbeatRuns.companyId, input.issue.companyId)))
       .limit(1).then(rows => rows[0]) : null;
+    const routingParentHandback = Boolean(await db.select({id: issues.id}).from(issues).where(and(
+      eq(issues.companyId, input.issue.companyId), eq(issues.parentId, input.issue.id),
+      inArray(issues.originKind, ["routing_child", "coordination_child"]),
+    )).limit(1).then(rows => rows[0]));
+    const wakeReason = routingParentHandback ? "issue_blockers_resolved" : ISSUE_DISPOSITION_REPAIR_RETRY_REASON;
     const timing = dispositionRepairDelayMs(input.attempt, input.fingerprint);
     const now = new Date();
     const retryAt = new Date(now.getTime() + timing.delayMs);
@@ -3109,7 +3140,8 @@ export function recoveryService(
       {
         issueId: input.issue.id,
         taskId: input.issue.id,
-        wakeReason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
+        wakeReason,
+        ...(routingParentHandback ? {routingParentHandback: true} : {}),
         retryReason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
         source: "issue.deliberate_wait_disposition_repair",
         executionRetryAccounting: executionRetryAccounting(sourceRun ?? {}),
@@ -3155,7 +3187,7 @@ export function recoveryService(
           const enqueuedRun = await deps.enqueueWakeup(agentId, {
             source: "automation",
             triggerDetail: "system",
-            reason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
+            reason: wakeReason,
             idempotencyKey,
             payload: withRecoveryContext(
               {
@@ -3184,7 +3216,7 @@ export function recoveryService(
                 agentId,
                 source: "automation",
                 triggerDetail: "system",
-                reason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
+                reason: wakeReason,
                 payload: withRecoveryContext(
                   {
                     issueId: input.issue.id,
@@ -3681,8 +3713,13 @@ export function recoveryService(
       parseObject(context.paperclipWorkspace).mode === "shared_workspace" ? healthyOpenChildIssues(issue, true) : Promise.resolve([]),
     ]);
     const ownsRepair = active?.kind === "deliberate_wait_without_target" && active.ownerType === "agent";
+    // A typed routing hand-back is not a durable prerequisite. Preserve all
+    // other blocked dispositions and every independently persisted wait gate.
+    const routingHandback = issue.status === "blocked" && Boolean(await db.select({id: issues.id})
+      .from(issues).where(and(eq(issues.companyId, issue.companyId), eq(issues.parentId, issue.id),
+        inArray(issues.originKind, ["routing_child", "coordination_child"]))).limit(1).then(rows => rows[0]));
     return decideLegacyContinuation({
-      run, issue, agent, episode,
+      run, issue: routingHandback ? {...issue, status: "in_progress"} : issue, agent, episode,
       gates: {
         stopped: stop.kind !== "clear" || isOperatorCancelledRun(run, run.agentId),
         paused: pause, budgetBlocked: budget,
@@ -3752,6 +3789,7 @@ export function recoveryService(
         ? legacyDispositionEpisode(latestRun) : undefined
     );
     const maxAttempts = episode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS;
+    await removeRoutingChildBlockers(current);
     const dependencyWait = episode ? null : await resolveContinuationWaitingOnReview(current);
     if (dependencyWait) {
       await resolveDispositionRepairActionAsCovered(
