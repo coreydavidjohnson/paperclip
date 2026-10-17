@@ -1690,6 +1690,17 @@ export function attentionService(db: Db, serviceOptions: AttentionServiceOptions
               eq(heartbeatRuns.companyId, companyId),
               inArray(heartbeatRuns.agentId, failedAgentIds),
               gt(heartbeatRuns.createdAt, oldestFailedRunCreatedAt),
+              // Only runs that can match a failed run's issue key matter. An
+              // agent-wide scan read every newer run's context (630 ms live,
+              // PER-963); the issue-key index serves this in a few ms. A failed
+              // run without an issue key keeps the original agent-wide read.
+              failedIssueIds.some((id) => id === null)
+                ? undefined
+                : sql`((${heartbeatRuns.contextSnapshot} ->> 'issueId') in (${sql.join(
+                    [...new Set(failedIssueIds as string[])].map((id) => sql`${id}`), sql`, `)})
+                  or ((${heartbeatRuns.contextSnapshot} ->> 'issueId') is null
+                    and (${heartbeatRuns.contextSnapshot} ->> 'taskId') in (${sql.join(
+                    [...new Set(failedIssueIds as string[])].map((id) => sql`${id}`), sql`, `)})))`,
             ))
           : Promise.resolve([]),
       ]);
