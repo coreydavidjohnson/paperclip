@@ -114,6 +114,48 @@ const support = await getEmbeddedPostgresTestSupport();
     } finally { watch.stop(); vi.useRealTimers(); }
   });
 
+  it("renews on its own connection while every shared pool connection is blocked", async () => {
+    const run = await seed();
+    const pooled = createDb(database.connectionString, { maxConnections: 1 });
+    const holder = createDb(database.connectionString);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const holding = holder.transaction(async (tx) => {
+      await tx.execute(sql`select id from companies where id = ${run.companyId} for update`);
+      locked();
+      await released;
+    });
+    await isLocked;
+    // The only pool connection now waits on a row lock, as in a lock convoy.
+    // Drizzle queries are lazy: Promise.resolve() sends this one now.
+    const starved = Promise.resolve(pooled.execute(sql`select id from companies where id = ${run.companyId} for update`));
+    for (let i = 0; i < 100; i += 1) {
+      const waiting = await db.execute(sql`select 1 from pg_stat_activity where wait_event_type = 'Lock' and query like '%from companies where id =%for update%'`);
+      if ((waiting as unknown as unknown[]).length > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    const controller = new AbortController();
+    const watch = watchLegacyControllerLease(pooled, run, controller);
+    try {
+      const startedAt = Date.now();
+      await Promise.race([watch.assertOwned("dispatching"),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("renewal queued behind the blocked pool")), 5_000))]);
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect(controller.signal.aborted).toBe(false);
+      const [saved] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+      expect(saved.executionStage).toBe("dispatching");
+    } finally {
+      watch.stop();
+      release();
+      await holding;
+      await starved;
+      await holder.$client.end({ timeout: 1 });
+      await pooled.$client.end({ timeout: 1 });
+    }
+  }, 20_000);
+
   it("leaves native controller ownership to the native coordinator", () => {
     expect(legacyControllerClaim("native")).toEqual({});
   });
