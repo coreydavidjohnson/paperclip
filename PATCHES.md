@@ -723,3 +723,57 @@ into the current fork image or supplied by a fork migration.
 - Preserve PER-894 no-continuation delivery and dependency locks plus combined admission/UI/payload/cache history.
 - Regression uses real disposable PostgreSQL with malformed/noncanonical/missing/foreign bindings, native precedence, existing status-delivery/recovery suites and 192KiB contexts with 1000 same-company issues. The benchmark disables hash/merge joins transaction-locally to reproduce the observed live nested-loop shape; its timings are not production/API/browser latency claims.
 - Retire the backport when the next complete upstream upgrade includes this commit and passes the private contracts.
+
+## Atomic status and exhausted-disposition repair (PER-968)
+
+- Upstream checked: master 4415665d67b16ffefbe4519c4bdd521f37bb87b9 lacks
+  the common status refusal and guarded board contract. Released upstream
+  v2026.1012.0 is the newest tag; this patch stays on the supplied combined
+  fork base 5e83e54912d227e126382b2008756312a42d1511, not a whole-release upgrade.
+- Root cause: status committed before best-effort recovery revalidation. A
+  board escalation captured while blocked could survive a later status change
+  and reject both the old-source hand-back and ordinary resume.
+- Common issue update now refuses non-blocked status changes while an active
+  board escalation exists, before relations, cards or run locks change. The
+  existing resolve transaction settles the exact action before its status
+  update; failure rolls both back. Same-status comments do not silently clear
+  board escalation. No generic recovery clear or temporary blocker.
+- Extend the existing POST /api/issues/:id/recovery-actions/resolve contract:
+  authenticated board actor; actionId UUID; outcome=restored;
+  sourceIssueStatus=todo; nonempty resolutionNote (short normal instruction);
+  expectedSource={status,statusVersion,updatedAt,assigneeAgentId};
+  expectedAction={fingerprint,updatedAt}. Both snapshots are required together.
+  statusVersion is a nonnegative integer; timestamps are ISO-8601 datetimes;
+  assigneeAgentId is a UUID. Current source status must be blocked, todo or
+  in_progress. Match every supplied source/action field under source-then-action
+  locks. Permit only deliberate_wait_without_target, board owner,
+  board_escalation, terminalReason=unchanged_source_state_exhausted.
+  Reject replacement actions, dependencies, pending questions/confirmations,
+  approvals/review stages, pause/budget gates, active execution or owner changes.
+- Normal continuation uses existing issue_commented / automation / system
+  admission, with source issue.comment, saved authenticated board actor and
+  only the short resolutionNote as paperclipAgentMessage. No recoveryActionId,
+  forceFreshSession, reset, rotation or alternate saved binding. Existing
+  agentTaskSessions supplies sessionIdBefore unchanged. The action transaction
+  persists pending delivery; periodic execution-control sweeps retry it.
+- Admission deduplicates guarded-status-repair:<actionId> under the source
+  lock, including lost acknowledgements after the prior run is terminal.
+  Delivered means admitted, not provider success; ordinary native run recovery
+  owns subsequent failure. Never replay unknown provider effects. Newly active
+  execution/holds defer in this same outbox without another queued receipt.
+  Attempted outbox rows rotate updatedAt so 25 blocked rows cannot starve
+  younger repairs. A newer source status/version/owner supersedes undelivered
+  intent without a wake. Exact unchanged request replay returns 200; any new
+  source/action decision returns 409 rather than overwriting it.
+- Tests: issue-recovery-actions.test.ts covers the third trap, board comment
+  and native in-run refusal, exclusion snapshots, action-row lock race,
+  unchanged repeats, lost acknowledgement, concurrent sweep delivery, normal
+  same-session payload, newer-decision supersession and batch fairness.
+  Review findings for starvation and deferred duplication were reproduced
+  failing then passing against real disposable PostgreSQL. No test memory.
+- No migration, dependency, identity, model, grant or external-chat changes.
+  Parent PER-631 retains sweep detector/prompt integration; agent comments do
+  not independently authorize expanding this native atomicity patch.
+- Retire when a released upstream equivalent passes the same atomicity,
+  exclusion, durable-delivery and same-session regressions. Exact image CI,
+  isolated staging and live acceptance remain required delivery gates.

@@ -26880,6 +26880,7 @@ export function heartbeatService(
       }
       payload = { ...payload, manualUserWake: true };
     }
+    const guardedStatusRepairId = readNonEmptyString(contextSnapshot.guardedStatusRepairId);
     const executionReconciliationWake =
       contextSnapshot.source === "execution.reconciled" ||
       opts.idempotencyKey?.startsWith("execution-reconciliation:") === true;
@@ -27670,6 +27671,65 @@ export function heartbeatService(
               finishedAt: new Date(),
             });
             return { kind: "skipped" as const };
+          }
+
+          if (guardedStatusRepairId) {
+            const [action] = await tx.select().from(issueRecoveryActions).where(and(
+              eq(issueRecoveryActions.companyId, issue.companyId),
+              eq(issueRecoveryActions.sourceIssueId, issue.id),
+              eq(issueRecoveryActions.id, guardedStatusRepairId),
+            )).for("update");
+            const receipt = parseObject(action?.evidence.guardedStatusRepair);
+            if (!action || action.status !== "resolved" ||
+                action.kind !== "deliberate_wait_without_target" ||
+                action.returnOwnerAgentId !== agentId ||
+                action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+                reason !== "issue_commented" || source !== "automation" ||
+                opts.idempotencyKey !== `guarded-status-repair:${action.id}` ||
+                opts.requestedByActorType !== receipt.actorType || opts.requestedByActorId !== receipt.actorId ||
+                !["pending", "delivered"].includes(String(receipt.delivery))) return { kind: "skipped" as const };
+            // The source lock serializes admission and lost-ack replay. An old
+            // queue receipt is not permission to dispatch a second turn.
+            const [prior] = await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+              ne(agentWakeupRequests.status, "skipped"),
+            )).orderBy(asc(agentWakeupRequests.requestedAt)).limit(1);
+            if (prior?.runId) {
+              const [run] = await tx.select().from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.id, prior.runId),
+                eq(heartbeatRuns.agentId, agentId),
+                sql`${heartbeatRuns.contextSnapshot}->>'guardedStatusRepairId' = ${action.id}`,
+              ));
+              return run ? { kind: "replayed" as const, run } : { kind: "deferred" as const };
+            }
+            if (!prior && receipt.delivery === "pending" && (issue.status !== "todo" ||
+                issue.statusVersion !== receipt.statusVersion || issue.assigneeAgentId !== agentId)) {
+              await tx.update(issueRecoveryActions).set({
+                evidence: sql`jsonb_set(${issueRecoveryActions.evidence}, '{guardedStatusRepair,delivery}', '"superseded"'::jsonb)`,
+              }).where(eq(issueRecoveryActions.id, action.id));
+              return { kind: "skipped" as const };
+            }
+            if (prior || receipt.delivery !== "pending") {
+              return { kind: "deferred" as const };
+            }
+            // The resolved action already owns durable delivery. Do not create
+            // a second deferred receipt behind newly admitted work or holds.
+            const blocker = await getExecutionBlocker(tx as unknown as Db, issue.companyId, issue.id);
+            if (blocker) return { kind: "deferred" as const };
+            const [busy] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+              or(eq(heartbeatRuns.nativeIssueId, issue.id),
+                sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+                issue.executionRunId ? eq(heartbeatRuns.id, issue.executionRunId) : undefined),
+            )).limit(1);
+            if (busy) return { kind: "deferred" as const };
+            const [other] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+              eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
+              inArray(issueRecoveryActions.status, ["active", "escalated"]),
+            )).limit(1);
+            if (other) return { kind: "deferred" as const };
           }
 
           if (opts.failedRunId) {

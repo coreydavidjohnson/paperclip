@@ -9,6 +9,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest
 import {
   agents,
   agentRuntimeState,
+  agentTaskSessions,
+  approvals,
+  issueApprovals,
   authUsers,
   agentWakeupRequests,
   activityLog,
@@ -34,6 +37,8 @@ import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
+import { deliverGuardedStatusRepairs } from "../services/guarded-status-repair.js";
+import { issueService } from "../services/issues.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
@@ -154,6 +159,9 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(issueComments);
     await db.delete(environmentLeases);
     await db.delete(activityLog);
+    await db.delete(agentTaskSessions);
+    await db.delete(issueApprovals);
+    await db.delete(approvals);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -2268,6 +2276,267 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.update(issueThreadInteractions).set({ status: "resolved", resolvedAt: new Date() }).where(eq(issueThreadInteractions.id, interaction!.id));
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  async function seedGuardedRepair() {
+    const fixture = await seedCompany();
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId: fixture.companyId, sourceIssueId: fixture.sourceIssueId,
+      kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: fixture.coderId, cause: "deliberate_wait_without_target",
+      fingerprint: "disposition:guarded", evidence: { terminalReason: "unchanged_source_state_exhausted" },
+      nextAction: "Choose a disposition.", wakePolicy: { type: "board_escalation" },
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, fixture.sourceIssueId));
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo",
+      resolutionNote: "Continue the task in this existing session.",
+      expectedSource: { status: source.status, statusVersion: source.statusVersion, updatedAt: source.updatedAt.toISOString(), assigneeAgentId: fixture.coderId },
+      expectedAction: { fingerprint: action.fingerprint, updatedAt: action.updatedAt.toISOString() },
+    };
+    const wake = vi.fn(async () => null);
+    return { ...fixture, action, body, wake, app: createApp(undefined, { recoveryActionEnqueueWakeup: wake }) };
+  }
+
+  it.each(["source", "action", "owner", "dependency", "question", "confirmation", "execution", "approval", "replacement", "reconciliation"])("PER-968 refuses guarded repair after %s changes", async (change) => {
+    const f = await seedGuardedRepair();
+    if (change === "source") await db.update(issues).set({ title: "A newer decision", updatedAt: new Date(Date.now() + 1000) }).where(eq(issues.id, f.sourceIssueId));
+    if (change === "action") await db.update(issueRecoveryActions).set({ fingerprint: "new-identity" }).where(eq(issueRecoveryActions.id, f.action.id));
+    if (change === "owner") await db.update(issues).set({ assigneeAgentId: f.managerId }).where(eq(issues.id, f.sourceIssueId));
+    if (change === "dependency") {
+      const blockerId = randomUUID();
+      await db.insert(issues).values({ id: blockerId, companyId: f.companyId, title: "Real prerequisite", status: "todo" });
+      await db.insert(issueRelations).values({ companyId: f.companyId, issueId: blockerId, relatedIssueId: f.sourceIssueId, type: "blocks" });
+    }
+    if (["question", "confirmation"].includes(change)) await db.insert(issueThreadInteractions).values({
+      companyId: f.companyId, issueId: f.sourceIssueId, kind: change === "question" ? "ask_user_questions" : "request_confirmation", status: "pending",
+      payload: change === "question" ? { version: 1, questions: [] } : { version: 1, question: "Approve?" },
+    });
+    if (change === "approval") {
+      const [approval] = await db.insert(approvals).values({ companyId: f.companyId, type: "approve_plan", status: "pending", payload: {} }).returning();
+      await db.insert(issueApprovals).values({ companyId: f.companyId, issueId: f.sourceIssueId, approvalId: approval.id });
+    }
+    if (change === "execution") await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.coderId, status: "running", nativeIssueId: f.sourceIssueId });
+    if (change === "replacement") {
+      await db.update(issueRecoveryActions).set({ status: "cancelled" }).where(eq(issueRecoveryActions.id, f.action.id));
+      await issueRecoveryActionService(db).upsertSourceScoped({ companyId: f.companyId, sourceIssueId: f.sourceIssueId, kind: "workspace_validation", cause: "workspace_validation_failed", fingerprint: "new-action", nextAction: "Repair workspace." });
+    }
+    if (change === "reconciliation") Object.assign(f.body, { executionReconciliation: { runId: randomUUID(), providerStopped: true, actionOutcome: "not_performed", outcomeEvidence: "No provider action was performed in the isolated fixture." } });
+    const before = await db.select().from(issues).where(eq(issues.id, f.sourceIssueId));
+    const beforeActions = await db.select().from(issueRecoveryActions);
+    const result = await request(f.app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body);
+    expect(result.status).toBe(409);
+    expect(await db.select().from(issues).where(eq(issues.id, f.sourceIssueId))).toEqual(before);
+    expect(await db.select().from(issueRecoveryActions)).toEqual(beforeActions);
+    expect(f.wake).not.toHaveBeenCalled();
+  });
+
+  it("PER-968 durably delivers NORMAL continuation once after a lost acknowledgement", async () => {
+    const f = await seedGuardedRepair();
+    const userId = randomUUID();
+    await db.insert(authUsers).values({ id: userId, name: "Fixture operator", email: `${userId}@example.test`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: userId }).where(eq(companies.id, f.companyId));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, f.coderId));
+    // Occupy the only provider slot, not this task. Real admission is safe,
+    // deterministic, and cannot invoke a provider or write test memory.
+    await seedHeartbeatRun({ companyId: f.companyId, agentId: f.coderId, runId: randomUUID(), status: "running" });
+    const app = createApp({ type: "board", source: "local_implicit", userId }, {
+      recoveryActionEnqueueWakeup: async () => { throw new Error("fixture before enqueue"); },
+    });
+    await request(app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body).expect(200);
+    const sessionId = "per968-existing-compression-lineage";
+    await db.insert(agentTaskSessions).values({ companyId: f.companyId, agentId: f.coderId,
+      adapterType: "codex_local", taskKey: f.sourceIssueId, sessionDisplayId: sessionId,
+      sessionParamsJson: { sessionId, cwd: "/tmp/per968-fixture" },
+    });
+    const sessionsBefore = await db.select().from(agentTaskSessions);
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    let successorId: string | undefined;
+    await deliverGuardedStatusRepairs(db, async (...args) => {
+      const run = await heartbeat.wakeup(...args);
+      expect(run).not.toBeNull();
+      successorId = run!.id;
+      throw new Error("fixture lost committed acknowledgement");
+    });
+    expect(successorId).toBeDefined();
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successorId!));
+    expect(run.sessionIdBefore).toBe(sessionId);
+    expect(await db.select().from(agentTaskSessions)).toEqual(sessionsBefore);
+    expect(run.contextSnapshot).not.toHaveProperty("forceFreshSession");
+    expect(run.contextSnapshot).not.toHaveProperty("recoveryActionId");
+    expect(run.contextSnapshot).toMatchObject({ wakeReason: "issue_commented", guardedStatusRepairId: f.action.id });
+    const payload = await buildPaperclipWakePayload({ db, companyId: f.companyId, contextSnapshot: run.contextSnapshot! });
+    expect(payload?.recovery).toBeNull();
+    expect(payload?.agentMessage?.text).toBe(f.body.resolutionNote);
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, successorId!));
+    await Promise.all([deliverGuardedStatusRepairs(db, heartbeat.wakeup), deliverGuardedStatusRepairs(db, heartbeat.wakeup)]);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${f.action.id}`));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].runId).toBe(successorId);
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.action.id));
+    expect(action.evidence.guardedStatusRepair).toMatchObject({ delivery: "delivered" });
+  });
+
+  it("PER-968 rotates deferred outbox batches without starving later repairs", async () => {
+    const fixtures = [];
+    for (let i = 0; i < 26; i++) {
+      const f = await seedGuardedRepair();
+      await request(f.app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body).expect(200);
+      fixtures.push(f);
+    }
+    const seen = new Set<string>();
+    const wake = vi.fn(async (_agentId: string, opts: any) => { seen.add(opts.contextSnapshot.guardedStatusRepairId); return null; });
+    await deliverGuardedStatusRepairs(db, wake);
+    expect(seen.size).toBe(25);
+    await deliverGuardedStatusRepairs(db, wake);
+    expect(seen.size).toBe(26);
+  });
+
+  it("PER-968 keeps outbox ownership when execution appears before delivery", async () => {
+    const f = await seedGuardedRepair();
+    await request(f.app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body).expect(200);
+    const userId = randomUUID();
+    await db.insert(authUsers).values({ id: userId, name: "Fixture operator", email: `${userId}@example.test`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: userId }).where(eq(companies.id, f.companyId));
+    await db.update(issueRecoveryActions).set({ evidence: sql`jsonb_set(${issueRecoveryActions.evidence}, '{guardedStatusRepair,actorId}', ${JSON.stringify(userId)}::jsonb)` }).where(eq(issueRecoveryActions.id, f.action.id));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, f.coderId));
+    await seedHeartbeatRun({ companyId: f.companyId, agentId: f.coderId, runId: randomUUID(), status: "running" });
+    const activeId = randomUUID();
+    await seedHeartbeatRun({ companyId: f.companyId, agentId: f.coderId, runId: activeId, status: "running", contextSnapshot: { issueId: f.sourceIssueId } });
+    await db.update(issues).set({ executionRunId: activeId }).where(eq(issues.id, f.sourceIssueId));
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await deliverGuardedStatusRepairs(db, heartbeat.wakeup);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${f.action.id}`))).toHaveLength(0);
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, activeId));
+    await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, f.sourceIssueId));
+    await deliverGuardedStatusRepairs(db, heartbeat.wakeup);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${f.action.id}`));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].runId).toBeTruthy();
+  });
+
+  it("PER-968 locks the current action before accepting an optimistic snapshot", async () => {
+    const f = await seedGuardedRepair();
+    let release!: () => void;
+    let entered!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const locked = new Promise<void>((r) => { entered = r; });
+    const writer = db.transaction(async (tx) => {
+      await tx.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.action.id)).for("update");
+      entered();
+      await held;
+      await tx.update(issueRecoveryActions).set({ fingerprint: "concurrent-identity", updatedAt: new Date() }).where(eq(issueRecoveryActions.id, f.action.id));
+    });
+    await locked;
+    const repair = request(f.app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body).then((r) => r);
+    release();
+    await writer;
+    expect((await repair).status).toBe(409);
+    expect((await db.select().from(issues).where(eq(issues.id, f.sourceIssueId)))[0].status).toBe("in_progress");
+    expect(await issueRecoveryActionService(db).getActiveForIssue(f.companyId, f.sourceIssueId)).toMatchObject({ id: f.action.id, fingerprint: "concurrent-identity" });
+    expect(f.wake).not.toHaveBeenCalled();
+  });
+
+  it("PER-968 refuses native in-run status delivery before touching its run or locks", async () => {
+    const f = await seedGuardedRepair();
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId: f.coderId,
+      runtimeMode: "native", nativeIssueId: f.sourceIssueId, status: "running" });
+    await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, f.sourceIssueId));
+    const before = await db.select().from(issues).where(eq(issues.id, f.sourceIssueId));
+    const beforeRuns = await db.select().from(heartbeatRuns);
+    await expect(issueService(db).update(f.sourceIssueId, { status: "done", actorAgentId: f.coderId, actorRunId: runId }))
+      .rejects.toMatchObject({ status: 409, details: { code: "recovery_status_resolution_required" } });
+    expect(await db.select().from(issues).where(eq(issues.id, f.sourceIssueId))).toEqual(before);
+    expect(await db.select().from(heartbeatRuns)).toEqual(beforeRuns);
+    expect(await issueRecoveryActionService(db).getActiveForIssue(f.companyId, f.sourceIssueId)).toMatchObject({ id: f.action.id });
+  });
+
+  it("PER-968 retires superseded delivery without waking the old source", async () => {
+    const f = await seedGuardedRepair();
+    await request(f.app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body).expect(200);
+    const userId = randomUUID();
+    await db.insert(authUsers).values({ id: userId, name: "Fixture operator", email: `${userId}@example.test`, emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: userId }).where(eq(companies.id, f.companyId));
+    await db.update(issueRecoveryActions).set({ evidence: sql`jsonb_set(${issueRecoveryActions.evidence}, '{guardedStatusRepair,actorId}', ${JSON.stringify(userId)}::jsonb)` }).where(eq(issueRecoveryActions.id, f.action.id));
+    await db.update(issues).set({ status: "blocked", statusVersion: sql`${issues.statusVersion} + 1` }).where(eq(issues.id, f.sourceIssueId));
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await deliverGuardedStatusRepairs(db, heartbeat.wakeup);
+    await deliverGuardedStatusRepairs(db, heartbeat.wakeup);
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, f.action.id));
+    expect(action.evidence.guardedStatusRepair).toMatchObject({ delivery: "superseded" });
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${f.action.id}`))).toHaveLength(0);
+  });
+
+  it("PER-968 refuses a stale replay after a newer source decision", async () => {
+    const f = await seedGuardedRepair();
+    await request(f.app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body).expect(200);
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.sourceIssueId));
+    await request(f.app).post(`/api/issues/${f.sourceIssueId}/recovery-actions/resolve`).send(f.body).expect(409);
+    expect(f.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("PER-968 refuses board comment/todo without partial status or comment", async () => {
+    const f = await seedGuardedRepair();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.sourceIssueId));
+    const before = await db.select().from(issues).where(eq(issues.id, f.sourceIssueId));
+    await request(f.app).patch(`/api/issues/${f.sourceIssueId}`).send({ status: "todo", comment: "Continue implementation." }).expect(409);
+    expect(await db.select().from(issues).where(eq(issues.id, f.sourceIssueId))).toEqual(before);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, f.sourceIssueId))).toHaveLength(0);
+  });
+
+  it("PER-968 same-status resume cannot silently clear board escalation", async () => {
+    const f = await seedGuardedRepair();
+    await request(f.app).patch(`/api/issues/${f.sourceIssueId}`).send({ resume: true, comment: "Continue implementation." });
+    expect(await issueRecoveryActionService(db).getActiveForIssue(f.companyId, f.sourceIssueId)).toMatchObject({ id: f.action.id });
+  });
+
+  it("PER-968 refuses a status change before it can strand a board escalation", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target",
+      fingerprint: "disposition:PER-968",
+      evidence: { terminalReason: "unchanged_source_state_exhausted" },
+      nextAction: "Review the outcome.", wakePolicy: { type: "board_escalation" },
+    });
+    await expect(issueService(db).update(sourceIssueId, { status: "in_progress" }))
+      .rejects.toMatchObject({ status: 409 });
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0].status).toBe("blocked");
+    expect(await issueRecoveryActionService(db).getActiveForIssue(companyId, sourceIssueId)).toMatchObject({ id: action.id });
+  });
+
+  it("PER-968 repairs the third trap with current source/action guards, once", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target",
+      fingerprint: "disposition:PER-968-third-trap",
+      evidence: { terminalReason: "unchanged_source_state_exhausted" },
+      nextAction: "Review the outcome.", wakePolicy: { type: "board_escalation" },
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const wake = vi.fn(async () => ({ id: randomUUID() }) as never);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo",
+      resolutionNote: "Continue the implementation and verification on this task.",
+      expectedSource: { status: source.status, statusVersion: source.statusVersion,
+        updatedAt: source.updatedAt.toISOString(), assigneeAgentId: coderId },
+      expectedAction: { fingerprint: action.fingerprint, updatedAt: action.updatedAt.toISOString() },
+    };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(wake).toHaveBeenCalledTimes(1);
+    const options = (wake.mock.calls as unknown as Array<[string, { contextSnapshot: Record<string, unknown> }]>)[0][1];
+    const payload = await buildPaperclipWakePayload({ db, companyId, contextSnapshot: options.contextSnapshot });
+    expect(payload?.recovery).toBeNull();
+    expect(payload?.agentMessage?.text).toBe(body.resolutionNote);
+    expect(options.contextSnapshot).not.toHaveProperty("forceFreshSession");
+    expect(wake.mock.calls[0]).toEqual([coderId, expect.objectContaining({
+      reason: "issue_commented", contextSnapshot: expect.objectContaining({ wakeReason: "issue_commented" }),
+    })]);
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toMatchObject({ status: "todo", assigneeAgentId: coderId });
+    expect(await issueRecoveryActionService(db).getActiveForIssue(companyId, sourceIssueId)).toBeNull();
   });
 
   it("retries an exhausted disposition action once, preserving the owner and audit trail", async () => {
