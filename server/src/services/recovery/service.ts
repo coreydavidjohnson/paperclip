@@ -1345,11 +1345,12 @@ export function recoveryService(
 
   // Remove only explicitly typed routing edges. Real prerequisites, human
   // decisions and side-effect replay gates remain owned by existing admission.
-  async function removeRoutingChildBlockers(issue: typeof issues.$inferSelect) {
+  async function removeRoutingChildBlockers(issue: typeof issues.$inferSelect, episodeId: string | null) {
     await db.transaction(async tx => {
-      await tx.select({id: issues.id}).from(issues).where(and(
+      const [locked] = await tx.select().from(issues).where(and(
         eq(issues.companyId, issue.companyId), eq(issues.id, issue.id),
       )).for("update");
+      if (!locked) return;
       const children = await tx.select({id: issues.id}).from(issues).where(and(
         eq(issues.companyId, issue.companyId), eq(issues.parentId, issue.id),
         inArray(issues.originKind, ["routing_child", "coordination_child"]),
@@ -1362,9 +1363,40 @@ export function recoveryService(
       if (removed.length) await logActivity(tx as unknown as Db, {
         companyId: issue.companyId, actorType: "system", actorId: "recovery", agentId: null,
         action: "issue.routing_child_blocker_removed", entityType: "issue", entityId: issue.id,
-        details: {routingChildIds: removed.map(child => child.id)},
+        details: {
+          routingChildIds: removed.map(child => child.id),
+          // Persist proof in the same transaction as the actual typed-edge
+          // deletion. Never derive authority from merely having a child.
+          handback: locked.status === "blocked" && !locked.unblockDescriptor
+            ? { episodeId, ...routingHandbackDisposition(locked) } : null,
+        },
       });
     });
+  }
+
+  function routingHandbackDisposition(issue: typeof issues.$inferSelect) {
+    return {
+      statusVersion: issue.statusVersion,
+      lastStatusDecisionId: issue.lastStatusDecisionId,
+      blockedTransitionAt: issue.blockedTransitionAt?.toISOString() ?? null,
+      updatedAt: issue.updatedAt.toISOString(),
+    };
+  }
+
+  async function currentRoutingHandback(issue: typeof issues.$inferSelect, episodeId: string | null) {
+    if (issue.status !== "blocked" || issue.unblockDescriptor) return false;
+    const [removal] = await db.select({ details: activityLog.details }).from(activityLog).where(and(
+      eq(activityLog.companyId, issue.companyId), eq(activityLog.entityType, "issue"),
+      eq(activityLog.entityId, issue.id), eq(activityLog.action, "issue.routing_child_blocker_removed"),
+      eq(activityLog.actorType, "system"), eq(activityLog.actorId, "recovery"),
+    )).orderBy(desc(activityLog.createdAt), desc(activityLog.id)).limit(1);
+    const details = parseObject(removal?.details);
+    const proof = parseObject(details.handback);
+    // A later disposition (including a re-block of the same status) revokes
+    // this exception. Old audits and other episodes fail closed on restart.
+    return Array.isArray(details.routingChildIds) && details.routingChildIds.length > 0 &&
+      proof.episodeId === episodeId && Object.entries(routingHandbackDisposition(issue))
+        .every(([key, value]) => proof[key] === value);
   }
 
   async function hasPersistedDurableWaitPath(
@@ -3127,10 +3159,7 @@ export function recoveryService(
     const sourceRun = input.latestRun?.id ? await db.select(retryAccountingRunSelect)
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.latestRun.id), eq(heartbeatRuns.companyId, input.issue.companyId)))
       .limit(1).then(rows => rows[0]) : null;
-    const routingParentHandback = Boolean(await db.select({id: issues.id}).from(issues).where(and(
-      eq(issues.companyId, input.issue.companyId), eq(issues.parentId, input.issue.id),
-      inArray(issues.originKind, ["routing_child", "coordination_child"]),
-    )).limit(1).then(rows => rows[0]));
+    const routingParentHandback = await currentRoutingHandback(input.issue, input.legacyEpisode?.id ?? null);
     const wakeReason = routingParentHandback ? "issue_blockers_resolved" : ISSUE_DISPOSITION_REPAIR_RETRY_REASON;
     const timing = dispositionRepairDelayMs(input.attempt, input.fingerprint);
     const now = new Date();
@@ -3715,9 +3744,7 @@ export function recoveryService(
     const ownsRepair = active?.kind === "deliberate_wait_without_target" && active.ownerType === "agent";
     // A typed routing hand-back is not a durable prerequisite. Preserve all
     // other blocked dispositions and every independently persisted wait gate.
-    const routingHandback = issue.status === "blocked" && Boolean(await db.select({id: issues.id})
-      .from(issues).where(and(eq(issues.companyId, issue.companyId), eq(issues.parentId, issue.id),
-        inArray(issues.originKind, ["routing_child", "coordination_child"]))).limit(1).then(rows => rows[0]));
+    const routingHandback = await currentRoutingHandback(issue, episode.id);
     return decideLegacyContinuation({
       run, issue: routingHandback ? {...issue, status: "in_progress"} : issue, agent, episode,
       gates: {
@@ -3789,7 +3816,7 @@ export function recoveryService(
         ? legacyDispositionEpisode(latestRun) : undefined
     );
     const maxAttempts = episode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS;
-    await removeRoutingChildBlockers(current);
+    await removeRoutingChildBlockers(current, episode?.id ?? null);
     const dependencyWait = episode ? null : await resolveContinuationWaitingOnReview(current);
     if (dependencyWait) {
       await resolveDispositionRepairActionAsCovered(
