@@ -12,6 +12,7 @@ import {
   vi,
 } from "vitest";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   assets,
   companies,
   closeRegisteredClients,
@@ -68,7 +69,7 @@ describeEmbeddedPostgres("deleted issue comment redaction", () => {
       db = createDb(tempDb.connectionString);
     }
     await db.execute(sql.raw("CREATE EXTENSION IF NOT EXISTS pg_trgm"));
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     await db.delete(issueReferenceMentions);

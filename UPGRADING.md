@@ -108,3 +108,40 @@ approval/objective provenance are unchanged. Retire the carry only with a
 released equivalent passing the exactly-once and edited/distinct-ID checks.
 The OmniGenT external adapter must use this same adapter-utils revision, not
 its older npm dependency copy; test the assembled image's buildPrompt too.
+PER-358's execution-run-context candidate is prepared but not deployed. Its
+PATCHES.md entry records SQL-only equivalence/performance and unfinished exact
+API/render acceptance. Do not mistake a task-branch SHA for image provenance;
+compile and copy both execution-projection and execution-run-context together
+and retain the embedded database/tenant tests. Broad tsc previously OOMKilled
+both BuildKit lanes; a 1536 MiB Node heap passed the focused verification.
+The lasting source-owned build limit and repeated canaries belong to PER-377.
+
+## PER-378 candidate: issue-run context single decode (not deployed)
+
+The issue-run history projection now extracts wakeCommentIds as JSONB and
+wakeCommentId/commentId/issueId as text in one guarded LEFT JOIN LATERAL.
+Company predicates, membership, order, result/usage projection, redaction and
+execution/liveness decoration are unchanged. Malformed/non-object contexts
+retain one row with null fields. The database contract test compares all four
+fields and unusual JSON types. Dependency lockfile is unchanged. Endpoint
+benefit, packaging and deployment gates remain pending; do not label this live.
+
+## Comment attribution candidate boundary (PER-382)
+
+The PER-382 issues.ts candidate must be deliberately added to the narrow
+homelab server overlay and its test gate by PER-378; a fork commit alone does
+not ship this file. Keep the existing routing/run-history/execution overlays
+and exact dependency lock. Check emitted issues.js, not only deployed src.
+This candidate changes only indexed issue membership in comment attribution.
+Explicit own-run IDs, outer tenant scope, timestamp bounds, lossless log
+markers and secret redaction are invariants. Do not generalize the helper to
+native_issue_id/taskId: that would change the old attribution contract.
+Do not simplify externalConversationStateSql for this candidate. Its repeated
+predicate was not the dominant cost in the bounded blocked-row plan; all
+Slack liveness guards are retained. Endpoint benefit, attention <200ms,
+combined pre-ship cross-review, CI/staging and deployment remain unverified.
+
+PER-378 fixture note: company-skills-detail beforeAll uses the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS90s cost-class budget. Preserve the one-second service-detail response check and both column-selection/runtime-probe assertions. Cold initdb+migrations measured20.792s on the cluster; do not restore an arbitrary20s setup limit without fresh cold-builder evidence.
+
+
+PER-378 follow-up: real expanded image gate reproduced 20s cold-start hook failures in company-skills-service and issue-comment-redaction. Reuse the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS setup budget in those two hooks only. Service cold setup measured 20.403s; isolated combined check passed all 120 service/redaction/conversation tests. Conversation test deadline and every assertion remain unchanged. Upstream master 4415665d still has both 20s hooks. No runtime, dependency or response limit change; exact-source image, staging and live acceptance remain required.

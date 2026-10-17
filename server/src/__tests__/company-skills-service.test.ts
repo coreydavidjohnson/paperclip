@@ -5,6 +5,7 @@ import { promises as fs } from "node:fs";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   agents,
   authUsers,
   companies,
@@ -60,7 +61,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     process.env.PAPERCLIP_INSTANCE_ID = "default";
     db = createDb(tempDb.connectionString);
     svc = companySkillService(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
     for (const skill of await db.select().from(companySkills)) {
