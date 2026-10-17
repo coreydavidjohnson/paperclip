@@ -86,3 +86,12 @@ it("retains conversation retry eligibility for a transient restore lock timeout"
     workspaceRestoreFailure: "restore_lock_timeout", conversationContinuation: "continue_conversation_v1",
   } })).toBe(false);
 });
+
+it('allows an evidence-preserving observer retirement to drain new input, not replay old actions',()=>{
+ const run={id:'run',companyId:'company',agentId:'agent',contextSnapshot:{issueId:'issue'},runtimeMode:'legacy',status:'interrupted',errorCode:'omnigent_observer_retired',
+ resultJson:{omnigentDispatchReceipt:{version:1,runId:'run',companyId:'company',agentId:'agent',omnigentSessionId:'session',state:'accepted'},
+ omnigentObserverRetirement:{version:1,runId:'run',companyId:'company',agentId:'agent',issueId:'issue',omnigentSessionId:'session',actionOutcomes:'unknown',providerStopped:false,reason:'runner_offline'}}};
+ expect(legacyExecutionNeedsReconciliation(run)).toBe(false);
+ expect(legacyExecutionNeedsReconciliation({...run,resultJson:{}})).toBe(true);
+ expect(legacyExecutionNeedsReconciliation({...run,resultJson:{...run.resultJson,omnigentObserverRetirement:{...run.resultJson.omnigentObserverRetirement,runId:'foreign'}}})).toBe(true);
+});

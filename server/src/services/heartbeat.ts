@@ -29,7 +29,7 @@ import { hasAcknowledgedNativeReassignmentStopIntent, hasAcknowledgedNativeStopI
 import { isControllerDraining } from "../controller-drain.js";
 import { saveOmnigentDispatchReceipt, claimOmnigentAttachment, releaseOmnigentAttachment, loadOwnedOmnigentObservation, finalizeOwnedOmnigentObservation } from "./omnigent-attachment.js";
 import { probeOmnigentAdmission } from "./omnigent-admission-probe.js";
-import { admitAgentRun, countAdmittedRunsForAgent, suspendOmnigentAdmissions } from "./run-admission.js";
+import { admitAgentRun, countAdmittedRunsForAgent, suspendOmnigentAdmissions, retireSuspendedOmnigentObservers } from "./run-admission.js";
 import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
@@ -46,6 +46,7 @@ import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispa
 import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
 import {
   legacyExecutionNeedsReconciliation,
+  isRetiredOmnigentObserver,
   settleInterruptedNativeBootstrap,
   terminalizeLegacyExecution,
 } from "./legacy-execution-recovery.js";
@@ -18937,6 +18938,34 @@ export function heartbeatService(
           issueId: suspended.contextSnapshot?.issueId ?? null },
       });
     }
+    for (const retired of await retireSuspendedOmnigentObservers(db, async candidate => {
+      const agent = await getAgent(candidate.agentId);
+      if (!agent || agent.adapterType !== 'omnigent') return null;
+      const { config } = await secretsSvc.resolveAdapterConfigForRuntime(candidate.companyId, parseObject(agent.adapterConfig));
+      return probeOmnigentAdmission(candidate, config);
+    })) {
+      // Abort only this local observation loop. Lease loss never interrupts
+      // the external provider; other controllers see the revoked boot lease.
+      adapterExecutionControls.get(retired.id)?.controller.abort(new Error('Legacy controller lease lost'));
+      await appendRunEvent(retired, { eventType:'lifecycle', stream:'system', level:'warn',
+        message:'Offline observer retired for a new wake. Receipt retained; prior action outcomes unknown; no provider stop or prompt replay.',
+        payload:{ observerRetired:true,providerStopped:false,issueId:retired.contextSnapshot?.issueId ?? null } });
+      publishLiveEvent({companyId:retired.companyId,type:'heartbeat.run.status',payload:buildHeartbeatRunStatusLiveEventPayload(retired)});
+      await releaseIssueExecutionAndPromote(retired, {suppressImmediateRecovery:true});
+    }
+    // Retry the normal release transaction after a crash following retirement.
+    const pendingRetirements = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.status, 'interrupted'), eq(heartbeatRuns.errorCode, 'omnigent_observer_retired'),
+      sql`(exists (select 1 from ${issues} where ${issues.companyId} = ${heartbeatRuns.companyId}
+        and (${issues.executionRunId} = ${heartbeatRuns.id} or ${issues.checkoutRunId} = ${heartbeatRuns.id}))
+        or exists (select 1 from ${agentWakeupRequests} where ${agentWakeupRequests.companyId} = ${heartbeatRuns.companyId}
+          and ${agentWakeupRequests.agentId} = ${heartbeatRuns.agentId}
+          and ${agentWakeupRequests.payload}->>'issueId' = ${heartbeatRuns.contextSnapshot}->>'issueId'
+          and ${agentWakeupRequests.status} = 'deferred_issue_execution'))`,
+    ));
+    for (const retired of pendingRetirements) {
+      if (isRetiredOmnigentObserver(retired)) await releaseIssueExecutionAndPromote(retired, {suppressImmediateRecovery: true});
+    }
     // Recovery never launches a provider or infers stopped ownership from
     // terminal status. Uncaptured local copies require durable stop evidence.
     await instructionCopies.recoverStopped().catch(error => {
@@ -20501,6 +20530,22 @@ export function heartbeatService(
       }
       const runtime = await ensureRuntimeState(agent);
       const context = parseObject(run.contextSnapshot);
+      const continuationIssueId = readNonEmptyString(context.issueId);
+      if (continuationIssueId) {
+        const [previous] = await db.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${continuationIssueId}`,
+          inArray(heartbeatRuns.status, ['succeeded', 'failed', 'interrupted', 'timed_out', 'cancelled']),
+        )).orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.id)).limit(1);
+        if (previous && isRetiredOmnigentObserver(previous)) {
+          // Every claim branch starts fresh; never reopen an old pending turn.
+          context.forceFreshSession = true;
+          context.previousRunId = previous.id;
+          context.observerRetirementWarning = 'Earlier action outcomes are unknown. Read the retained run evidence and inspect actual targets before repeating any mutation.';
+          await db.update(heartbeatRuns).set({contextSnapshot: context}).where(and(
+            eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.status, 'running')));
+        }
+      }
       const authorizeFailedChatRetryExecution = () =>
         db.transaction((tx) =>
           authorizeFailedChatRunRetryWake(db, tx as unknown as Db, {
