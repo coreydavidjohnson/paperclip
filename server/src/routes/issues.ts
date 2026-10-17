@@ -9156,7 +9156,7 @@ export function issueRoutes(
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
               const notes = (settled.resolutionNote ?? "").split(String.fromCharCode(10, 10));
-              if (resolutionNote && !notes.includes(resolutionNote)) {
+              if (settled.kind === "deliberate_wait_without_target" && resolutionNote && !notes.includes(resolutionNote)) {
                 // Late disposition evidence is annotation, not another resolution:
                 // retain the original outcome, timestamps and note; never replay.
                 assertBoard(req);

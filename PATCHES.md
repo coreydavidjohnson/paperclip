@@ -874,3 +874,10 @@ into the current fork image or supplied by a fork migration.
 ### PER-218 migration release correction
 
 The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
+
+
+## Restored-wake and routing-parent delivery on current production fork (PER-436)
+
+Reapply only the missing settled recovery history/exact actionId lookup, idempotent late disposition annotation, and typed routing/coordination child contracts from retained c9aab87c0 onto 5e83e5491. Preserve newer execution-hold reconciliation, dependency locking, admission fencing, list query and observer changes. Late annotations apply only to settled disposition actions; other kinds retain their existing idempotent resolution behavior. Original resolution outcome and timestamps remain unchanged. Ordinary blocked tasks remain terminal to the legacy continuation classifier; only an explicitly typed routing-child hand-back is evaluated as productive continuation, with every real wait, approval, budget and owner gate retained.
+
+Regression evidence: current baseline failed both settled history tests and five typed routing-child checks. Helper action_id failed validation before restoration. Full recovery/legacy and helper suites must pass before image publication. Homelab build/typecheck contexts include shared validator source so childPurpose is not silently stripped by a stale dependency-image validator. Retire this carry when equivalent upstream contracts are available.
