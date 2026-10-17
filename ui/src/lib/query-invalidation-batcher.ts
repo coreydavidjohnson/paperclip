@@ -110,7 +110,9 @@ export function createInvalidationBatcher(
   companyId?: string,
 ): InvalidationBatcher {
   const fast = createWindowBatcher(queryClient, intervalMs);
-  const lists = createWindowBatcher(queryClient, 10_000);
+  const lists = createWindowBatcher({
+    invalidateQueries: filters => queryClient.invalidateQueries(filters, { cancelRefetch: false }),
+  }, 10_000);
   return {
     schedule(filters) {
       const key = filters.queryKey;
@@ -173,4 +175,21 @@ export function createCoalescingQueryClient(
       return typeof value === "function" ? value.bind(target) : value;
     },
   });
+}
+
+/** Repair a missed-event gap without refreshing company projections per reconnect. */
+export function reconcileActiveQueries(
+  queryClient: Pick<QueryClient, "invalidateQueries">,
+  batcher: InvalidationBatcher,
+  companyId: string,
+): void {
+  void queryClient.invalidateQueries({
+    type: "active",
+    predicate: query => !(query.queryKey[1] === companyId &&
+      (query.queryKey[0] === "issues" || query.queryKey[0] === "attention")),
+  }, { cancelRefetch: false });
+  // Mark inactive projections stale too, just like ordinary live invalidations.
+  // Simultaneous events and reconnects share one request slot.
+  void batcher.schedule({ queryKey: ["issues", companyId] });
+  void batcher.schedule({ queryKey: ["attention", companyId] });
 }

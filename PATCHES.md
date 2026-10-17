@@ -676,6 +676,20 @@ into the current fork image or supplied by a fork migration.
   ways. private-json-etag.test.ts covers 304, changed feed and authorization.
   issue-refresh-budget.test.ts guards interval settings. Live request counts,
   deployment and integration tests remain required, not implied by unit counts.
+- Follow-up 2026-10-17: initial/reconnected sockets, return-to-visible and
+  disconnected polling bypassed the event batch via all-active invalidation.
+  Transport overflow can repeatedly reconnect a focused page. Route these
+  missed-event repairs through one helper: details reconcile immediately,
+  company issue/attention projections share the event ten-second budget.
+  Explicit mutation refreshes remain untouched. No stream payload is dropped.
+- Upstream rechecked: master `190080642ee4ea33336b6cd97b608b6c0534bddb`
+  and release `v2026.1012.0` retain all three all-active bypasses; no equivalent.
+- Regressions: reconnect-only repair and mixed reconnect/live-event repairs
+  each produce six company projection invalidations per minute, with sixty
+  immediate detail repairs. Source wiring covers all three lifecycle paths.
+  Hidden/dispose/visible reuse and in-flight mutation refresh regressions also
+  pass. Budgeted list flushes preserve in-flight requests (cancelRefetch:false).
+  These are deterministic invalidations, not live browser request acceptance.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
 
@@ -746,3 +760,9 @@ into the current fork image or supplied by a fork migration.
 - Profile: scripts/diagnostics/profile-skills-inventory.py (VM103 disposable
   CI runner, exact SHA payload); phase instrumentation never enters production.
   Profile is synthetic attribution, not production latency acceptance.
+## Embedded route-fixture startup budget (PER-827 integration)
+
+- The shared route fixture explicitly capped beforeAll at20 seconds, overriding the server config30-second hookTimeout. Combined exact image build8970999fd failed its issue-metadata suite setup at20000ms;671 other tests passed and8 were skipped. Inherit the existing configured hook budget instead of adding a second timeout policy. No test assertion, skip condition or production behavior changes.
+- Current upstream master2723168083ad9a460f35199357d5d4c5d53f02d6 retains the20-second override; re-evaluate/remove this carried test-only adjustment on upstream equivalent. Four route suites share this helper. Full exact image gates must pass before delivery.
+
+- Integration with PER-902: retain its newer explicit60-second shared fixture startup budget instead of reverting it to the earlier inherited30-second budget. Assertions and production behavior are unchanged; observer handoff/admission and indexed-query changes are preserved. Rebuild and exact revision gates remain required.
