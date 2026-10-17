@@ -36,11 +36,10 @@ export function useEmbeddedPostgres(
   let db: Db | null = null;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
 
-  // Inherit the server hookTimeout budget; a local cap masked its loaded-CI allowance.
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase(prefix);
     db = createDb(tempDb.connectionString);
-  });
+  }, 60_000);
 
   if (opts.resetEach) {
     const resetEach = opts.resetEach;

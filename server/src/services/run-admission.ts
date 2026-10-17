@@ -1,5 +1,5 @@
 import { and, eq, sql } from "drizzle-orm";
-import { heartbeatRuns, issues, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { isControllerDraining } from "../controller-drain.js";
 
 // Admission is not provider ownership. A suspended observer remains running,
@@ -77,6 +77,65 @@ export async function suspendOmnigentAdmissions(db: Db,
     suspended.push(...saved);
   }
   return suspended;
+}
+
+/** Retire only the observer, not the provider work or its unknown effects.
+ * A new durable wake owns continuation. Fresh negative evidence is mandatory;
+ * bounded finishing suspension by itself is never takeover authority.
+ */
+export async function retireSuspendedOmnigentObservers(db: Db,
+  probe: (run: typeof heartbeatRuns.$inferSelect) => Promise<"not_found" | "runner_offline" | null>) {
+  const candidates = await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.status, "running"), suspendedAdmission(),
+    sql`greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) < clock_timestamp() - interval '2 hours'`,
+    sql`exists (select 1 from ${agentWakeupRequests} where
+      ${agentWakeupRequests.companyId} = ${heartbeatRuns.companyId}
+      and ${agentWakeupRequests.agentId} = ${heartbeatRuns.agentId}
+      and ${agentWakeupRequests.payload}->>'issueId' = ${heartbeatRuns.contextSnapshot}->>'issueId'
+      and ${agentWakeupRequests.status} in ('queued', 'deferred_issue_execution'))`));
+  const retired: Array<typeof heartbeatRuns.$inferSelect> = [];
+  for (const candidate of candidates) {
+    const reason = await probe(candidate).catch(() => null);
+    if (!reason) continue;
+    const issueId = String(candidate.contextSnapshot?.issueId ?? '');
+    await db.transaction(async tx => {
+      const [issue] = await tx.select().from(issues).where(and(
+        eq(issues.id, issueId), eq(issues.companyId, candidate.companyId))).for('update');
+      if (!issue || issue.assigneeAgentId !== candidate.agentId || ['done','cancelled'].includes(issue.status) ||
+          (issue.executionRunId && issue.executionRunId !== candidate.id) ||
+          (issue.checkoutRunId && issue.checkoutRunId !== candidate.id)) return;
+      const [saved] = await tx.update(heartbeatRuns).set({
+        status: 'interrupted', errorCode: 'omnigent_observer_retired',
+        error: 'Offline observer retired for queued continuation; earlier action outcomes remain unknown.',
+        finishedAt: sql`clock_timestamp()`, controllerLeaseExpiresAt: sql`clock_timestamp()`,
+        controllerBootId: sql`gen_random_uuid()`,
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+          jsonb_build_object('omnigentObserverRetirement', jsonb_build_object(
+            'version',1,'runId',${heartbeatRuns.id},'companyId',${heartbeatRuns.companyId},
+            'agentId',${heartbeatRuns.agentId},'issueId',${issueId}::text,
+            'omnigentSessionId',${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'omnigentSessionId',
+            'retiredAt',clock_timestamp(),'reason',${reason}::text,
+            'actionOutcomes','unknown','providerStopped',false),
+            'summary','An offline observer was retired for a new wake. Prior action outcomes are unknown. Inspect retained evidence and actual targets before repeating any mutation.')`,
+        updatedAt: new Date(),
+      }).where(and(eq(heartbeatRuns.id,candidate.id),eq(heartbeatRuns.status,'running'),
+        suspendedAdmission(),
+        sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt' = ${JSON.stringify(candidate.resultJson?.omnigentDispatchReceipt)}::jsonb`,
+        sql`greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) < clock_timestamp() - interval '2 hours'`,
+        sql`exists (select 1 from ${agentWakeupRequests} where
+          ${agentWakeupRequests.companyId} = ${candidate.companyId} and ${agentWakeupRequests.agentId} = ${candidate.agentId}
+          and ${agentWakeupRequests.payload}->>'issueId' = ${issueId}
+          and ${agentWakeupRequests.status} in ('queued','deferred_issue_execution'))`,
+      )).returning();
+      if (saved) {
+        if (saved.wakeupRequestId) await tx.update(agentWakeupRequests).set({
+          status:'failed',finishedAt:new Date(),error:'Observer retired; original action outcomes unknown.',updatedAt:new Date(),
+        }).where(and(eq(agentWakeupRequests.id,saved.wakeupRequestId),eq(agentWakeupRequests.companyId,saved.companyId)));
+        retired.push(saved);
+      }
+    });
+  }
+  return retired;
 }
 
 /** Inside the SAME transaction as every queued -> running claim, after the

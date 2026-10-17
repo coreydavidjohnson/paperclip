@@ -693,6 +693,18 @@ into the current fork image or supplied by a fork migration.
 - Removal: drop on the next released upstream equivalent; re-evaluate these
   paths and preserve authorization, mutation refresh and missed-event repair.
 
+## Suspended-observer wake ownership handoff (PER-902)
+
+- Upstream checked at 9a3290fe10fb1dbe950b91028b58b038b812169a: no
+  OmniGenT observer-retirement equivalent. Remove this private integration
+  when upstream ships matching semantics and passes these regression tests.
+- Fresh identity-bound offline/404 evidence plus a queued wake retires only
+  the two-hour-silent observer. Evidence and unknown action outcomes remain;
+  no provider stop or prompt retry. Normal release/claim and safety gates apply.
+- Crash recovery retries release. Successors use a fresh generation with an
+  inspect-before-mutation warning. Admission/recovery and adapter regression
+  tests cover preserved receipts, fresh output races, native identity, online
+  and pending-approval denial, and zero interrupt/retry effects.
 ## PER-894. Reconcile obsolete execution holds without resuming blocked work
 
 - Root cause: resolved preserve_without_replay actions are omitted from the
@@ -730,3 +742,5 @@ into the current fork image or supplied by a fork migration.
 
 - The shared route fixture explicitly capped beforeAll at20 seconds, overriding the server config30-second hookTimeout. Combined exact image build8970999fd failed its issue-metadata suite setup at20000ms;671 other tests passed and8 were skipped. Inherit the existing configured hook budget instead of adding a second timeout policy. No test assertion, skip condition or production behavior changes.
 - Current upstream master2723168083ad9a460f35199357d5d4c5d53f02d6 retains the20-second override; re-evaluate/remove this carried test-only adjustment on upstream equivalent. Four route suites share this helper. Full exact image gates must pass before delivery.
+
+- Integration with PER-902: retain its newer explicit60-second shared fixture startup budget instead of reverting it to the earlier inherited30-second budget. Assertions and production behavior are unchanged; observer handoff/admission and indexed-query changes are preserved. Rebuild and exact revision gates remain required.
