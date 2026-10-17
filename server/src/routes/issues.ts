@@ -9155,16 +9155,30 @@ export function issueRoutes(
                 .returning();
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
-              const notes = (settled.resolutionNote ?? "").split(String.fromCharCode(10, 10));
-              if (settled.kind === "deliberate_wait_without_target" && resolutionNote && !notes.includes(resolutionNote)) {
+              if (settled.kind === "deliberate_wait_without_target" && resolutionNote) {
+                // Whole-note audit identity survives later annotations and paragraph
+                // boundaries. The issue lock serializes this lookup with the append.
+                assertBoard(req);
+                const [recordedNote] = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
+                  eq(activityLog.companyId, lockedIssue.companyId),
+                  eq(activityLog.entityType, "issue"),
+                  eq(activityLog.entityId, lockedIssue.id),
+                  inArray(activityLog.action, ["issue.recovery_action_resolved", "issue.recovery_action_note_added"]),
+                  eq(sql`${activityLog.details}->>'recoveryActionId'`, settled.id),
+                  eq(sql`${activityLog.details}->>'resolutionNote'`, resolutionNote),
+                )).limit(1);
+                if (settled.resolutionNote === resolutionNote || recordedNote) {
+                  return { issue: lockedIssue, recoveryAction: settled, replayed: true };
+                }
                 // Late disposition evidence is annotation, not another resolution:
                 // retain the original outcome, timestamps and note; never replay.
-                assertBoard(req);
                 if (activeRecoveryAction || sourceIssueStatus !== lockedIssue.status ||
                     settled.status !== "resolved" || settled.kind !== "deliberate_wait_without_target") {
                   throw conflict("Late recovery notes require the current source disposition, a settled disposition action and no newer active recovery.");
                 }
-                const note = [...notes.filter(Boolean), resolutionNote].join(String.fromCharCode(10, 10));
+                const note = settled.resolutionNote
+                  ? settled.resolutionNote + String.fromCharCode(10, 10) + resolutionNote
+                  : resolutionNote;
                 if (note.length > 12000) throw unprocessable("Recovery resolution notes exceed the retained note limit");
                 const [annotated] = await tx.update(issueRecoveryActions).set({ resolutionNote: note })
                   .where(and(eq(issueRecoveryActions.id, settled.id), eq(issueRecoveryActions.companyId, lockedIssue.companyId),
