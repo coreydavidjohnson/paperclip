@@ -321,8 +321,8 @@ describe("external adapter composer capabilities", () => {
     render(vi.fn(), changed, true, {}, false, external, { model: "provider/sonnet", effort: null, fast: false });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(loadModels).toHaveBeenCalledWith("company-1", "external_test", { environmentId: null, provider: undefined });
-    await click("Select assignee, model and effort");
-    expect(document.body.textContent).not.toContain("This gateway chooses");
+    await click("Select model and effort");
+    expect(document.querySelector('[data-testid="model-unavailable"]')).toBeNull();
     const slider = document.querySelector<HTMLInputElement>('input[aria-label="Effort"]');
     expect(slider).not.toBeNull();
     flushSync(() => {
@@ -340,8 +340,8 @@ describe("external adapter composer capabilities", () => {
     vi.spyOn(agentsApi, "adapterModels").mockResolvedValueOnce([]);
     render(vi.fn(), vi.fn(), true, {}, false, external, { model: null, effort: null, fast: false });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    await click("Select assignee, model and effort");
-    expect(document.body.textContent).toContain("This gateway chooses");
+    await click("Select model and effort");
+    expect(document.querySelector('[data-testid="model-unavailable"]')).not.toBeNull();
     expect(document.querySelector('input[aria-label="Effort"]')).toBeNull();
   });
 });
