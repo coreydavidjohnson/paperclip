@@ -257,7 +257,22 @@ export function postgresJsOptions(options: DatabaseClientOptions): Record<string
 // A long advisory-lock transaction must not borrow the normal pool that its
 // work needs for progress writes. Keep connection configuration private to the
 // originating Db lifetime; callers receive neither URLs nor credentials.
-const dedicatedDbFactories = new WeakMap<object, () => Db>();
+const dedicatedDbFactories = new WeakMap<object, (applicationName?: string) => Db>();
+const persistentDedicatedDbs = new WeakMap<object, Map<string, Db>>();
+
+/** One long-lived single-connection client per (pool, purpose). Liveness writes
+ * such as lease renewal must not queue behind pool connections that are
+ * waiting on contended row locks. Returns null for Db objects not built by
+ * createDb (test doubles), so callers can fall back to the shared pool. */
+export function persistentDedicatedDb(db: Db, applicationName: string): Db | null {
+  const factory = dedicatedDbFactories.get(db);
+  if (!factory) return null;
+  let byName = persistentDedicatedDbs.get(db);
+  if (!byName) { byName = new Map(); persistentDedicatedDbs.set(db, byName); }
+  let dedicated = byName.get(applicationName);
+  if (!dedicated) { dedicated = factory(applicationName); byName.set(applicationName, dedicated); }
+  return dedicated;
+}
 
 export async function withDedicatedDbConnection<T>(db: Db, action: (dedicated: Db) => Promise<T>): Promise<T> {
   const factory = dedicatedDbFactories.get(db);
@@ -277,8 +292,8 @@ export function createDb(url: string, options?: DatabaseClientOptions) {
   // message cannot establish that replay is safe. Leave retries to callers
   // that know the complete operation is idempotent.
   const db = drizzlePg(sql, { schema });
-  dedicatedDbFactories.set(db, () => createDb(url, {
-    ...resolved, maxConnections: 1, applicationName: "paperclip-workspace-finalization-lock",
+  dedicatedDbFactories.set(db, (applicationName = "paperclip-workspace-finalization-lock") => createDb(url, {
+    ...resolved, maxConnections: 1, applicationName,
   }));
   return db;
 }

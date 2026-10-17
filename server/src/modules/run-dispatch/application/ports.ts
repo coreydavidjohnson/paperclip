@@ -53,6 +53,8 @@ export type DispatchResolvedInteractionOutcome<T> =
 export interface RunDispatchWriter {
   promoteOrCancelDueRetry(input: PromoteOrCancelDueRetryInput): Promise<PromoteScheduledRetryOutcome>;
   cancelStaleQueuedRun(input: CancelStaleQueuedRunInput): Promise<CancelStaleQueuedRunOutcome>;
+  /** Optional lock-free preview; absent means always take the locked path. */
+  queuedRunNeedsLockedStalenessCheck?(input: { runId: string; companyId: string; now: Date }): Promise<boolean>;
   dispatchResolvedInteractionIfCurrent<T>(
     input: DispatchResolvedInteractionInput<T>,
   ): Promise<DispatchResolvedInteractionOutcome<T>>;
