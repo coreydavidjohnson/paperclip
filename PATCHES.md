@@ -725,3 +725,8 @@ into the current fork image or supplied by a fork migration.
 - Preserve PER-894 no-continuation delivery and dependency locks plus combined admission/UI/payload/cache history.
 - Regression uses real disposable PostgreSQL with malformed/noncanonical/missing/foreign bindings, native precedence, existing status-delivery/recovery suites and 192KiB contexts with 1000 same-company issues. The benchmark disables hash/merge joins transaction-locally to reproduce the observed live nested-loop shape; its timings are not production/API/browser latency claims.
 - Retire the backport when the next complete upstream upgrade includes this commit and passes the private contracts.
+
+## Embedded route-fixture startup budget (PER-827 integration)
+
+- The shared route fixture explicitly capped beforeAll at20 seconds, overriding the server config30-second hookTimeout. Combined exact image build8970999fd failed its issue-metadata suite setup at20000ms;671 other tests passed and8 were skipped. Inherit the existing configured hook budget instead of adding a second timeout policy. No test assertion, skip condition or production behavior changes.
+- Current upstream master2723168083ad9a460f35199357d5d4c5d53f02d6 retains the20-second override; re-evaluate/remove this carried test-only adjustment on upstream equivalent. Four route suites share this helper. Full exact image gates must pass before delivery.
