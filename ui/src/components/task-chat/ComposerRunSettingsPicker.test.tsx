@@ -340,8 +340,8 @@ describe("external adapter composer capabilities", () => {
     vi.spyOn(agentsApi, "adapterModels").mockResolvedValueOnce([]);
     render(vi.fn(), vi.fn(), true, {}, false, external, { model: null, effort: null, fast: false });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    await click("Select model and effort");
-    expect(document.querySelector('[data-testid="model-unavailable"]')).not.toBeNull();
+    expect(document.querySelector('button[aria-label="Select model and effort"]')).toBeNull();
+    expect(document.querySelector('[data-testid="task-chat-composer-model-label"]')).toBeNull();
     expect(document.querySelector('input[aria-label="Effort"]')).toBeNull();
   });
 });
