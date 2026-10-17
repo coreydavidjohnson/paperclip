@@ -270,6 +270,75 @@ describe("legacy continuation persisted authority", () => {
     });
     expect(result.parentBlockerAdded).toBe(true);
   });
+  it.each(["todo", "done", "hidden"])("routing-child: historical %s child cannot override a blocked disposition", async history => {
+    const f = await fixture();
+    await db.insert(issues).values({ companyId: f.companyId, parentId: f.issueId,
+      title: "Historical routing", status: history === "done" ? "done" : "todo",
+      hiddenAt: history === "hidden" ? new Date() : null, originKind: "routing_child" });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it("routing-child: historical child does not label an ordinary repair as a handback", async () => {
+    const f = await fixture();
+    await db.insert(issues).values({ companyId: f.companyId, parentId: f.issueId,
+      title: "Historical coordination", status: "done", hiddenAt: new Date(), originKind: "coordination_child" });
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("queued");
+    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(repair.contextSnapshot?.routingParentHandback).toBeUndefined();
+    expect(repair.contextSnapshot?.wakeReason).toBe("issue_disposition_repair_retry");
+  });
+  async function routingHandbackFixture() {
+    const f = await fixture();
+    const childId = randomUUID();
+    await db.insert(issues).values({ id: childId, companyId: f.companyId, parentId: f.issueId,
+      title: "Current routing", status: "todo", originKind: "routing_child" });
+    await db.insert(issueRelations).values({ companyId: f.companyId, issueId: childId, relatedIssueId: f.issueId, type: "blocks" });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    return f;
+  }
+  it("routing-child: stale edge removal preserves an independent unblock descriptor", async () => {
+    const f = await routingHandbackFixture();
+    const descriptor = { owner: "board" as const, action: "Provide export credentials" };
+    await db.update(issues).set({ unblockDescriptor: descriptor }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
+    expect(await f.runs()).toHaveLength(1);
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, f.issueId))).toHaveLength(0);
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].unblockDescriptor).toEqual(descriptor);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it.each(["descriptor", "status-version", "blocked-transition", "updated-at"])("routing-child: a new %s disposition invalidates handback before dispatch", async mutation => {
+    const f = await routingHandbackFixture();
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("queued");
+    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBeNull();
+    const later = new Date(Date.now() + 1000);
+    await db.update(issues).set({
+      ...(mutation === "descriptor" ? { unblockDescriptor: { owner: "board" as const, action: "Wait for independent decision" } } : {}),
+      ...(mutation === "status-version" ? { statusVersion: 1 } : {}),
+      ...(mutation === "blocked-transition" ? { blockedTransitionAt: later } : {}),
+      ...(mutation === "updated-at" ? { updatedAt: later } : {}),
+    }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBe("recorded_disposition");
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    expect(await f.runs()).toHaveLength(2);
+    expect((await f.actions())[0].attemptCount).toBe(1);
+  });
+  it("routing-child: durable removal provenance survives restart and the bounded second repair", async () => {
+    const f = await routingHandbackFixture();
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    const first = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(await f.createRecovery().legacyRepairDispatchBlock(first.id)).toBeNull();
+    await f.finish(first);
+    expect(await f.createRecovery().reconcileLegacyContinuation(first.id)).toBe("queued");
+    const second = (await f.runs()).find(r => r.status === "scheduled_retry")!;
+    expect(second.contextSnapshot).toMatchObject({ routingParentHandback: true });
+    expect(await f.createRecovery().legacyRepairDispatchBlock(second.id)).toBeNull();
+    await f.finish(second);
+    expect(await f.createRecovery().reconcileLegacyContinuation(second.id)).toBe("escalated");
+    expect(await f.runs()).toHaveLength(3);
+  });
   it.each(["clear", "approval", "dependency"])("routing-child: stale edge starts parent with %s gate", async gate => {
     const f = await fixture();
     const childId = randomUUID();
