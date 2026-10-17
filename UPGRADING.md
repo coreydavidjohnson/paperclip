@@ -142,3 +142,6 @@ Slack liveness guards are retained. Endpoint benefit, attention <200ms,
 combined pre-ship cross-review, CI/staging and deployment remain unverified.
 
 PER-378 fixture note: company-skills-detail beforeAll uses the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS90s cost-class budget. Preserve the one-second service-detail response check and both column-selection/runtime-probe assertions. Cold initdb+migrations measured20.792s on the cluster; do not restore an arbitrary20s setup limit without fresh cold-builder evidence.
+
+
+PER-378 follow-up: real expanded image gate reproduced 20s cold-start hook failures in company-skills-service and issue-comment-redaction. Reuse the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS setup budget in those two hooks only. Service cold setup measured 20.403s; isolated combined check passed all 120 service/redaction/conversation tests. Conversation test deadline and every assertion remain unchanged. Upstream master 4415665d still has both 20s hooks. No runtime, dependency or response limit change; exact-source image, staging and live acceptance remain required.

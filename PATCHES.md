@@ -797,3 +797,6 @@ benefit, packaging and deployment gates remain pending; do not label this live.
 ## Bounded company-skill detail fixture startup (PER-378)
 
 The real candidate image gate twice failed company-skills-detail beforeAll at20s with763 other server tests passing. A diagnostic pinned-image run measured18.336s initdb,155ms start,2.095s migrations and20.792s total startup; unchanged assertions both passed. Reuse the existing shared90s embedded-Postgres test budget for this one setup hook, not application latency or test-body deadlines. No dependencies, runtime behavior or security contracts change. Retire when upstream/the maintained fixture budget supersedes this hook. Verify company-skills-detail.test.ts and the full image gate; diagnostic instrumentation is not shipped.
+
+
+PER-378 follow-up: real expanded image gate reproduced 20s cold-start hook failures in company-skills-service and issue-comment-redaction. Reuse the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS setup budget in those two hooks only. Service cold setup measured 20.403s; isolated combined check passed all 120 service/redaction/conversation tests. Conversation test deadline and every assertion remain unchanged. Upstream master 4415665d still has both 20s hooks. No runtime, dependency or response limit change; exact-source image, staging and live acceptance remain required.
