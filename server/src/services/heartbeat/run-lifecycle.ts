@@ -502,7 +502,7 @@ function readLiveRunAssistantSnippet(
   return null;
 }
 
-function buildRunEventRuntimeProgress(input: {
+export function buildRunEventRuntimeProgress(input: {
   eventType: string;
   message: string | null;
   payload: Record<string, unknown> | null;
@@ -1052,6 +1052,10 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             .set({
               status,
               ...patch,
+              ...(isHeartbeatRunTerminalStatus(status) && !isHeartbeatRunTerminalStatus(previousStatus?.status)
+                ? { observerEpoch: patch?.observerEpoch ?? sql`${heartbeatRuns.observerEpoch} + 1`,
+                    livenessVersion: patch?.livenessVersion ?? sql`${heartbeatRuns.livenessVersion} + 1` }
+                : {}),
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
@@ -1077,8 +1081,9 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     status: string,
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
     failureReport?: RunFailureReportOptions,
+    expectedObserverEpoch?: number,
   ) {
-    return setRunStatusFromLive(runId, status, ["running"], patch, failureReport);
+    return setRunStatusFromLive(runId, status, ["running"], patch, failureReport, undefined, expectedObserverEpoch);
   }
 
   // Move a run to a new status only when its current status is one of
@@ -1093,6 +1098,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
     patch?: Partial<typeof heartbeatRuns.$inferInsert>,
     failureReport?: RunFailureReportOptions,
     cancellationCondition?: ReturnType<typeof nativeRetryCancellationCommitCondition>,
+    expectedObserverEpoch?: number,
   ) {
     // fromStatuses can name a terminal status as its own source (for example,
     // an idempotent "still failed" patch), so the write below is not always a
@@ -1143,13 +1149,18 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             patch,
             fromStatuses,
             reconcileIfNeeded: true,
-            writeConditions: [nativeRunnerOwnershipNotHeldCondition(), ...(cancellationCondition ? [cancellationCondition] : [])],
+            writeConditions: [nativeRunnerOwnershipNotHeldCondition(), ...(cancellationCondition ? [cancellationCondition] : []),
+              ...(expectedObserverEpoch === undefined ? [] : [eq(heartbeatRuns.observerEpoch, expectedObserverEpoch)])],
           })
         : await db
             .update(heartbeatRuns)
             .set({
               status,
               ...patch,
+              ...(isHeartbeatRunTerminalStatus(status) && !isHeartbeatRunTerminalStatus(previousStatus?.status)
+                ? { observerEpoch: patch?.observerEpoch ?? sql`${heartbeatRuns.observerEpoch} + 1`,
+                    livenessVersion: patch?.livenessVersion ?? sql`${heartbeatRuns.livenessVersion} + 1` }
+                : {}),
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
@@ -1157,6 +1168,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
               and(
                 eq(heartbeatRuns.id, runId),
                 inArray(heartbeatRuns.status, fromStatuses),
+                ...(expectedObserverEpoch === undefined ? [] : [eq(heartbeatRuns.observerEpoch, expectedObserverEpoch)]),
                 // A result can commit after the orphan candidate was read.
                 // Reject that stale process-loss transition before reporting,
                 // issue promotion, or release of the unfinished source lease.
@@ -2068,7 +2080,11 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       payload: sanitizedPayload ?? null,
       at: eventAt,
     });
-    const persistedEvent = await appendHeartbeatRunEvent(db, {
+    const persistedEvent = await db.transaction(async (tx) => {
+      const [current] = await tx.select({ observerEpoch: heartbeatRuns.observerEpoch }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId))).for("update");
+      if (!current || current.observerEpoch !== run.observerEpoch) return null;
+      return appendHeartbeatRunEvent(tx as unknown as Db, {
       companyId: run.companyId,
       runId: run.id,
       agentId: run.agentId,
@@ -2079,7 +2095,9 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       message: sanitizedMessage,
       payload: sanitizedPayload,
       retryExhaustion: event.retryExhaustion,
+      });
     });
+    if (!persistedEvent) return;
     if (persistedEvent.disposition === "duplicate") return;
     const seq = persistedEvent.row.seq;
 

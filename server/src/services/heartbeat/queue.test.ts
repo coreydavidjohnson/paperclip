@@ -151,6 +151,22 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     return { company, agent, issue, wake, run };
   }
 
+  it("adopts a completed liveness wake receipt instead of creating another run", async () => {
+    const { run, issue, agent, company } = await fixture("succeeded");
+    await db.update(issues).set({ executionRunId: null, executionLockedAt: null }).where(eq(issues.id, issue.id));
+    const key = `liveness:${run.id}`;
+    await db.insert(agentWakeupRequests).values({ companyId: company.id, agentId: agent.id,
+      source: "automation", status: "completed", idempotencyKey: key, runId: run.id, payload: { issueId: issue.id } });
+    const deps = callbacks(db); deps.getAgent.mockResolvedValue(agent);
+    await db.update(companies).set({ defaultResponsibleUserId: "queue-test-user" }).where(eq(companies.id, company.id));
+    deps.instanceSettings.getExperimental.mockResolvedValue({} as Awaited<ReturnType<HeartbeatQueueDependencies["instanceSettings"]["getExperimental"]>>);
+    const result = await createHeartbeatQueue(db, deps).enqueueWakeup(agent.id, { source: "automation", triggerDetail: "system",
+      reason: "external_session_gone", idempotencyKey: key, payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id } });
+    expect(result?.id).toBe(run.id);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId,agent.id))).toHaveLength(1);
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
   it.each(["claimed", "cancelled"] as const)("releases a running claim while preserving a %s wake", async (wakeStatus) => {
     const { run, issue, wake } = await fixture();
     await db.update(agentWakeupRequests).set({ status: wakeStatus }).where(eq(agentWakeupRequests.id, wake.id));

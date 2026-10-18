@@ -97,6 +97,18 @@ describePostgres("heartbeat output through adapter dispatch and finalization", (
     } finally { unsubscribe(); }
   });
 
+  it("retains structured tool runtime progress", async () => {
+    const f = await seed(async input => {
+      await input.onEvent?.({ eventType: "tool.start", payload: { toolName: "read_file" } });
+      const { getHeartbeatRunRuntimeStatus } = await import("../services/heartbeat-run-runtime-status.js");
+      expect(getHeartbeatRunRuntimeStatus(input.runId)).toMatchObject({ message: "Using read_file", currentToolName: "read_file" });
+      await input.onEvent?.({ eventType: "assistant.delta", payload: { text: "Checking current state" } });
+      expect(getHeartbeatRunRuntimeStatus(input.runId)).toMatchObject({ message: "Checking current state", lastAssistantSnippet: "Checking current state" });
+    });
+    const { finished } = await execute(f);
+    expect(finished.status, finished.error ?? undefined).toBe("succeeded");
+  });
+
   it.each([false, true])("retains output arriving during finalization (adapter throws: %s)", async fail => {
     let onLog: AdapterExecutionContext["onLog"];
     const f = await seed(async input => {

@@ -107,3 +107,14 @@ it("recognizes only an unclaimed pre-dispatch review wait receipt", () => {
     { resultJson: { ...run.resultJson, workspaceRestoreFailure: "restore_unsafe_archive" } },
   ]) expect(isPreDispatchReviewWait({ ...run, ...patch })).toBe(false);
 });
+
+it("permits only confirmed external gone recovery, never unknown or deadline replay", () => {
+  const gone = { runtimeMode: "legacy", status: "failed", errorCode: "external_session_gone", scheduledRetryAttempt: 20,
+    resultJson: { executionRecovery: { kind: "external_liveness", providerStopped: true }, recovery: { redispatch: true } } };
+  expect(legacyExecutionNeedsReconciliation(gone)).toBe(false);
+  for (const errorCode of ["external_liveness_unknown", "external_deadline_exceeded", "external_result_unavailable"])
+    expect(legacyExecutionNeedsReconciliation({ ...gone, errorCode, resultJson: { ...gone.resultJson, conversationContinuation: "continue_conversation_v1" } })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...gone, resultJson: { ...gone.resultJson, recovery: { redispatch: false } } })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...gone, resultJson: { ...gone.resultJson, executionRecovery: { kind: "external_liveness", providerStopped: false } } })).toBe(true);
+  expect(legacyExecutionNeedsReconciliation({ ...gone, resultJson: { ...gone.resultJson, workspaceRestoreFailure: "restore_unsafe_archive" } })).toBe(true);
+});

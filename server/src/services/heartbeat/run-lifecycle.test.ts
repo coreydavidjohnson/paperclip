@@ -145,6 +145,29 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     expect(vi.mocked(publishLiveEvent).mock.calls.filter(([event]) => event.type === "heartbeat.run.status")).toHaveLength(1);
   });
 
+  it("fences stale observer terminal writes but allows board cancellation and terminal events", async () => {
+    const { run } = await fixture({ runtimeMode: "legacy", observerEpoch: 3 });
+    const lifecycle = createHeartbeatLifecycle(db, callbacks(db));
+    const stale = await lifecycle.setRunStatusIfRunning(run.id, "succeeded", {}, undefined, 2);
+    expect(stale.updated).toBe(false);
+    expect(stale.run?.status).toBe("running");
+    const cancelled = await lifecycle.setRunStatusIfRunning(run.id, "cancelled", { errorCode: "cancelled" });
+    expect(cancelled.updated).toBe(true);
+    expect(cancelled.run?.observerEpoch).toBe(4);
+    await lifecycle.appendRunEvent(run, { eventType: "lifecycle", message: "stale output" });
+    await lifecycle.appendRunEvent(cancelled.run!, { eventType: "lifecycle", message: "cancel settled" });
+    const events = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id));
+    expect(events.map(event => event.message)).toEqual(["cancel settled"]);
+  });
+
+  it("rejects old observer events while a replacement is still running", async () => {
+    const { run } = await fixture({ runtimeMode: "legacy", observerEpoch: 1 });
+    await db.update(heartbeatRuns).set({ observerEpoch: 2 }).where(eq(heartbeatRuns.id, run.id));
+    await createHeartbeatLifecycle(db, callbacks(db)).appendRunEvent(run, { eventType: "lifecycle", message: "old observer" });
+    expect(await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run.id))).toHaveLength(0);
+    expect(publishLiveEvent).not.toHaveBeenCalled();
+  });
+
   it("rechecks native ownership atomically before a terminal write", async () => {
     const { run } = await fixture({ errorCode: "native_execution_ownership_unverified", nativePhase: "terminal_failure" });
     const deps = callbacks(db);

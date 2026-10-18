@@ -28,6 +28,8 @@ export function legacyExecutionNeedsReconciliation(
     return false;
   // A fresh model turn cannot repair or verify unrestored files.
   if (run.resultJson?.workspaceRestoreFailure === "restore_unsafe_archive" || hasRequiredWorkspaceRecovery(run.resultJson)) return true;
+  // Provider uncertainty cannot inherit an unrelated conversation replay policy.
+  if (["external_liveness_unknown", "external_deadline_exceeded", "external_result_unavailable"].includes(run.errorCode ?? "")) return true;
   // A fresh conversation turn lets the agent decide what remains. The retry
   // scheduler, not an action-outcome hold, owns the automatic attempt limit.
   if (hasConversationContinuationPolicy(run.resultJson)) return false;
@@ -35,6 +37,10 @@ export function legacyExecutionNeedsReconciliation(
   if (normalizeMaxTurnStopReason(run.resultJson?.stopReason) ?? normalizeMaxTurnStopReason(run.errorCode)) return false;
   const evidence = run.resultJson?.executionRecovery as
     Record<string, unknown> | undefined;
+  // Only positive gone evidence permits a fresh, outcome-aware admission.
+  if (run.status === "failed" && run.errorCode === "external_session_gone" &&
+      evidence?.kind === "external_liveness" && evidence.providerStopped === true &&
+      (run.resultJson?.recovery as Record<string, unknown> | undefined)?.redispatch === true) return false;
   if (run.status === "cancelled" && evidence?.kind === "interrupted"
       && evidence.providerStopped === true && evidence.sessionPreserved === true
       && evidence.actionOutcomes === "settled"
@@ -110,6 +116,15 @@ export async function terminalizeLegacyExecution(input: {
       .set({
         status: input.recordRestoreFailureOnly ? current.status : status,
         ...patch,
+        ...(!input.recordRestoreFailureOnly && ["succeeded", "failed", "timed_out", "interrupted", "cancelled"].includes(status) &&
+          !["succeeded", "failed", "timed_out", "interrupted", "cancelled"].includes(current.status)
+          ? { observerEpoch: patch?.observerEpoch ?? sql`${heartbeatRuns.observerEpoch} + 1`,
+              livenessVersion: patch?.livenessVersion ?? sql`${heartbeatRuns.livenessVersion} + 1` }
+          : {}),
+        ...(status === "cancelled" && current.status !== "cancelled" && !input.recordRestoreFailureOnly
+          ? { runnerProfileJson: { ...current.runnerProfileJson, externalSettlement: {
+              runId: current.id, observerEpoch: current.observerEpoch, terminalEpoch: current.observerEpoch + 1, status,
+            } } } : {}),
         executionStatusDeliveryId: randomUUID(),
         updatedAt: new Date(),
       })

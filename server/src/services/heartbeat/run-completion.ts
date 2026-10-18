@@ -78,6 +78,7 @@ export interface HeartbeatRunCompletionDependencies extends Pick<RunState,
 
 interface RunCompletionOutput {
   handle: RunLogHandle | null;
+  withObserverFinalization?: (effect: () => Promise<void>) => Promise<boolean>;
   outputProgressState: { pending: { bytes: number } | null };
   flushOutputProgress: (options?: { force?: boolean }) => Promise<void>;
   // Getters in the executor retain output that arrives while finalization awaits I/O.
@@ -90,7 +91,7 @@ interface RunCompletionSession {
   previousSessionParams: Record<string, unknown> | null;
   taskKey: string | null;
   configuredModel: string | null;
-  sessionConfigMetadata: EffectiveRunSessionConfigMetadata;
+  sessionConfigMetadata: EffectiveRunSessionConfigMetadata | null;
 }
 
 interface RunCompletionInput {
@@ -378,10 +379,35 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     failedProcessRunCancellations,
   } = dependencies;
 
+  async function withOutputAuthority(run: Run, output: RunCompletionOutput, effect: () => Promise<void>, allowSettlement = false) {
+    if (output.withObserverFinalization) return output.withObserverFinalization(effect);
+    return db.transaction(async tx => {
+      const [current] = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+      )).for("update");
+      const receipt = parseObject(current?.runnerProfileJson?.externalSettlement);
+      const ownsSettlement = allowSettlement && current?.status === "cancelled" && receipt.runId === run.id &&
+        receipt.observerEpoch === run.observerEpoch && receipt.terminalEpoch === current.observerEpoch &&
+        current.observerEpoch === run.observerEpoch + 1;
+      if (!current || (current.observerEpoch !== run.observerEpoch && !ownsSettlement)) return false;
+      await effect();
+      return true;
+    });
+  }
+
   async function completeRun(input: CompleteHeartbeatRunInput) {
     const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
       configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
       providerTraceCapture, onProviderTraceFinalized, issueContext, onLog } = input;
+    const maySettle = (current: typeof heartbeatRuns.$inferSelect | null) => {
+      if (current?.observerEpoch === run.observerEpoch) return true;
+      const receipt = parseObject(current?.runnerProfileJson?.externalSettlement);
+      return current?.status === "cancelled" && receipt.runId === run.id &&
+        receipt.status === "cancelled" && receipt.observerEpoch === run.observerEpoch &&
+        receipt.terminalEpoch === current.observerEpoch && current.observerEpoch === run.observerEpoch + 1;
+    };
+    if (!maySettle(await getRun(run.id))) return;
+
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
     const { handle, outputProgressState, flushOutputProgress } = output;
     const processCancellation =
@@ -390,6 +416,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     await processCancellation?.settled;
     let outcome: RunSessionOutcome;
     const latestRun = await getRun(run.id);
+    if (!maySettle(latestRun)) return;
     if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
       outcome = latestRun.status;
     } else if (signal.aborted) {
@@ -460,14 +487,15 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
               "adapter_failed")
             : null;
 
-    let logSummary: {
-      bytes: number | null;
-      sha256?: string | null;
-      compressed: boolean;
-    } | null = null;
-    if (handle) {
-      logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
-    }
+    const finalLog: { summary: Awaited<ReturnType<typeof runLogStore.finalize>> | null } = { summary: null };
+    const finalizeOutput = async () => {
+      if (handle) finalLog.summary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
+    };
+    // Hold the generation lock during non-transactional log closure. Output
+    // callbacks inherit this transaction, so late output cannot deadlock it.
+    const finalized = await withOutputAuthority(run, output, finalizeOutput, true);
+    if (!finalized) return;
+    const logSummary = finalLog.summary;
     const finalLogBytes = logSummary?.bytes;
     if (outputProgressState.pending && typeof finalLogBytes === "number") {
       outputProgressState.pending.bytes = finalLogBytes;
@@ -605,10 +633,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       status,
       finalRunPatch,
       { adapterErrorMeta: adapterResult.errorMeta, secretValues: readFailureReportSecrets() },
+      run.observerEpoch,
     ));
     let persistedRun: typeof heartbeatRuns.$inferSelect | null =
       persistedRunWrite.run;
     if (!persistedRunWrite.updated) {
+      if (!maySettle(persistedRunWrite.run)) return;
       persistedRun = null;
       // Native reconciliation can commit and project the terminal status in
       // the narrow window between adapter completion and this live write.
@@ -620,7 +650,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       // likewise keeps the provider session, logs, and usage after Stop wins.
       if (
         (adapterResult.nativeFinalization ||
-          (processCancellation && !processCancellation.failed && status === "cancelled")) &&
+          ((processCancellation && !processCancellation.failed || parseObject(persistedRunWrite.run?.runnerProfileJson?.externalSettlement).observerEpoch === run.observerEpoch) && status === "cancelled")) &&
         persistedRunWrite.run?.status === status
       ) {
         persistedRun = await db
@@ -639,7 +669,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           .where(
             and(
               eq(heartbeatRuns.id, run.id),
+              eq(heartbeatRuns.companyId, run.companyId),
               eq(heartbeatRuns.status, status),
+              eq(heartbeatRuns.observerEpoch, persistedRunWrite.run.observerEpoch),
             ),
           )
           .returning()
@@ -1035,6 +1067,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
   async function failRun(input: FailHeartbeatRunInput) {
     const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, runId, err, identityRedactor, requiredWorkspaceRestoreEvidence,
       legacyAdapterEntered, goalCheckpointSession, previousSessionDisplayId, taskSession } = input;
+    if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
     const { handle, outputProgressState, flushOutputProgress } = output;
     // A process adapter may throw while its owned Stop is joining the
@@ -1086,21 +1119,15 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       "adapter_failed";
     logger.error({ err: identityRedactor.redact({ message: err instanceof Error ? err.message : String(err), stack: err instanceof Error ? err.stack : undefined }), runId }, "heartbeat execution failed");
 
-    let logSummary: {
-      bytes: number | null;
-      sha256?: string | null;
-      compressed: boolean;
-    } | null = null;
-    if (handle) {
-      try {
-        logSummary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
-      } catch (finalizeErr) {
-        logger.warn(
-          { err: finalizeErr, runId },
-          "failed to finalize run log after error",
-        );
+    const finalLog: { summary: Awaited<ReturnType<typeof runLogStore.finalize>> | null } = { summary: null };
+    const finalized = await withOutputAuthority(run, output, async () => {
+      if (handle) {
+        try { finalLog.summary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle)); }
+        catch (err) { logger.warn({ err, runId }, "failed to finalize run log after error"); }
       }
-    }
+    });
+    if (!finalized) return;
+    const logSummary = finalLog.summary;
     const finalLogBytes = logSummary?.bytes;
     if (outputProgressState.pending && typeof finalLogBytes === "number") {
       outputProgressState.pending.bytes = finalLogBytes;
@@ -1144,7 +1171,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       logBytes: logSummary?.bytes,
       logSha256: logSummary?.sha256,
       logCompressed: logSummary?.compressed ?? false,
-    }, { error: err, phase: "execute", secretValues: readFailureReportSecrets() }));
+    }, { error: err, phase: "execute", secretValues: readFailureReportSecrets() }, run.observerEpoch));
     if (
       !failedRunWrite.updated &&
       !(
@@ -1162,6 +1189,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       return;
     }
 
+    if (!failedRunWrite.updated && failedRunWrite.run?.observerEpoch !== run.observerEpoch) return;
     const failedRun = failedRunWrite.run;
     await setWakeupStatus(run.wakeupRequestId, "failed", {
       finishedAt: new Date(),
@@ -1263,6 +1291,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
   async function failRunSetup(input: FailHeartbeatRunSetupInput) {
     const { run, runId, outerErr, signal, providerDispatchStarted, identityRedactor, readFailureReportSecrets } = input;
+    if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
     // The lease watchdog stopped preparation because this host no longer owns
     // the run. That is host infrastructure, not a defect in the agent or setup.
     // A post-dispatch error can also land here (for example a failed usage
@@ -1377,7 +1406,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         : setupFailureResultJson
           ? { resultJson: setupFailureResultJson }
           : {}),
-    }, { error: outerErr, phase: "setup", secretValues: readFailureReportSecrets() }).catch(() => ({ run: null, updated: false as const }));
+    }, { error: outerErr, phase: "setup", secretValues: readFailureReportSecrets() }, run.observerEpoch).catch(() => ({ run: null, updated: false as const }));
     if (!setupFailureWrite.updated) {
       logger.info(
         {

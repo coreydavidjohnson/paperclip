@@ -1,13 +1,14 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import type { AdapterInvocationMeta, AdapterRuntimeEvent } from "../../adapters/index.js";
 import { redactCurrentUserText, redactCurrentUserValue, type CurrentUserRedactionOptions } from "../../log-redaction.js";
 import type { createAgentIdentityRedactor } from "../agent-identity-redaction.js";
-import { touchHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.js";
+import { setHeartbeatRunRuntimeStatus, touchHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.js";
 import { publishLiveEvent } from "../live-events.js";
 import type { RunLogHandle, RunLogStore } from "../run-log-store.js";
 import { appendExcerpt, compactRunLogChunk, boundHeartbeatRunEventPayloadForStorage } from "./run-log.js";
-import { isHeartbeatRunRuntimeStatusActive, publishHeartbeatRunRuntimeProgress, type createHeartbeatLifecycle } from "./run-lifecycle.js";
+import { buildRunEventRuntimeProgress, isHeartbeatRunRuntimeStatusActive, publishHeartbeatRunRuntimeProgress, type createHeartbeatLifecycle } from "./run-lifecycle.js";
 import { externalObserverCondition, recordExternalRunProgress } from "./external-run-state.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { redactEventPayload, redactSensitiveText } from "../../redaction.js";
@@ -49,12 +50,22 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
   let persistedLogBytes = Number(run.logBytes ?? 0);
   // Keep non-transactional log I/O and publication inside the row lock, so
   // takeover cannot commit midway through an old observer's output effect.
-  const withObserver = async <T>(effect: (tx: Db) => Promise<T>) => db.transaction(async tx => {
+  const outputTransaction = new AsyncLocalStorage<Db>();
+  const withObserver = async <T>(effect: (tx: Db) => Promise<T>) => {
+    const transaction = outputTransaction.getStore();
+    if (transaction) {
+      const [current] = await transaction.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+        .where(externalObserverCondition(run)).limit(1);
+      if (current) return effect(transaction);
+      return;
+    }
+    return db.transaction(async tx => {
     const [current] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
       .where(externalObserverCondition(run)).for("update").limit(1);
     if (!current) return;
     return effect(tx as unknown as Db);
-  });
+    });
+  };
   const persistOutputProgress = async (tx: Db, opts?: { force?: boolean }) => {
     const pendingOutputProgress = outputProgressState.pending;
     if (!pendingOutputProgress) return;
@@ -185,10 +196,12 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         message: message ?? null, payload: payload ?? null,
         lastEventAt: persisted.row.createdAt.toISOString(),
       } });
-      if (eventType !== "adapter.invoke" && eventType !== "lifecycle") {
-        const touched = touchHeartbeatRunRuntimeStatus({ companyId: run.companyId,
-          issueId, agentId: run.agentId, runId: run.id, at: persisted.row.createdAt });
-        if (touched) publishHeartbeatRunRuntimeProgress(touched);
+      const progress = buildRunEventRuntimeProgress({ eventType, message: message ?? null,
+        payload: payload ?? null, at: persisted.row.createdAt });
+      if (progress && isHeartbeatRunRuntimeStatusActive(run.status)) {
+        const status = setHeartbeatRunRuntimeStatus({ companyId: run.companyId,
+          issueId, agentId: run.agentId, runId: run.id, ...progress, updatedAt: persisted.row.createdAt });
+        if (status) publishHeartbeatRunRuntimeProgress(status);
       }
     });
     const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
@@ -210,6 +223,17 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
     begin,
     get handle() { return handle; },
     outputProgressState,
+    withObserverFinalization: async (effect: () => Promise<void>) => db.transaction(async tx => {
+      const [current] = await tx.select().from(heartbeatRuns)
+        .where(sql`${heartbeatRuns.id} = ${run.id} and ${heartbeatRuns.companyId} = ${run.companyId}`).for("update");
+      const receipt = current?.runnerProfileJson?.externalSettlement as Record<string, unknown> | undefined;
+      const ownsSettlement = current?.status === "cancelled" && receipt?.runId === run.id &&
+        receipt.status === "cancelled" && receipt.observerEpoch === run.observerEpoch &&
+        receipt.terminalEpoch === current.observerEpoch && current.observerEpoch === run.observerEpoch + 1;
+      if (!current || (current.observerEpoch !== run.observerEpoch && !ownsSettlement)) return false;
+      await outputTransaction.run(tx as unknown as Db, effect);
+      return true;
+    }),
     flushOutputProgress,
     // Finalization awaits I/O and can receive more output before persisting excerpts.
     get stdoutExcerpt() { return stdoutExcerpt; },

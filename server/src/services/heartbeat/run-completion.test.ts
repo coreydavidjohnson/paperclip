@@ -113,6 +113,40 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
   }
   const read = (id: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).then(rows => rows[0]!);
 
+  it.each(["completeRun", "failRun", "failRunSetup"] as const)("drops a replaced observer before %s side effects", async operation => {
+    const f = await fixture({ observerEpoch: 4 });
+    await db.update(heartbeatRuns).set({ observerEpoch: 5 }).where(eq(heartbeatRuns.id, f.run.id));
+    if (operation === "completeRun") await f.completion.completeRun(f.input);
+    else if (operation === "failRun") await f.completion.failRun(f.failure(new Error("late observer")));
+    else await f.completion.failRunSetup(f.setup(new Error("late setup")));
+    expect(await read(f.run.id)).toMatchObject({ status: "running", observerEpoch: 5, sessionIdAfter: null });
+    expect(await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, f.run.id))).toHaveLength(0);
+    for (const callback of [f.deps.setRunStatusIfRunning, f.deps.setWakeupStatus, f.deps.upsertTaskSession, f.deps.clearTaskSessions, f.deps.releaseIssueExecutionAndPromote, f.deps.finalizeAgentStatus, f.deps.runLogStore.finalize, f.deps.traceStore.finalize]) expect(callback).not.toHaveBeenCalled();
+  });
+
+  it("does not close logs after takeover during asynchronous completion preparation", async () => {
+    const f = await fixture({ observerEpoch: 4 });
+    const resolve = f.deps.resolveNormalizedUsageForSession;
+    f.deps.resolveNormalizedUsageForSession = async (...args) => {
+      await db.update(heartbeatRuns).set({ observerEpoch: 5 }).where(eq(heartbeatRuns.id, f.run.id));
+      return resolve(...args);
+    };
+    await createHeartbeatRunCompletion(db, f.deps).completeRun(f.input);
+    expect(f.deps.runLogStore.finalize).not.toHaveBeenCalled();
+    expect(f.deps.traceStore.finalize).not.toHaveBeenCalled();
+    expect(await read(f.run.id)).toMatchObject({ status: "running", observerEpoch: 5 });
+  });
+
+  it("does not close logs after takeover during failure redaction", async () => {
+    const f = await fixture({ observerEpoch: 4 });
+    f.deps.getCurrentUserRedactionOptions.mockImplementationOnce(async () => {
+      await db.update(heartbeatRuns).set({ observerEpoch: 5 }).where(eq(heartbeatRuns.id, f.run.id));
+      return { enabled: false };
+    });
+    await f.completion.failRun(f.failure(new Error("old observer")));
+    expect(f.deps.runLogStore.finalize).not.toHaveBeenCalled();
+  });
+
   it("persists usage, accounting, final logs, presentation and the next task session", async () => {
     const f = await fixture();
     await f.completion.completeRun(f.input);
@@ -146,7 +180,7 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
     const completion = operation === "completeRun" ? f.completion.completeRun(f.input) : f.completion.failRun(f.failure(new Error("late adapter error")));
     await Promise.resolve();
     expect(f.deps.setRunStatusIfRunning).not.toHaveBeenCalled();
-    await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, f.run.id));
+    await f.deps.setRunStatusFromLive(f.run.id, "cancelled", ["running"], { errorCode: "cancelled", finishedAt: new Date() });
     f.controller.abort();
     settle();
     await completion;
@@ -155,6 +189,16 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
       expect((await read(f.run.id)).sessionIdAfter).toBe("provider-session");
       expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(f.agent.id, "cancelled", expect.any(String), expect.any(Object));
     } else expect(f.deps.finalizeAgentStatus).not.toHaveBeenCalled();
+  });
+
+  it("rejects settlement by the observer replaced before Stop", async () => {
+    const f = await fixture({observerEpoch:4});
+    await db.update(heartbeatRuns).set({observerEpoch:5}).where(eq(heartbeatRuns.id,f.run.id));
+    await f.deps.setRunStatusFromLive(f.run.id,"cancelled",["running"],{finishedAt:new Date()});
+    f.deps.processRunCancellationSettlements.set(f.run.id,{settled:Promise.resolve(),failed:false});
+    await f.completion.completeRun(f.input);
+    expect(await read(f.run.id)).toMatchObject({status:"cancelled",observerEpoch:6,sessionIdAfter:null});
+    expect(f.deps.runLogStore.finalize).not.toHaveBeenCalled();
   });
 
   it("attributes an adapter stop caused by a lost controller lease", async () => {
@@ -239,7 +283,7 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
     f.deps.setRunStatusIfRunning.mockRejectedValueOnce(writeError);
     await expect(f.completion.completeRun(f.input)).rejects.toBe(writeError);
     expect(f.input.onProviderTraceFinalized).toHaveBeenCalledOnce();
-    expect(f.deps.setRunStatusIfRunning).toHaveBeenCalledWith(f.run.id, "succeeded", expect.objectContaining({ stdoutExcerpt: "last provider output", logBytes: 99 }), expect.any(Object));
+    expect(f.deps.setRunStatusIfRunning).toHaveBeenCalledWith(f.run.id, "succeeded", expect.objectContaining({ stdoutExcerpt: "last provider output", logBytes: 99 }), expect.any(Object), f.run.observerEpoch);
   });
 
   it("keeps a failed trace finalization eligible for the executor's cleanup retry", async () => {

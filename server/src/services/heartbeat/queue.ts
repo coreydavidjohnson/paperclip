@@ -2713,6 +2713,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
 
+          // The issue lock also serializes committed outbox redelivery receipts.
+          if (!executionWaitRequestId && opts.idempotencyKey?.startsWith("liveness:")) {
+            const [receipt] = await tx.select().from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId), eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+            )).orderBy(desc(agentWakeupRequests.createdAt)).limit(1);
+            if (receipt) {
+              const prior = receipt.runId ? await tx.select().from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.companyId, agent.companyId), eq(heartbeatRuns.id, receipt.runId),
+              )).then(rows => rows[0] ?? null) : null;
+              if (prior) return { kind: "replayed" as const, run: prior };
+              return { kind: "deferred" as const };
+            }
+          }
+
           if (executionWaitRequestId) {
             const [pending] = await tx.select().from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.id, executionWaitRequestId), eq(agentWakeupRequests.companyId, agent.companyId),

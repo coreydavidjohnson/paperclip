@@ -1,3 +1,6 @@
+import { createExternalRunLivenessWorker } from "./heartbeat/external-run-liveness.js";
+import { persistExternalRunHandle, recordedExternalRunConfiguration } from "./heartbeat/external-run-state.js";
+import type { AdapterExecutionResult, ExternalRunHandle } from "@paperclipai/adapter-utils";
 import { isControllerDraining } from "../controller-drain.js";
 import { dotRunnerBroker } from "./dot-runner-broker.js";
 import { withRunExecutionTiming, measureRunPhase, measureWorkspaceSyncPhase, isWorkspaceSyncDetailPhase } from "./execution-preparation-timing.js";
@@ -1801,6 +1804,78 @@ export function heartbeatService(
     failedProcessRunCancellations,
   });
 
+  // Recovery only attaches to an existing provider handle. No preparation or dispatch.
+  async function observeExternalRun(run: typeof heartbeatRuns.$inferSelect, settled?: AdapterExecutionResult) {
+    if (!run.externalRunHandle) return;
+    const agent = await getAgent(run.agentId);
+    if (!agent || agent.companyId !== run.companyId) return;
+    const saved = recordedExternalRunConfiguration(run);
+    const adapter = getServerAdapter(saved.adapterType);
+    if (!settled && (!adapter.observeRun || !saved.config)) return;
+    if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
+    const controller = new AbortController();
+    const lease = settled ? null : watchLegacyControllerLease(db, run, controller);
+    const context = parseObject(run.contextSnapshot);
+    const issueId = run.issueId ?? run.nativeIssueId ?? readNonEmptyString(context.issueId);
+    const { config, secretKeys } = saved.config ? await secretsSvc.resolveAdapterConfigForRuntime(run.companyId, parseObject(saved.config))
+      : { config: {} as Record<string, unknown>, secretKeys: new Set<string>() };
+    const output = createHeartbeatRunOutput(db, { run, runId: run.id, issueId, runLogStore,
+      identityRedactor: createAgentIdentityRedactor(), secretKeys, appendRunEvent, getCurrentUserRedactionOptions });
+    try {
+      const { onLog, onAdapterMeta, currentUserRedactionOptions } = await output.begin(run);
+      const result = settled ?? await adapter.observeRun!({ runId: run.id, agent, config,
+        handle: run.externalRunHandle as ExternalRunHandle, signal: controller.signal,
+        onLog, onMeta: onAdapterMeta, onHandle: async handle => { await persistExternalRunHandle(db, run, handle); } });
+      if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
+      const issueContext = issueId ? await getIssueExecutionContext(run.companyId, issueId) : null;
+      const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
+      const taskSession = taskKey ? await getTaskSession(run.companyId, agent.id, agent.adapterType, taskKey) : null;
+      const previousSessionParams = taskSession?.sessionParamsJson ?? null;
+      // No new preparation occurred: retain the recorded session metadata.
+      const sessionConfigMetadata = null;
+      await runCompletion.completeRun({ run, agent, issueId,
+        issueRef: issueContext ? { workMode: issueContext.workMode, identifier: issueContext.identifier, title: issueContext.title } : null,
+        signal: controller.signal, output,
+        session: { runtimeForAdapter: { sessionId: run.sessionIdBefore, sessionDisplayId: run.sessionIdBefore },
+          previousSessionParams, taskKey, configuredModel: readNonEmptyString(config.model), sessionConfigMetadata },
+        readFailureReportSecrets: () => [], adapterResult: result, sessionCodec: getAdapterSessionCodec(agent.adapterType),
+        taskSessionForRun: taskSession, sessionCompaction: { rotate: false, reason: null },
+        configFreshnessResultMetadata: parseObject(parseObject(run.usageJson).configFreshness),
+        runLedgerScope: await resolveLedgerScopeForRun(db, run.companyId, run), currentUserRedactionOptions,
+        providerTraceCapture: false, onProviderTraceFinalized: () => {}, issueContext, onLog,
+      });
+    } finally { lease?.stop(); }
+  }
+  const externalLiveness = createExternalRunLivenessWorker(db, {
+    getAdapter: getServerAdapter,
+    resolveConfig: async (companyId, config) => (await secretsSvc.resolveAdapterConfigForRuntime(companyId, config)).config,
+    onSettled: observeExternalRun,
+    onObserve: async run => {
+      const observation = observeExternalRun(run).catch(err => {
+        logger.warn({ err, runId: run.id }, "External observation remains retryable");
+      });
+      activeRunExecutionPromises.add(observation);
+      void observation.finally(() => activeRunExecutionPromises.delete(observation));
+    },
+    onTerminal: async run => {
+      await setWakeupStatus(run.wakeupRequestId, "failed", { finishedAt: run.finishedAt ?? new Date(), error: run.error });
+      await releaseEnvironmentLeasesForRun({ runId: run.id, companyId: run.companyId, agentId: run.agentId,
+        status: run.status, failureReason: run.error, providerResourceDisposition: providerResourceDispositionForTerminalRun("stop_and_retain", run.status) });
+      await releaseIssueExecutionAndPromote(run, { suppressImmediateRecovery: true });
+      if (isHeartbeatRunTerminalStatus(run.status)) await finalizeAgentStatus(run.agentId, run.status, run.error);
+    },
+    wake: async run => {
+      const issueId = run.issueId ?? run.nativeIssueId ?? readNonEmptyString(parseObject(run.contextSnapshot).issueId);
+      if (!issueId) return;
+      await enqueueWakeup(run.agentId, { source: "automation", triggerDetail: "system", reason: "external_session_gone",
+        requestedByActorType: "system", requestedByActorId: "external-liveness", idempotencyKey: `liveness:${run.id}`,
+        payload: { issueId }, contextSnapshot: { issueId, source: "external.liveness", forceFreshSession: true,
+          recovery: { predecessorRunId: run.id, outcomesUnknown: true },
+          prompt: "The previous external session is gone. Its action outcomes are unknown. Inspect current task state and verify prior effects before continuing; do not blindly replay earlier actions." },
+      });
+    },
+  });
+
   async function executeRun(
     runId: string,
     runOptions: {
@@ -3366,6 +3441,12 @@ export function heartbeatService(
         if (!runtimeSelection.selected) return;
         const { nativeExecution, nativeRunnerInstanceId, getNativeFreshSessionHandoff } = runtimeSelection;
         nativeWorkspaceSync = runtimeSelection.nativeWorkspaceSync;
+        if (run.runtimeMode !== "native" && adapter.observeRun) {
+          // Keep reference-bearing admission config, never resolved runtime secrets.
+          await db.update(heartbeatRuns).set({ runnerProfileJson:
+            sql`coalesce(${heartbeatRuns.runnerProfileJson}, '{}'::jsonb) || ${JSON.stringify({ externalObservation: { adapterType: agent.adapterType, config: mergedConfig } })}::jsonb`,
+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.observerEpoch, run.observerEpoch)));
+        }
         const execution = await measureRunPhase("execution.runtime", () => executeHeartbeatRuntime(db, {
           run, agent, options,
           task: {
@@ -3696,6 +3777,9 @@ export function heartbeatService(
       if (managedAiRuntime) await managedAiRuntime.cleanup().catch(() => logger.warn({ runId: run.id }, "AI connection refresh or cleanup failed"));
       let latestRun = await getRun(run.id).catch(() => null);
       try {
+        // Teardown is an observer effect too. An old executor must not use a
+        // freshly loaded successor row as authority to stop its environment.
+        if (latestRun?.externalRunHandle && latestRun.status === "running") return;
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status)) {
           await db
             .update(heartbeatRuns)
@@ -3883,7 +3967,7 @@ export function heartbeatService(
 
         latestRun = await getRun(run.id).catch(() => null);
         if (latestRun && isHeartbeatRunTerminalStatus(latestRun.status) && !isNativeRunnerOwnershipHeld(latestRun)) {
-          await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
+          await appendRunEvent(latestRun, { eventType: "lifecycle", stream: "system", level: "info", message: "task.run.measured",
             payload: { phase: "task.run.measured", durationMs: Date.now() - (latestRun.startedAt ?? latestRun.createdAt).getTime(),
               outcome: latestRun.status, durableSettlement: true } }).catch(error => logger.warn({ runId: run.id, error }, "Could not record terminal run duration"));
         }
@@ -4070,6 +4154,8 @@ export function heartbeatService(
     reconcileHotRestartAdoption,
     recoverNativeRunsAfterRestart,
     reapOrphanedRuns,
+    sweepExternalRunLiveness: externalLiveness.sweep,
+    consumeExternalRunLivenessOutbox: externalLiveness.consumeOutbox,
     sweepOrphanedActiveLeases,
     sweepPendingCleanupLeases,
     // Override-aware scheduling-suppression check (honors the worktree

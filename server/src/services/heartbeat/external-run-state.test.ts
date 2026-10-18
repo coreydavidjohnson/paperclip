@@ -7,7 +7,7 @@ import * as state from "./external-run-state.js";
 import { createHeartbeatRunOutput } from "./run-output.js";
 import { createAgentIdentityRedactor } from "../agent-identity-redaction.js";
 import { subscribeCompanyLiveEvents } from "../live-events.js";
-vi.mock("./run-lifecycle.js", () => ({ isHeartbeatRunRuntimeStatusActive: () => true, publishHeartbeatRunRuntimeProgress: vi.fn() }));
+vi.mock("./run-lifecycle.js", async original => ({ ...await original<typeof import("./run-lifecycle.js")>(), isHeartbeatRunRuntimeStatusActive: () => true, publishHeartbeatRunRuntimeProgress: vi.fn() }));
 const support = await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)("external run observer state", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;

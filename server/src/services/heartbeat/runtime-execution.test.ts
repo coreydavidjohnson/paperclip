@@ -148,8 +148,9 @@ describe.skipIf(!support.supported)("heartbeat runtime execution boundary", () =
     const { input, adapter, run } = await fixture();
     await db.update(heartbeatRuns).set({ status: "cancelled", resultJson: { stoppedByUser: true } }).where(eq(heartbeatRuns.id, run.id));
     adapter.execute.mockResolvedValueOnce({ exitCode: 0, signal: null, timedOut: false, executionRecovery: { kind: "bootstrap", providerWorkStarted: false } });
-    await executeHeartbeatRuntime(db, input);
-    expect(await read(run.id)).toMatchObject({ status: "cancelled", resultJson: { stoppedByUser: true }, usageJson: { accountingProviderWorkStarted: false } });
+    await expect(executeHeartbeatRuntime(db, input)).rejects.toThrow("external_run_observer_lost");
+    expect(adapter.execute).not.toHaveBeenCalled();
+    expect(await read(run.id)).toMatchObject({ status: "cancelled", resultJson: { stoppedByUser: true } });
     expect(await db.select().from(runUsageReceipts)).toHaveLength(0);
     expectCleanup(input);
   });
