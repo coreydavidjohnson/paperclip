@@ -52,7 +52,7 @@ test('wrapper preserves arguments and pnpm failure status', () => {
         PAPERCLIP_BUILD_CPUS: '6', PAPERCLIP_BUILD_MEMORY_BYTES: String(6 * 1024 ** 3) },
     });
     assert.equal(result.status, 37, result.stderr);
-    const expected = pnpmBudget(6, 6 * 1024 ** 3);
+    const expected = pnpmBudget(Math.min(6, cgroupCpuLimit() || Infinity), Math.min(6 * 1024 ** 3, process.constrainedMemory?.() || Infinity));
     assert.equal(result.stdout, `${expected.pnpmWorkers} install --frozen-lockfile`);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
