@@ -1,7 +1,8 @@
+import { externalObserverCondition, persistExternalRunDispatchDeadline, persistExternalRunHandle, recordExternalRunProgress } from "./external-run-state.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { parseNativeSessionGoalControl } from "./scheduling.js";
-import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
+import { isHeartbeatRunTerminalStatus, persistHeartbeatRunProcessMetadata } from "./run-lifecycle.js";
 import {
   PAPERCLIP_WAKE_PAYLOAD_KEY,
   configuredPaperclipApiBaseUrl,
@@ -791,7 +792,10 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       }
       const guardedDispatch =
         await dispatchWithTiming(
-          (markDispatchStarted) => {
+          async (markDispatchStarted) => {
+            if (!await persistExternalRunDispatchDeadline(db, run)) {
+              throw new Error("external_run_observer_lost");
+            }
             input.effects.onLegacyAdapterEntered();
             return withAdapterExecutionPhase(executionPhaseContext, "adapter_execution", () => adapter.execute({
               getFreshSessionHandoff,
@@ -821,12 +825,18 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               onUsage: async receipt => { await usageRecorder.capture(receipt); },
               onExecutionPhase: executionControl.phases.enter,
               startupTraceContext: getStartupTraceContext(),
+              onExternalRunHandle: async handle => {
+                if (!await persistExternalRunHandle(db, run, handle)) {
+                  throw new Error("external_run_observer_lost");
+                }
+              },
               onRuntimeProgress: async (progress) => {
-                await recordCurrentHeartbeatRunRuntimeProgress(
-                  run,
-                  progress,
-                  issueId,
-                );
+                await db.transaction(async tx => {
+                  if (!await recordExternalRunProgress(tx as unknown as Db, run)) return;
+                  // The UPDATE keeps the row locked until publication finishes.
+                  // Otherwise takeover can race the lifecycle's asynchronous read.
+                  await recordCurrentHeartbeatRunRuntimeProgress(run, progress, issueId);
+                });
               },
               onProviderStopped: collectStoppedInstructions,
               onDispatch: markDispatchStarted,
@@ -859,8 +869,12 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                 }
               },
               onSpawn: async (meta) => {
-                markDispatchStarted();
-                await persistRunProcessMetadata(run.id, {
+                await db.transaction(async tx => {
+                  const [owned] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+                    .where(externalObserverCondition(run)).for("update").limit(1);
+                  if (!owned) return;
+                  markDispatchStarted();
+                  await persistHeartbeatRunProcessMetadata(tx as unknown as Db, run.id, {
                   pid: meta.pid,
                   processGroupId:
                     "processGroupId" in meta &&
@@ -868,6 +882,8 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                       ? meta.processGroupId
                       : null,
                   startedAt: meta.startedAt,
+                  targetKind: executionTarget?.kind ?? "local",
+                  });
                 });
               },
               authToken: authToken ?? undefined,
@@ -904,7 +920,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       // while durably recording the proof needed to release admission.
       await db.update(heartbeatRuns).set({ costAccountingPending: true,
         usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || '{"accountingProviderWorkStarted":false}'::jsonb`,
-      }).where(and(eq(heartbeatRuns.id, run.id), isNull(heartbeatRuns.costAccountedAt)));
+      }).where(and(externalObserverCondition(run), isNull(heartbeatRuns.costAccountedAt)));
     }
     adapterResult = applyWorkspaceRestoreFailure(adapterResult);
     // A returned result can include a failed restore. Keep the workspace
@@ -933,10 +949,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           .update(heartbeatRuns)
           .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
           .where(
-            and(
-              eq(heartbeatRuns.id, run.id),
-              eq(heartbeatRuns.status, "running"),
-            ),
+            externalObserverCondition(run),
           );
         const workspaceFinalizeStatus = hasWorkspaceRestoreFailure(adapterResult.resultJson) ? "failed" : "succeeded";
         await recordWorkspaceFinalize(workspaceFinalizeStatus);
@@ -1009,10 +1022,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       .update(heartbeatRuns)
       .set({ executionControlDeadlineAt: new Date(Date.now() + 60_000) })
       .where(
-        and(
-          eq(heartbeatRuns.id, run.id),
-          eq(heartbeatRuns.status, "running"),
-        ),
+        externalObserverCondition(run),
       );
     if (
       issueRef &&

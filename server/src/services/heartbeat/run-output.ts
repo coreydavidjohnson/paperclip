@@ -1,13 +1,16 @@
-import { eq } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
 import type { AdapterInvocationMeta, AdapterRuntimeEvent } from "../../adapters/index.js";
-import { redactCurrentUserText, type CurrentUserRedactionOptions } from "../../log-redaction.js";
+import { redactCurrentUserText, redactCurrentUserValue, type CurrentUserRedactionOptions } from "../../log-redaction.js";
 import type { createAgentIdentityRedactor } from "../agent-identity-redaction.js";
 import { touchHeartbeatRunRuntimeStatus } from "../heartbeat-run-runtime-status.js";
 import { publishLiveEvent } from "../live-events.js";
 import type { RunLogHandle, RunLogStore } from "../run-log-store.js";
-import { appendExcerpt, compactRunLogChunk } from "./run-log.js";
+import { appendExcerpt, compactRunLogChunk, boundHeartbeatRunEventPayloadForStorage } from "./run-log.js";
 import { isHeartbeatRunRuntimeStatusActive, publishHeartbeatRunRuntimeProgress, type createHeartbeatLifecycle } from "./run-lifecycle.js";
+import { externalObserverCondition, recordExternalRunProgress } from "./external-run-state.js";
+import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
+import { redactEventPayload, redactSensitiveText } from "../../redaction.js";
 
 const MAX_LIVE_LOG_CHUNK_BYTES = 8 * 1024;
 export const ACTIVE_RUN_OUTPUT_PROGRESS_FLUSH_INTERVAL_MS = 60 * 1000;
@@ -28,7 +31,7 @@ export interface HeartbeatRunOutputInput {
 
 /** One recorder per execution attempt; the log store itself stays service-scoped. */
 export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput) {
-  const { run, runId, issueId, runLogStore, identityRedactor, secretKeys, appendRunEvent, getCurrentUserRedactionOptions } = input;
+  const { run, issueId, runLogStore, identityRedactor, secretKeys, getCurrentUserRedactionOptions } = input;
   let handle: RunLogHandle | null = null;
   let stdoutExcerpt = "";
   let stderrExcerpt = "";
@@ -44,7 +47,15 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
     } | null;
   } = { pending: null };
   let persistedLogBytes = Number(run.logBytes ?? 0);
-  const flushOutputProgress = async (opts?: { force?: boolean }) => {
+  // Keep non-transactional log I/O and publication inside the row lock, so
+  // takeover cannot commit midway through an old observer's output effect.
+  const withObserver = async <T>(effect: (tx: Db) => Promise<T>) => db.transaction(async tx => {
+    const [current] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+      .where(externalObserverCondition(run)).for("update").limit(1);
+    if (!current) return;
+    return effect(tx as unknown as Db);
+  });
+  const persistOutputProgress = async (tx: Db, opts?: { force?: boolean }) => {
     const pendingOutputProgress = outputProgressState.pending;
     if (!pendingOutputProgress) return;
     const shouldFlush =
@@ -53,41 +64,32 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
       pendingOutputProgress.at.getTime() - lastOutputFlushAt.getTime() >=
         ACTIVE_RUN_OUTPUT_PROGRESS_FLUSH_INTERVAL_MS;
     if (!shouldFlush) return;
-    await db
+    await tx
       .update(heartbeatRuns)
       .set({
         lastOutputAt: pendingOutputProgress.at,
         lastOutputSeq: pendingOutputProgress.seq,
         lastOutputStream: pendingOutputProgress.stream,
         lastOutputBytes: pendingOutputProgress.bytes,
-        updatedAt: new Date(),
+        updatedAt: sql`clock_timestamp()`,
       })
-      .where(eq(heartbeatRuns.id, run.id));
+      .where(externalObserverCondition(run));
     lastOutputFlushAt = pendingOutputProgress.at;
     outputProgressState.pending = null;
   };
-  // Bind handlers to the run row persisted at execution start. Progress writes
-  // above use only the immutable run ID from the initial row.
-  async function begin(currentRun: Run) {
-    const run = currentRun;
-    handle = await runLogStore.begin({
-      companyId: run.companyId,
-      agentId: run.agentId,
-      runId,
+  const flushOutputProgress = (opts?: { force?: boolean }) =>
+    withObserver(tx => persistOutputProgress(tx, opts));
+  async function begin(_currentRun: Run) {
+    await withObserver(async tx => {
+      handle = await runLogStore.begin({ companyId: run.companyId, agentId: run.agentId, runId: run.id });
+      await tx.update(heartbeatRuns).set({ logStore: handle.store, logRef: handle.logRef,
+        updatedAt: sql`clock_timestamp()`,
+      }).where(externalObserverCondition(run));
     });
-
-    await db
-      .update(heartbeatRuns)
-      .set({
-        logStore: handle.store,
-        logRef: handle.logRef,
-        updatedAt: new Date(),
-      })
-      .where(eq(heartbeatRuns.id, runId));
 
     const currentUserRedactionOptions =
       await getCurrentUserRedactionOptions();
-    const appendIdentityRedactedLog = async (stream: "stdout" | "stderr", chunk: string) => {
+    const appendIdentityRedactedLog = (stream: "stdout" | "stderr", chunk: string) => withObserver(async tx => {
       const sanitizedChunk = compactRunLogChunk(
         redactCurrentUserText(chunk, currentUserRedactionOptions),
       );
@@ -95,7 +97,8 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         stdoutExcerpt = appendExcerpt(stdoutExcerpt, sanitizedChunk);
       if (stream === "stderr")
         stderrExcerpt = appendExcerpt(stderrExcerpt, sanitizedChunk);
-      const ts = new Date().toISOString();
+      const [clock] = await tx.execute<{ at: string }>(sql`select clock_timestamp() as at`);
+      const ts = new Date(clock!.at).toISOString();
 
       outputSeq += 1;
       const chunkSeq = outputSeq;
@@ -115,7 +118,8 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
         stream,
         bytes: persistedLogBytes,
       };
-      await flushOutputProgress();
+      await recordExternalRunProgress(tx, run);
+      await persistOutputProgress(tx);
 
       // Streamed CLI output is real run activity: keep the in-memory
       // runtime status ("Working... / X ago") fresh between structured
@@ -161,9 +165,32 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
           truncated: payloadChunk.length !== sanitizedChunk.length,
         },
       });
-    };
+    });
     const onLog = (stream: "stdout" | "stderr", chunk: string) =>
       appendIdentityRedactedLog(stream, identityRedactor.chunk(stream, chunk));
+    const appendOutputEvent = (event: AdapterRuntimeEvent) => withObserver(async tx => {
+      const eventType = event.eventType.trim().slice(0, 120);
+      if (!eventType) return;
+      const message = event.message
+        ? redactSensitiveText(redactCurrentUserText(event.message, currentUserRedactionOptions)) : event.message;
+      const payload = event.payload
+        ? redactCurrentUserValue(redactEventPayload(boundHeartbeatRunEventPayloadForStorage(event.payload)), currentUserRedactionOptions)
+        : event.payload;
+      const persisted = await appendHeartbeatRunEvent(tx, { companyId: run.companyId,
+        runId: run.id, agentId: run.agentId, ...event, eventType, message, payload });
+      await recordExternalRunProgress(tx, run);
+      publishLiveEvent({ companyId: run.companyId, type: "heartbeat.run.event", payload: {
+        runId: run.id, agentId: run.agentId, issueId, seq: persisted.row.seq,
+        eventType, stream: event.stream ?? null, level: event.level ?? null, color: event.color ?? null,
+        message: message ?? null, payload: payload ?? null,
+        lastEventAt: persisted.row.createdAt.toISOString(),
+      } });
+      if (eventType !== "adapter.invoke" && eventType !== "lifecycle") {
+        const touched = touchHeartbeatRunRuntimeStatus({ companyId: run.companyId,
+          issueId, agentId: run.agentId, runId: run.id, at: persisted.row.createdAt });
+        if (touched) publishHeartbeatRunRuntimeProgress(touched);
+      }
+    });
     const onAdapterMeta = async (meta: AdapterInvocationMeta) => {
       meta = identityRedactor.redact(meta);
       if (meta.env && secretKeys.size > 0) {
@@ -171,28 +198,10 @@ export function createHeartbeatRunOutput(db: Db, input: HeartbeatRunOutputInput)
           if (key in meta.env) meta.env[key] = "***REDACTED***";
         }
       }
-      await appendRunEvent(currentRun, {
-        eventType: "adapter.invoke",
-        stream: "system",
-        level: "info",
-        message: "adapter invocation",
-        payload: meta as unknown as Record<string, unknown>,
-      });
+      await appendOutputEvent({ eventType: "adapter.invoke", stream: "system", level: "info",
+        message: "adapter invocation", payload: meta as unknown as Record<string, unknown> });
     };
-
-    const onAdapterEvent = async (event: AdapterRuntimeEvent) => {
-      event = identityRedactor.redact(event);
-      const eventType = event.eventType.trim();
-      if (!eventType) return;
-      await appendRunEvent(currentRun, {
-        eventType: eventType.slice(0, 120),
-        stream: event.stream,
-        level: event.level,
-        color: event.color,
-        message: event.message,
-        payload: event.payload,
-      });
-    };
+    const onAdapterEvent = (event: AdapterRuntimeEvent) => appendOutputEvent(identityRedactor.redact(event));
 
     return { currentUserRedactionOptions, appendIdentityRedactedLog, onLog, onAdapterMeta, onAdapterEvent };
   }
