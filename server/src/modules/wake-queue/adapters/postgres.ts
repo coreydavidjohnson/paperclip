@@ -14,6 +14,9 @@ import {
   chatActions,
   heartbeatRuns,
   issueComments,
+  issueThreadInteractions,
+  issueApprovals,
+  approvals,
   issueRecoveryActions,
   issueRelations,
   issues,
@@ -217,6 +220,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
     },
 
     async findNextDeferredWake({ companyId, issueId, excludedWakeIds }) {
+      const heldWakeIds = [...(excludedWakeIds ?? [])];
       while (true) {
         const row = await tx
           .select()
@@ -225,7 +229,7 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
             and(
               eq(agentWakeupRequests.companyId, companyId),
               eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
-              excludedWakeIds?.length ? notInArray(agentWakeupRequests.id, excludedWakeIds) : undefined,
+              heldWakeIds.length ? notInArray(agentWakeupRequests.id, heldWakeIds) : undefined,
               sql`${agentWakeupRequests.payload} ->> 'issueId' = ${issueId}`,
               interruptQueueId ? eq(agentWakeupRequests.id, interruptQueueId) : undefined,
               interruptQueueId ? eq(agentWakeupRequests.agentId, run.agentId) : undefined,
@@ -235,6 +239,21 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
           .limit(1)
           .then((rows) => rows[0] ?? null);
         if (!row) return null;
+        // Releasing the terminal source again cannot consume a held recovery wake.
+        if (row.idempotencyKey?.startsWith("liveness:")) {
+          const readiness = await issuesSvc.getDependencyReadiness(issueId);
+          const [card] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
+            .where(and(eq(issueThreadInteractions.companyId, companyId), eq(issueThreadInteractions.issueId, issueId),
+              eq(issueThreadInteractions.status, "pending"))).limit(1);
+          const [approval] = await tx.select({ id: approvals.id }).from(issueApprovals)
+            .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, companyId)))
+            .where(and(eq(issueApprovals.companyId, companyId), eq(issueApprovals.issueId, issueId),
+              inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
+          if (!readiness.isDependencyReady || card || approval) {
+            heldWakeIds.push(row.id);
+            continue;
+          }
+        }
         const candidate = toDeferredWakeCandidate(row);
         try {
           const authorizedFailedChatRetry = await authorizeFailedChatRunRetryWake(

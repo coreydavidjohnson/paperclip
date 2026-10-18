@@ -214,8 +214,9 @@ heartbeat.ts.
   takeover and observer-epoch/version fencing. Terminal transitions persist the
   epoch and provider-stop intent together; a claimed outbox retries cleanup.
   Unknown and deadline endings require reconciliation, never automatic replay.
-  Confirmed-gone wakes preserve pending question/approval admission gates;
-  one durable deferred receipt resumes after the card is resolved.
+  Confirmed-gone wakes preserve pending question/approval and dependency gates;
+  one durable deferred receipt keeps recovery context until the gate is resolved.
+  Release redelivery rechecks those gates; stranded admission retains receipt identity.
   Observer setup always releases lease renewal on failure. Configuration lookup,
   probe and stop each have a ten-second bound, including never-settling lookups.
   Prepared/submission-unknown handles become eligible for a probe after ten minutes.

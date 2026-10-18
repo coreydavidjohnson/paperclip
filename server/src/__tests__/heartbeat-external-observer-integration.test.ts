@@ -1,4 +1,4 @@
-import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, approvals, issueApprovals, issueThreadInteractions } from "@paperclipai/db";
+import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, approvals, issueApprovals, issueThreadInteractions, issueRelations } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -120,17 +120,23 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
   expect(requests).toHaveLength(1);expect(runs).toHaveLength(2);expect(execute).toHaveBeenCalledOnce();
   expect(await read(run.id)).toMatchObject({status:"failed",errorCode:"external_session_gone"});
  });
- it.each(["question", "approval"] as const)("does not bypass a pending %s during gone recovery", async kind => {
+ it.each(["question", "approval", "dependency"] as const)("does not bypass a pending %s during gone recovery", async kind => {
   const run=await fixture();
   const [task]=await db.insert(issues).values({companyId:run.companyId,title:"[test] held recovery",status:"in_progress",assigneeAgentId:run.agentId,responsibleUserId:"board-user",executionRunId:run.id}).returning();
   await db.update(companies).set({defaultResponsibleUserId:"board-user"}).where(eq(companies.id,run.companyId));
   await db.update(heartbeatRuns).set({issueId:task.id,contextSnapshot:{issueId:task.id}}).where(eq(heartbeatRuns.id,run.id));
-  if(kind==="approval") {
+  let blockerId: string | undefined;
+  if(kind==="dependency") {
+   const [blocker]=await db.insert(issues).values({companyId:run.companyId,title:"[test] prerequisite",status:"todo",responsibleUserId:"board-user"}).returning();
+   blockerId=blocker.id;
+   await db.insert(issueRelations).values({companyId:run.companyId,issueId:blocker.id,relatedIssueId:task.id,type:"blocks"});
+  } else if(kind==="approval") {
    const [approval]=await db.insert(approvals).values({companyId:run.companyId,type:"test",status:"pending",payload:{}}).returning();
    await db.insert(issueApprovals).values({companyId:run.companyId,issueId:task.id,approvalId:approval.id});
   } else await db.insert(issueThreadInteractions).values({companyId:run.companyId,issueId:task.id,kind:"question",status:"pending",payload:{}} as never);
   probe.mockResolvedValue({state:"gone",authoritative:true,reason:"gone while waiting"});
-  execute.mockImplementationOnce(async()=>{
+  execute.mockImplementationOnce(async ctx=>{
+   expect(ctx.context.recovery).toMatchObject({predecessorRunId:run.id,outcomesUnknown:true});
    await db.update(issues).set({status:"done",completedAt:new Date()}).where(eq(issues.id,task.id));
    return {exitCode:0,signal:null,timedOut:false,resultJson:{}};
   });
@@ -138,12 +144,20 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
   expect(execute).not.toHaveBeenCalled();
   expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId,run.agentId))).toHaveLength(1);
   if(kind==="approval") expect((await db.select().from(approvals).where(eq(approvals.companyId,run.companyId)))[0].status).toBe("pending");
-  else expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId,task.id)))[0].status).toBe("pending");
+  else if(kind==="question") expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId,task.id)))[0].status).toBe("pending");
+  if(blockerId) expect(await db.select().from(issueRelations).where(eq(issueRelations.issueId,blockerId))).toHaveLength(1);
   const receipts=await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey,`liveness:${run.id}`));
   expect(receipts).toHaveLength(1);expect(receipts[0].status).toBe("deferred_issue_execution");
-  await heartbeat.consumeExternalRunLivenessOutbox();
+  await db.update(runLivenessOutbox).set({status:"pending",nextAttemptAt:new Date(0)}).where(eq(runLivenessOutbox.runId,run.id));
+  await Promise.all([heartbeat.consumeExternalRunLivenessOutbox(),heartbeat.consumeExternalRunLivenessOutbox()]);
   expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey,`liveness:${run.id}`))).toHaveLength(1);
+  await db.update(agentWakeupRequests).set({requestedAt:new Date(Date.now()-180000)}).where(eq(agentWakeupRequests.id,receipts[0].id));
+  await heartbeat.resumeQueuedRuns();await heartbeat.drainActiveRunExecutions();
+  expect(execute).not.toHaveBeenCalled();
+  expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId,run.agentId))).toHaveLength(1);
+  expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id,receipts[0].id)))[0].status).toBe("deferred_issue_execution");
   if(kind==="approval") await db.update(approvals).set({status:"approved"}).where(eq(approvals.companyId,run.companyId));
+  else if(blockerId) await db.update(issues).set({status:"done",completedAt:new Date()}).where(eq(issues.id,blockerId));
   else await db.update(issueThreadInteractions).set({status:"resolved"}).where(eq(issueThreadInteractions.issueId,task.id));
   await db.update(agentWakeupRequests).set({requestedAt:new Date(Date.now()-180000)}).where(eq(agentWakeupRequests.id,receipts[0].id));
   await heartbeat.resumeQueuedRuns();await heartbeat.drainActiveRunExecutions();

@@ -1826,6 +1826,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           requestedByActorType: wake.requestedByActorType as WakeupOptions["requestedByActorType"],
           requestedByActorId: wake.requestedByActorId,
           strandedWakeRequestId: wake.id,
+          idempotencyKey: wake.idempotencyKey ?? undefined,
           issueStateGuard: { assigneeAgentId: wake.agentId, statuses: ["todo", "in_progress"] },
         }, wake.id).catch(err => {
           logger.warn({ err, queueId: wake.id }, "failed to admit stranded deferred wake");
@@ -3264,8 +3265,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId)))
               .where(and(eq(issueApprovals.companyId, issue.companyId), eq(issueApprovals.issueId, issue.id),
                 inArray(approvals.status, ["pending", "revision_requested"])));
-            if (cards.length || pendingApprovals.length) {
-              const condition = { pendingInteractionIds: cards.map(card => card.id), pendingApprovalIds: pendingApprovals.map(approval => approval.id) };
+            const readiness = await issuesSvc.listDependencyReadiness(issue.companyId, [issue.id], tx)
+              .then(rows => rows.get(issue.id));
+            if (cards.length || pendingApprovals.length || readiness?.isDependencyReady === false) {
+              const condition = { pendingInteractionIds: cards.map(card => card.id), pendingApprovalIds: pendingApprovals.map(approval => approval.id), unresolvedBlockerIssueIds: readiness?.unresolvedBlockerIssueIds ?? [] };
               if (executionWaitRequestId) await tx.update(agentWakeupRequests).set({
                 status: "deferred_issue_execution", runId: null, claimedAt: null, finishedAt: null,
               }).where(eq(agentWakeupRequests.id, executionWaitRequestId));
