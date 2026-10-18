@@ -37,7 +37,7 @@ export function legacyControllerClaim(runtimeMode: string) {
 
 export async function renewLegacyControllerLease(
   db: Db,
-  run: Pick<Run, "id" | "companyId" | "controllerBootId">,
+  run: Pick<Run, "id" | "companyId" | "controllerBootId" | "observerEpoch">,
   stage?: "dispatching",
 ): Promise<boolean> {
   const [renewed] = await db.update(heartbeatRuns).set({
@@ -47,6 +47,7 @@ export async function renewLegacyControllerLease(
     eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
     eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
     eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+    eq(heartbeatRuns.observerEpoch, run.observerEpoch),
     gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
   )).returning({ id: heartbeatRuns.id });
   return Boolean(renewed);
