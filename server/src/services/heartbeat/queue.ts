@@ -3299,7 +3299,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 wait.pendingInteractionIds.includes(enrichedContextSnapshot.interactionId));
           };
           const livenessReceipt = livenessReceipts.find(wake =>
-            (!wake.runId && wake.status === "deferred_issue_execution") ||
+            (!wake.runId && ["deferred_issue_execution", "skipped", "coalesced"].includes(wake.status)) ||
               (wake.runId && resolvesLivenessGate(wake)));
           if (livenessReceipt) {
             const saved = parseObject(livenessReceipt.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
@@ -4213,7 +4213,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                     and(
                       eq(agentWakeupRequests.companyId, issue.companyId),
                       inArray(agentWakeupRequests.agentId, handoffSource ? [agentId, handoffSource.agentId] : [agentId]),
-                      eq(agentWakeupRequests.status, "deferred_issue_execution"),
+                      or(eq(agentWakeupRequests.status, "deferred_issue_execution"),
+                        livenessReceipt && !livenessReceipt.runId ? eq(agentWakeupRequests.id, livenessReceipt.id) : undefined),
                       sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
                       canCoalesceComments ? undefined : inArray(agentWakeupRequests.id,
                          [executionWaitRequestId, livenessReceipt?.id].filter((id): id is string => Boolean(id))),
