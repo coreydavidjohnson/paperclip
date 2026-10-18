@@ -105,3 +105,13 @@ service, runtime server or retained-volume workload was created.
 Rule: detect or supply actual job allocations before sizing package-manager
 workers. Revalidate the pnpm subtraction formula on a version upgrade. Keep
 failed acceptance evidence when a later bounded run passes.
+
+Final verification follow-up: the exact `ad026c0bcd53a4cc857324b56c88855ceb472fca`
+archive passed the real deps target with the successful install layer cached
+(the recipe and all deps-stage inputs were unchanged). A separate Node24
+regression context initially omitted `/app/Dockerfile` and failed its structural
+assertion with ENOENT; adding the committed Dockerfile as a read-only test input
+corrected that diagnostic context. All four checks then passed on Node24.22.0,
+and a direct read of installed pnpm9.15.4 confirmed the subtraction formula.
+Neither diagnostic context is a release gate pass. The final documentation-only
+follow-up leaves the dependency recipe unchanged.
