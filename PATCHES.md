@@ -219,6 +219,14 @@ heartbeat.ts.
   `services/heartbeat/external-run-state.ts`, `external-run-liveness.ts`,
   runtime/output/completion/lifecycle/recovery/queue integration, controller lease,
   `server/src/index.ts`, and their PostgreSQL and unit regression suites.
+- PER-1009 / PER-1016 deferred-wake repair: an unlocked todo/in_progress issue
+  retries its oldest saved wake after two minutes via normal queue admission.
+  The issue lock fences competing sweeps; pending approval/question cards,
+  dependencies, Stop, active no-replay holds and outstanding cleanup still gate it.
+  Regression: `server/src/__tests__/heartbeat-stranded-wakes-db.test.ts`, included
+  in `luma-patch-tests` (real PostgreSQL, refreshed updated_at, concurrent sweeps).
+  Upstream recheck: `391dd15ff` recovers released comment queues but still filters
+  for comment IDs or interaction responses; plain assignment wakes remain absent.
 - Deployment coupling: PER-1009 owns the schema-gated old-controller drain,
   OmniGenT adapter, parked-wake cutover, real staging matrix and combined release.
   Do not deploy the rebased fork before those gates pass.

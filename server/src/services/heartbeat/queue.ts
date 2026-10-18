@@ -82,6 +82,9 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueThreadInteractions,
+  issueApprovals,
+  approvals,
   issueRecoveryActions,
   issueRelations,
   issues,
@@ -936,6 +939,31 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
   }
 
+  async function hasPendingIssueRunCleanup(tx: Db, companyId: string, runId: string) {
+    const [pendingLease] = await tx.select({ id: environmentLeases.id })
+      .from(environmentLeases).where(and(
+        eq(environmentLeases.companyId, companyId),
+        eq(environmentLeases.heartbeatRunId, runId),
+        or(and(isNull(environmentLeases.releasedAt),
+            // Warm release deliberately retains the sandbox. Its successful
+            // receipt settles the old run without destroying the resource.
+            sql`not coalesce(${environmentLeases.status} = 'retained'
+              and ${environmentLeases.leasePolicy} = 'reuse_by_environment'
+              and ${environmentLeases.cleanupStatus} = 'success', false)`),
+          eq(environmentLeases.status, "pending_cleanup"),
+          eq(environmentLeases.cleanupStatus, "failed")),
+      )).limit(1);
+    const [finalization] = await tx.select({
+      phase: nativeRunFinalizations.phase, leaseOwner: nativeRunFinalizations.leaseOwner,
+    }).from(nativeRunFinalizations).where(and(
+      eq(nativeRunFinalizations.companyId, companyId),
+      eq(nativeRunFinalizations.runId, runId),
+    ));
+
+    return Boolean(pendingLease || (finalization && (finalization.leaseOwner ||
+      !["committed", "applied", "terminal_failure"].includes(finalization.phase))));
+  }
+
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
@@ -1175,27 +1203,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             liveRunExecutions.has(previousRunId)) {
           return { ownsIssue, blocked: true };
         }
-        const [pendingLease] = await tx.select({ id: environmentLeases.id })
-          .from(environmentLeases).where(and(
-            eq(environmentLeases.companyId, run.companyId),
-            eq(environmentLeases.heartbeatRunId, previousRunId),
-            or(and(isNull(environmentLeases.releasedAt),
-                // Warm release deliberately retains the sandbox. Its successful
-                // receipt settles the old run without destroying the resource.
-                sql`not coalesce(${environmentLeases.status} = 'retained'
-                  and ${environmentLeases.leasePolicy} = 'reuse_by_environment'
-                  and ${environmentLeases.cleanupStatus} = 'success', false)`),
-              eq(environmentLeases.status, "pending_cleanup"),
-              eq(environmentLeases.cleanupStatus, "failed")),
-          )).limit(1);
-        const [finalization] = await tx.select({
-          phase: nativeRunFinalizations.phase, leaseOwner: nativeRunFinalizations.leaseOwner,
-        }).from(nativeRunFinalizations).where(and(
-          eq(nativeRunFinalizations.companyId, run.companyId),
-          eq(nativeRunFinalizations.runId, previousRunId),
-        ));
-        if (pendingLease || (finalization && (finalization.leaseOwner ||
-            !["committed", "applied", "terminal_failure"].includes(finalization.phase)))) {
+        if (await hasPendingIssueRunCleanup(tx, run.companyId, previousRunId)) {
           return { ownsIssue, blocked: true };
         }
       }
@@ -1779,7 +1787,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     // A server restart or a message/cleanup race can leave a deferred wake
     // after its owner has released the issue lock. Revisit it through the same
     // release admission, so recovery holds and operator Stops still apply.
-    const strandedQueues = await db.select({ wake: agentWakeupRequests })
+    const strandedQueues = await db.select({ wake: agentWakeupRequests, issueStatus: issues.status })
       .from(agentWakeupRequests)
       .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
         sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
@@ -1788,13 +1796,42 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
         isNull(issues.executionRunId),
         or(and(
+          inArray(issues.status, ["todo", "in_progress"]),
+          lte(agentWakeupRequests.requestedAt, new Date(Date.now() - 120_000)),
+          sql`coalesce(${agentWakeupRequests.idempotencyKey}, '') not like 'chat-inbound:%'`,
+          sql`${agentWakeupRequests.payload}->>'dotRequestId' is null`,
+          sql`coalesce(${agentWakeupRequests.payload}->>'mutation', '') <> 'interaction'`,
+          sql`coalesce(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}', '[]'::jsonb) = '[]'::jsonb`,
+        ), and(
           sql`jsonb_typeof(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}') = 'array'`,
           sql`${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}' <> '[]'::jsonb`,
         ), sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`),
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
-      .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
-    for (const { wake } of strandedQueues) {
+      .orderBy(asc(agentWakeupRequests.requestedAt), asc(agentWakeupRequests.id)).limit(50);
+    const strandedIssues = new Set<string>();
+    for (const { wake, issueStatus } of strandedQueues) {
+      const issueKey = `${wake.companyId}:${String(wake.payload?.issueId)}`;
+      if (["todo", "in_progress"].includes(issueStatus) && wake.requestedAt.getTime() <= Date.now() - 120_000 &&
+          !wake.idempotencyKey?.startsWith("chat-inbound:") && !wake.payload?.dotRequestId &&
+          !queuedCommentIdsFromWakePayload(wake.payload).length && wake.payload?.mutation !== "interaction") {
+        if (strandedIssues.has(issueKey)) continue;
+        strandedIssues.add(issueKey);
+        const context = parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
+        await enqueueWakeup(wake.agentId, {
+          source: wake.source as WakeupOptions["source"],
+          triggerDetail: wake.triggerDetail as WakeupOptions["triggerDetail"],
+          reason: readNonEmptyString(context.wakeReason) ?? wake.reason,
+          payload: parseObject(wake.payload), contextSnapshot: context,
+          requestedByActorType: wake.requestedByActorType as WakeupOptions["requestedByActorType"],
+          requestedByActorId: wake.requestedByActorId,
+          strandedWakeRequestId: wake.id,
+          issueStateGuard: { assigneeAgentId: wake.agentId, statuses: ["todo", "in_progress"] },
+        }, wake.id).catch(err => {
+          logger.warn({ err, queueId: wake.id }, "failed to admit stranded deferred wake");
+        });
+        continue;
+      }
       if (!queuedCommentIdsFromWakePayload(wake.payload).length &&
           !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
       const [latest] = await db.select().from(heartbeatRuns).where(and(
@@ -2682,20 +2719,66 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(agentWakeupRequests.agentId, agentId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
               // A user message can join a queue originally created by a
               // system wake. Admission validates the saved user comment or board click.
-              (opts.queuedCommentInterruptId ?? opts.queuedCommentRequestId) === executionWaitRequestId
+              (opts.strandedWakeRequestId ?? opts.queuedCommentInterruptId ?? opts.queuedCommentRequestId) === executionWaitRequestId
                 ? undefined : eq(agentWakeupRequests.requestedByActorType, "user"),
               opts.queuedCommentInterruptId === executionWaitRequestId
                 ? sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt'->>'actorId' = ${opts.requestedByActorId ?? ""}`
-                : opts.queuedCommentRequestId === executionWaitRequestId ? undefined
+                : (opts.strandedWakeRequestId ?? opts.queuedCommentRequestId) === executionWaitRequestId ? undefined
                   : eq(agentWakeupRequests.requestedByActorId, opts.requestedByActorId ?? ""),
               sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
             ));
             // The issue lock serializes cleanup callbacks and periodic workers.
             // An adopted, discarded, or edited receipt is no longer authority.
-            if (!pending || (!(wakeCommentId && queuedCommentIdsFromWakePayload(pending.payload).includes(wakeCommentId)) &&
+            if (!pending || (!opts.strandedWakeRequestId && !(wakeCommentId && queuedCommentIdsFromWakePayload(pending.payload).includes(wakeCommentId)) &&
                 !(opts.queuedCommentInterruptId && await readQueuedInteractionResponse(tx as unknown as Db,
                   agent.companyId, issueId, pending.payload)))) {
               return { kind: "deferred" as const };
+            }
+            if (opts.strandedWakeRequestId) {
+              // Revalidate the durable receipt under normal admission's issue lock.
+              // Stale sweep reads cannot bypass cards or create a second successor.
+              const [task] = await tx.select().from(issues).where(and(
+                eq(issues.companyId, agent.companyId), eq(issues.id, issueId),
+              ));
+              const [live] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.companyId, agent.companyId),
+                or(eq(heartbeatRuns.nativeIssueId, issueId), eq(heartbeatRuns.issueId, issueId),
+                  sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
+                inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+              )).limit(1);
+              const [latest] = await tx.select().from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.companyId, agent.companyId),
+                or(eq(heartbeatRuns.nativeIssueId, issueId), eq(heartbeatRuns.issueId, issueId),
+                  sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
+              )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+              // Stop is not a new assignment. A terminal result also does not
+              // prove that the old workspace/lease finalizer has released it.
+              if (latest && (!isHeartbeatRunTerminalStatus(latest.status) ||
+                  liveRunExecutions.has(latest.id) ||
+                  (latest.status === "cancelled" && !(latest.startedAt === null &&
+                    latest.errorCode === "execution_reconciliation_required")) ||
+                  await hasPendingIssueRunCleanup(tx as unknown as Db, agent.companyId, latest.id))) {
+                return { kind: "deferred" as const };
+              }
+              const [card] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+                eq(issueThreadInteractions.companyId, agent.companyId), eq(issueThreadInteractions.issueId, issueId),
+                eq(issueThreadInteractions.status, "pending"),
+              )).limit(1);
+              const [approval] = await tx.select({ id: approvals.id }).from(issueApprovals)
+                .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId)))
+                .where(and(eq(issueApprovals.companyId, agent.companyId), eq(issueApprovals.issueId, issueId),
+                  inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
+              if (opts.strandedWakeRequestId !== executionWaitRequestId ||
+                  pending.requestedAt.getTime() > Date.now() - 120_000 || pending.payload?.queuedCommentInterrupt ||
+                  pending.idempotencyKey?.startsWith("chat-inbound:") || pending.payload?.dotRequestId ||
+                  queuedCommentIdsFromWakePayload(pending.payload).length || pending.payload?.mutation === "interaction" ||
+                  !task || task.executionRunId || task.hiddenAt || task.assigneeUserId ||
+                  task.assigneeAgentId !== agentId || !["todo", "in_progress"].includes(task.status) ||
+                  live || card || approval || await getExecutionBlocker(tx as unknown as Db, agent.companyId, issueId)) {
+                return { kind: "deferred" as const };
+              }
+              payload = parseObject(pending.payload);
+              Object.assign(enrichedContextSnapshot, parseObject(payload[DEFERRED_WAKE_CONTEXT_KEY]));
             }
             if (opts.queuedCommentRequestId) {
               const ids = await undeliveredLegacyUserCommentIds(tx as unknown as Db,

@@ -820,6 +820,8 @@ export async function resolveRunScopedMentionedSkillKeys(input: {
 
 
 export interface WakeupOptions {
+  /** Internal retry of an old deferred receipt after its issue owner released. */
+  strandedWakeRequestId?: string;
   /** Set only by authenticated board wake routes; never copied from caller payloads. */
   manualUserWake?: boolean;
   /** Internal resume of a queue with persisted board interruption intent. */
