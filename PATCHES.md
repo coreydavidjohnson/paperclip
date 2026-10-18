@@ -205,6 +205,25 @@ heartbeat.ts.
   gates and every suite named above. `production` copies `/app` from it.
 - Remove when: the fork carries no patches.
 
+## 17. Core external-run liveness (PER-966)
+
+- Why: a lost controller or quiet remote session must not occupy a run slot forever,
+  and a retry must not repeat work with unknown outcomes.
+- Contract: explicit turn-scoped dispatch handles, database progress/alive/deadline
+  clocks, bounded read-only probes, confirmed-gone recovery, probe-gated observe-only
+  takeover and observer-epoch/version fencing. Terminal transitions persist the
+  epoch and provider-stop intent together; a claimed outbox retries cleanup.
+  Unknown and deadline endings require reconciliation, never automatic replay.
+  Prepared/submission-unknown handles become eligible for a probe after ten minutes.
+- Files: adapter-utils contract, database migration `0355_run_liveness`,
+  `services/heartbeat/external-run-state.ts`, `external-run-liveness.ts`,
+  runtime/output/completion/lifecycle/recovery/queue integration, controller lease,
+  `server/src/index.ts`, and their PostgreSQL and unit regression suites.
+- Deployment coupling: PER-1009 owns the schema-gated old-controller drain,
+  OmniGenT adapter, parked-wake cutover, real staging matrix and combined release.
+  Do not deploy the rebased fork before those gates pass.
+- Remove when: upstream owns the same durable remote-run lifecycle.
+
 ## Homelab-owned settings (not fork patches)
 
 - Database indexes in `luma-homelab` `k8s/paperclip/70-db-indexes.yaml`

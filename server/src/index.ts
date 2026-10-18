@@ -1199,6 +1199,8 @@ async function startServerWithDatabaseTeardown(
   const executionControlSweepsInFlight = new Set<string>();
   const executionControlSweeps = [
     ["finalization", () => reconcileAbandonedExecutionControl(db)],
+    ["external_liveness", () => heartbeat?.sweepExternalRunLiveness()],
+    ["external_liveness_outbox", () => heartbeat?.consumeExternalRunLivenessOutbox()],
     ["replacement", () => heartbeat ? reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession: run => verifyStoppedNativeSessionForReplacement(db, run) }) : undefined],
     ["reconciliation_delivery", () => heartbeat ? deliverReconciledExecutions(db, heartbeat.wakeup) : undefined],
     ["status_delivery", () => deliverExecutionStatuses(db)],

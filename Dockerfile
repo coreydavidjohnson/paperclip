@@ -167,7 +167,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
   && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
     --hookTimeout=120000 --testTimeout=60000 \
     src/controller-drain.test.ts \
-    src/services/heartbeat/queue.test.ts \
+    src/services/heartbeat/queue.test.ts     src/services/heartbeat/external-run-state.test.ts     src/services/heartbeat/external-run-state.runtime.test.ts     src/services/heartbeat/external-run-liveness.test.ts     src/__tests__/heartbeat-external-liveness-db.test.ts     src/__tests__/heartbeat-external-observer-integration.test.ts     src/services/heartbeat/run-completion.test.ts     src/services/heartbeat/run-lifecycle.test.ts     src/services/legacy-controller-lease.test.ts     src/services/legacy-execution-recovery.test.ts \
     src/__tests__/heartbeat-process-recovery.test.ts \
     src/__tests__/live-events-transport.test.ts \
     src/__tests__/live-events-ws.test.ts \
