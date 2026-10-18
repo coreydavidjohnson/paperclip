@@ -25,7 +25,9 @@ export interface ExternalLivenessDecision {
 /** Evidence is persisted with the run version; progress invalidates prior gone evidence. */
 export function decideExternalRunLiveness(run: DecisionRun, result: ExternalRunProbe, now: Date): ExternalLivenessDecision {
   const previous = run.livenessProbe ?? {};
-  const probe: Record<string, unknown> = { ...result, checkedAt: now.toISOString() };
+  const probe: Record<string, unknown> = { ...result, checkedAt: now.toISOString(),
+    ...(previous.harvestAttempts !== undefined ? { harvestAttempts: previous.harvestAttempts } : {}),
+  };
   const decision: ExternalLivenessDecision = { probe, unknownSince: null };
   if (run.deadlineAt && run.deadlineAt <= now) return { ...decision, end: "external_deadline_exceeded" };
   switch (result.state) {
@@ -48,7 +50,7 @@ export function decideExternalRunLiveness(run: DecisionRun, result: ExternalRunP
       const attempts = Number(previous.harvestAttempts ?? 0);
       probe.harvestAttempts = attempts;
       if (!result.result && attempts >= 3) decision.end = "external_result_unavailable";
-      else if (!result.result) { probe.harvestAttempts = attempts + 1; decision.harvest = true; }
+      else if (!result.result) decision.harvest = true;
       return decision;
     }
   }
@@ -159,6 +161,7 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       const [claimed] = await db.update(heartbeatRuns).set({ controllerBootId: legacyControllerBootId,
         controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`, observerEpoch: sql`${heartbeatRuns.observerEpoch} + 1`,
         livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1`,
+        ...(decision.harvest ? { livenessProbe: sql`jsonb_set(coalesce(${heartbeatRuns.livenessProbe}, '{}'::jsonb), '{harvestAttempts}', to_jsonb(coalesce((${heartbeatRuns.livenessProbe}->>'harvestAttempts')::int, 0) + 1))` } : {}),
       }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.status, "running"),
         eq(heartbeatRuns.livenessVersion, updated.livenessVersion),
         or(sql`${heartbeatRuns.controllerLeaseExpiresAt} is null`,sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`),

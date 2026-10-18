@@ -3,13 +3,14 @@ import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, runLivenessOutbox } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase, getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
+import { persistExternalRunHandle, recordExternalRunProgress } from "../services/heartbeat/external-run-state.js";
 import { createExternalRunLivenessWorker } from "../services/heartbeat/external-run-liveness.js";
 const support = await getEmbeddedPostgresTestSupport();
 const suite = support.supported ? describe : describe.skip;
 suite("external liveness real transaction fences", () => {
  let db: ReturnType<typeof createDb>; let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
  beforeAll(async()=>{temp=await startEmbeddedPostgresTestDatabase("paperclip-liveness-");db=createDb(temp.connectionString);},120000);
- afterAll(async()=>{await temp?.cleanup();});
+ afterAll(async()=>{await db?.$client.end({timeout:0});await temp?.cleanup();});
  async function fixture() {
   const companyId=randomUUID(),agentId=randomUUID();
   await db.insert(companies).values({id:companyId,name:"Tests",issuePrefix:`T${companyId.slice(0,6)}`,defaultResponsibleUserId:"board-user"});
@@ -84,5 +85,36 @@ suite("external liveness real transaction fences", () => {
  it("provider circuit breaker bounds probes across many quiet runs",async()=>{
   const runs=await Promise.all(Array.from({length:9},()=>fixture()));let calls=0;await worker(async()=>{calls++;return {state:"unknown",reason:"provider outage"};}).sweep();
   expect(calls).toBeLessThanOrEqual(8);for(const run of runs)expect((await fresh(run.id)).status).toBe("running");
+ });
+});
+
+// Harvest budget is run state, not gone-confirmation evidence.
+suite("external harvest recovery budget", () => {
+ let db: ReturnType<typeof createDb>; let temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+ beforeAll(async()=>{temp=await startEmbeddedPostgresTestDatabase("paperclip-harvest-");db=createDb(temp.connectionString);},120000);
+ afterAll(async()=>{await db?.$client.end({timeout:0});await temp?.cleanup();});
+ it("caps unsuccessful harvests that each emit output and a refreshed handle across restarts",async()=>{
+  const companyId=randomUUID(),agentId=randomUUID();
+  await db.insert(companies).values({id:companyId,name:"Harvest",issuePrefix:`H${companyId.slice(0,6)}`});
+  await db.insert(agents).values({id:agentId,companyId,name:"Harvest",adapterType:"test_external"});
+  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",lastProgressAt:new Date(0),externalRunHandle:{sessionId:"harvest",dispatch:"accepted"}}).returning();
+  let harvests=0;
+  const deps={getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"settled"}),observeRun:async()=>({exitCode:0})} as any),
+   onSettled:async()=>{},onObserve:async(r:any)=>{if(r.id!==run.id)return;harvests++;await recordExternalRunProgress(db,r);await persistExternalRunHandle(db,r,{sessionId:"harvest",turnRef:String(harvests),dispatch:"accepted"});},onTerminal:async()=>{},wake:async()=>{}};
+  for(let i=0;i<4;i++){
+   await db.update(heartbeatRuns).set({lastProgressAt:new Date(0),livenessClaimedUntil:null,controllerLeaseExpiresAt:new Date(0)}).where(eq(heartbeatRuns.id,run.id));
+   await createExternalRunLivenessWorker(db,deps).sweep();
+  }
+  const [ended]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,run.id));
+  expect(harvests).toBe(3);expect(ended.errorCode).toBe("external_result_unavailable");
+ });
+ it("does not spend a harvest attempt while the current observer lease is valid",async()=>{
+  const companyId=randomUUID(),agentId=randomUUID();
+  await db.insert(companies).values({id:companyId,name:"Lease",issuePrefix:`L${companyId.slice(0,6)}`});
+  await db.insert(agents).values({id:agentId,companyId,name:"Lease",adapterType:"test_external"});
+  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",lastProgressAt:new Date(0),controllerLeaseExpiresAt:new Date(Date.now()+600000),externalRunHandle:{sessionId:"leased",dispatch:"accepted"}}).returning();
+  const w=createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"settled"}),observeRun:async()=>({exitCode:0})} as any),onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
+  await w.sweep();const [current]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,run.id));
+  expect(Number(current.livenessProbe?.harvestAttempts??0)).toBe(0);
  });
 });

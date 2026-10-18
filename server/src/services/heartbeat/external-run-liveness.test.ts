@@ -9,7 +9,7 @@ it('requires two stored gone confirmations', () => {
 
 it("settled results permit at most three harvest attempts", () => {
  const now=new Date();let run={deadlineAt:null,unknownSince:null,livenessProbe:null as Record<string,unknown>|null};
- for(let i=1;i<=3;i++){const d=decideExternalRunLiveness(run,{state:"settled"},now);expect(d.harvest).toBe(true);expect(d.probe.harvestAttempts).toBe(i);run={...run,livenessProbe:d.probe};}
+ for(let i=1;i<=3;i++){const d=decideExternalRunLiveness(run,{state:"settled"},now);expect(d.harvest).toBe(true);expect(d.probe.harvestAttempts).toBe(i-1);run={...run,livenessProbe:{...d.probe,harvestAttempts:i}};}
  expect(decideExternalRunLiveness(run,{state:"settled"},now).end).toBe("external_result_unavailable");
 });
 it("active evidence clears an outage clock and never advances progress", () => {

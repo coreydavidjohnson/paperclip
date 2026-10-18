@@ -18,8 +18,8 @@ function progressValues() {
   return {
     lastProgressAt: sql`clock_timestamp()`,
     unknownSince: null,
-    // A new observation invalidates all previous gone-confirmation evidence.
-    livenessProbe: null,
+    // Progress invalidates gone evidence, not the lifetime harvest budget.
+    livenessProbe: sql`case when ${heartbeatRuns.livenessProbe} ? 'harvestAttempts' then jsonb_build_object('harvestAttempts', ${heartbeatRuns.livenessProbe}->'harvestAttempts') else null end`,
     livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1`,
     updatedAt: sql`clock_timestamp()`,
   };
