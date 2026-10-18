@@ -3263,9 +3263,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             sql`${agentWakeupRequests.idempotencyKey} like 'liveness:%'`,
             sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
           )).orderBy(desc(agentWakeupRequests.createdAt));
+          // Exact saved-comment redelivery must reuse the bound recovery.
+          const boundCommentRunIds = new Set(wakeCommentId && livenessReceipts.some(wake => wake.runId)
+            ? (await tx.select().from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+                inArray(heartbeatRuns.id, livenessReceipts.flatMap(wake => wake.runId ? [wake.runId] : [])),
+              ))).filter(run => queuedCommentIdsFromRunContext(parseObject(run.contextSnapshot)).includes(wakeCommentId)).map(run => run.id) : []);
           const resolvesLivenessGate = (wake: typeof agentWakeupRequests.$inferSelect) => {
             const wait = parseObject(wake.payload?.executionWait);
-            return (reason === "approval_approved" && Array.isArray(wait.pendingApprovalIds) &&
+            return (wake.runId != null && boundCommentRunIds.has(wake.runId)) ||
+              (reason === "approval_approved" && Array.isArray(wait.pendingApprovalIds) &&
                 wait.pendingApprovalIds.includes(enrichedContextSnapshot.approvalId)) ||
               (isInteractionResolutionWakePayload(payload) && Array.isArray(wait.pendingInteractionIds) &&
                 wait.pendingInteractionIds.includes(enrichedContextSnapshot.interactionId));
@@ -3892,6 +3899,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               agent.companyId,
               tx as unknown as Db,
             );
+            // A provider handle survives this controller. Local process absence
+            // is not gone evidence; only the liveness worker may release it.
+            const externalExecutionRunId = activeExecutionRun.externalRunHandle
+              ? activeExecutionRun.id : null;
             const admission = await wakeQueue.admitWakeBehindIssueExecution(
               admissionScope,
               {
@@ -3915,7 +3926,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                     }
                   : undefined,
                 reason,
-                liveRunExecutions,
+                liveRunExecutions: {
+                  has: id => id === externalExecutionRunId || liveRunExecutions.has(id),
+                },
                 wakeCommentId,
                 forceFreshSession:
                   enrichedContextSnapshot.forceFreshSession === true,

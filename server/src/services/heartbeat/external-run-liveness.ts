@@ -231,8 +231,10 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
           const config=await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId,saved.config));
           await boundedExternalRunOperation(signal=>adapter.stopRun!({config,handle:run.externalRunHandle as ExternalRunHandle,signal}));
         } else if (row.action === "finalize_external_run") {
-          await dependencies.onTerminal(run);
+          // Persist/admit the recovery contract before releasing queued human
+          // input. Otherwise terminal cleanup can promote an unsafe plain wake.
           if (row.payload.redispatch === true) await dependencies.wake(run);
+          await dependencies.onTerminal(run);
         } else throw new Error("unknown external liveness outbox action");
         await db.update(runLivenessOutbox).set({status:"done",doneAt:sql`clock_timestamp()`,lastError:null}).where(fence);
       } catch(error) {

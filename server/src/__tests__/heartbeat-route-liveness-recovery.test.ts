@@ -1,5 +1,6 @@
 import express from "express";
 import request from "supertest";
+import { issueRoutes } from "../routes/issues.js";
 import { approvalRoutes } from "../routes/approvals.js";
 import { errorHandler } from "../middleware/index.js";
 import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, approvals, issueApprovals, issueThreadInteractions, issueRelations, issueRecoveryActions, issueComments } from "@paperclipai/db";
@@ -143,5 +144,78 @@ describe("route liveness recovery", () => {
   expect(execute).toHaveBeenCalledOnce();
   expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId))).toHaveLength(2);
   expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receipt.id)))[0]).toMatchObject({ status: "coalesced", runId: execute.mock.calls[0][0].runId });
+ });
+
+ it.each(["gone", "active", "unknown", "hold"])("real blocked/unblocked routes preserve %s provider evidence", async state => {
+  const run = await fixture();
+  const [task] = await db.insert(issues).values({ companyId: run.companyId, title: "[test] blocked recovery", status: "in_progress", assigneeAgentId: run.agentId, responsibleUserId: "board-user", executionRunId: run.id }).returning();
+  const [blocker] = await db.insert(issues).values({ companyId: run.companyId, title: "[test] blocking task", status: "todo" }).returning();
+  await db.update(companies).set({ defaultResponsibleUserId: "board-user" }).where(eq(companies.id, run.companyId));
+  await db.update(heartbeatRuns).set({ issueId: task.id, contextSnapshot: { issueId: task.id } }).where(eq(heartbeatRuns.id, run.id));
+  const app = express(); app.use(express.json());
+  app.use((req, _res, next) => { req.actor = { type: "board", userId: "board-user", companyIds: [run.companyId], source: "local_implicit", isInstanceAdmin: true }; next(); });
+  app.use("/api", issueRoutes(db, {} as never)); app.use(errorHandler);
+  const blocked = await request(app).patch(`/api/issues/${task.id}`).send({ status: "blocked", blockedByIssueIds: [blocker.id] });
+  expect(blocked.status, JSON.stringify(blocked.body)).toBe(200);
+  probe.mockResolvedValue(state === "active" ? { state: "active" } : state === "unknown" ? { state: "unknown", reason: "unavailable" } : { state: "gone", authoritative: true });
+  let releaseObserver!: () => void, releaseExecution!: () => void;
+  const observationHold = new Promise<void>(resolve => { releaseObserver = resolve; });
+  const executionHold = new Promise<void>(resolve => { releaseExecution = resolve; });
+  observe.mockImplementation(async () => { await observationHold; return { exitCode: 0, signal: null, timedOut: false, resultJson: { staleResult: true } }; });
+  execute.mockImplementation(async () => { await executionHold; await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, task.id)); return { exitCode: 0, signal: null, timedOut: false, resultJson: {} }; });
+  try {
+   await heartbeat.sweepExternalRunLiveness(); await heartbeat.consumeExternalRunLivenessOutbox();
+   expect(probe).toHaveBeenCalledOnce();
+   expect(execute).not.toHaveBeenCalled();
+   if (state === "active") await vi.waitFor(() => expect(observe).toHaveBeenCalledOnce());
+   else expect(observe).not.toHaveBeenCalled();
+   if (state !== "hold") {
+    const lifted = await request(app).patch(`/api/issues/${task.id}`).send({ blockedByIssueIds: [] });
+    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
+   }
+   const commentClientRequestId = crypto.randomUUID();
+   const resume = () => request(app).patch(`/api/issues/${task.id}`).send({ status: "todo", resume: true, comment: "Verify prior effects and keep this direction.", commentClientRequestId });
+   const resumed = await resume();
+   expect(resumed.status, JSON.stringify(resumed.body)).toBe(state === "hold" ? 409 : 200);
+   if (state === "hold") {
+    await heartbeat.resumeQueuedRuns();
+    expect(execute).not.toHaveBeenCalled();
+    expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].status).toBe("blocked");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId))).toHaveLength(1);
+    return;
+   }
+   if (state === "active" || state === "unknown") {
+    // The status route enqueues asynchronously: wait for durable admission, not HTTP completion.
+    await vi.waitFor(async () => {
+     expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).toBe(run.id);
+    }, { timeout: 15000 });
+    expect(execute).not.toHaveBeenCalled();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId))).toHaveLength(1);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0].livenessProbe).toMatchObject({ state });
+    // Positive stop evidence, not the resume request, permits a new admission.
+    probe.mockResolvedValue({ state: "gone", authoritative: true });
+    await db.update(heartbeatRuns).set({ livenessClaimedUntil: null, controllerLeaseExpiresAt: new Date(0) }).where(eq(heartbeatRuns.id, run.id));
+    await heartbeat.sweepExternalRunLiveness(); await heartbeat.consumeExternalRunLivenessOutbox();
+   }
+   await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce(), { timeout: 15000 });
+   const successorId = execute.mock.calls[0][0].runId;
+   expect(execute.mock.calls[0][0].context).toMatchObject({ forceFreshSession: true, recovery: { predecessorRunId: run.id, outcomesUnknown: true } });
+   expect(execute.mock.calls[0][0].context.prompt).toContain("do not blindly replay");
+   expect(execute.mock.calls[0][0].context.wakeCommentIds).toHaveLength(1);
+   const [comment] = await db.select().from(issueComments).where(eq(issueComments.issueId, task.id));
+   expect(execute.mock.calls[0][0].context.wakeCommentIds).toContain(comment.id);
+   const repeats = await Promise.all([request(app).patch(`/api/issues/${task.id}`).send({ status: "todo", resume: true, comment: "Verify prior effects and keep this direction.", commentClientRequestId }), heartbeat.resumeQueuedRuns()]);
+   expect(repeats[0]!.status, JSON.stringify(repeats[0]!.body)).toBe(200);
+   await db.update(runLivenessOutbox).set({ status: "pending", nextAttemptAt: new Date(0) }).where(eq(runLivenessOutbox.runId, run.id));
+   await heartbeat.consumeExternalRunLivenessOutbox();
+   // Race the old observer result against the admitted successor. Its epoch is stale.
+   releaseObserver(); releaseExecution();
+   await heartbeat.drainActiveRunExecutions();
+   expect(execute).toHaveBeenCalledOnce();
+   expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0]).toMatchObject({ status: "failed", errorCode: "external_session_gone" });
+   expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successorId)))[0].status).toBe("succeeded");
+   expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId))).toHaveLength(2);
+   expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).not.toBe(run.id);
+  } finally { releaseObserver(); releaseExecution(); await heartbeat.drainActiveRunExecutions(); }
  });
 });
