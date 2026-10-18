@@ -3253,10 +3253,69 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             }
             return { kind: "deferred" as const };
           };
+          // A gate-resolution wake and the liveness worker own the same
+          // continuation, not two executions. Adopt its durable safety contract
+          // while the issue lock fences out redelivery and stranded-queue scans.
+          const livenessReceipts = await tx.select().from(agentWakeupRequests).where(and(
+            eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
+            eq(agentWakeupRequests.requestedByActorType, "system"),
+            eq(agentWakeupRequests.requestedByActorId, "external-liveness"),
+            sql`${agentWakeupRequests.idempotencyKey} like 'liveness:%'`,
+            sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
+          )).orderBy(desc(agentWakeupRequests.createdAt));
+          const resolvesLivenessGate = (wake: typeof agentWakeupRequests.$inferSelect) => {
+            const wait = parseObject(wake.payload?.executionWait);
+            return (reason === "approval_approved" && Array.isArray(wait.pendingApprovalIds) &&
+                wait.pendingApprovalIds.includes(enrichedContextSnapshot.approvalId)) ||
+              (isInteractionResolutionWakePayload(payload) && Array.isArray(wait.pendingInteractionIds) &&
+                wait.pendingInteractionIds.includes(enrichedContextSnapshot.interactionId));
+          };
+          const livenessReceipt = livenessReceipts.find(wake =>
+            (!wake.runId && wake.status === "deferred_issue_execution") ||
+              (wake.runId && resolvesLivenessGate(wake)));
+          if (livenessReceipt) {
+            const saved = parseObject(livenessReceipt.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
+            Object.assign(enrichedContextSnapshot, {
+              ...mergeCoalescedContextSnapshot(saved, enrichedContextSnapshot, { preserveExistingInteractionContinuation: true }),
+              forceFreshSession: true, recovery: saved.recovery,
+              prompt: [...new Set([saved.prompt, enrichedContextSnapshot.prompt].filter(Boolean))].join("\n\n"),
+            });
+            payload = { ...payload, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot };
+            if (livenessReceipt.runId && resolvesLivenessGate(livenessReceipt)) {
+              const [prior] = await tx.select().from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+                eq(heartbeatRuns.id, livenessReceipt.runId),
+              ));
+              if (!prior) return { kind: "deferred" as const };
+              await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields, companyId: issue.companyId, agentId, source, triggerDetail, reason, payload,
+                requestedByActorType: opts.requestedByActorType ?? null, requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null, status: "coalesced", runId: prior.id, finishedAt: new Date(),
+              });
+              const contextSnapshot = mergeCoalescedContextSnapshot(parseObject(prior.contextSnapshot), enrichedContextSnapshot);
+              await tx.update(heartbeatRuns).set({ contextSnapshot }).where(eq(heartbeatRuns.id, prior.id));
+              return { kind: "replayed" as const, run: { ...prior, contextSnapshot } };
+            }
+          }
+          if (livenessReceipt && !livenessReceipt.runId) {
+            const [latest] = await tx.select().from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
+                sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`),
+            )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+            if (latest?.status === "cancelled" ||
+                (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
+              return { kind: "deferred" as const };
+            }
+            await tx.update(agentWakeupRequests).set({
+              payload: { ...livenessReceipt.payload, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot },
+              updatedAt: new Date(),
+            }).where(eq(agentWakeupRequests.id, livenessReceipt.id));
+          }
           // Provider-stop evidence cannot answer a question or approve work.
           // Keep one durable receipt under the issue lock; normal stranded-wake
           // recovery rechecks these gates before admitting it after resolution.
-          if (opts.idempotencyKey?.startsWith("liveness:")) {
+          if (livenessReceipt || opts.idempotencyKey?.startsWith("liveness:")) {
             const cards = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
               eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
               eq(issueThreadInteractions.status, "pending"),
@@ -3269,6 +3328,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               .then(rows => rows.get(issue.id));
             if (cards.length || pendingApprovals.length || readiness?.isDependencyReady === false) {
               const condition = { pendingInteractionIds: cards.map(card => card.id), pendingApprovalIds: pendingApprovals.map(approval => approval.id), unresolvedBlockerIssueIds: readiness?.unresolvedBlockerIssueIds ?? [] };
+              if (livenessReceipt) return { kind: "deferred" as const };
               if (executionWaitRequestId) await tx.update(agentWakeupRequests).set({
                 status: "deferred_issue_execution", runId: null, claimedAt: null, finishedAt: null,
               }).where(eq(agentWakeupRequests.id, executionWaitRequestId));
@@ -4113,7 +4173,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           // Consume it with its successor even when chat keeps other messages
           // in separate turns, or finalization will deliver it a second time.
           const pendingComments =
-            (executionWaitRequestId || canCoalesceComments) &&
+            (executionWaitRequestId || livenessReceipt || canCoalesceComments) &&
             !(await getExecutionBlocker(tx as unknown as Db, issue.companyId, issue.id))
               ? await tx
                   .select()
@@ -4124,13 +4184,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                       inArray(agentWakeupRequests.agentId, handoffSource ? [agentId, handoffSource.agentId] : [agentId]),
                       eq(agentWakeupRequests.status, "deferred_issue_execution"),
                       sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
-                      canCoalesceComments ? undefined : eq(agentWakeupRequests.id, executionWaitRequestId!),
+                      canCoalesceComments ? undefined : inArray(agentWakeupRequests.id,
+                         [executionWaitRequestId, livenessReceipt?.id].filter((id): id is string => Boolean(id))),
                     ),
                   )
                   .orderBy(asc(agentWakeupRequests.requestedAt))
               : [];
           const adoptedComments = pendingComments.filter((wake) => {
-            if (wake.id === executionWaitRequestId) return true;
+            if (wake.id === livenessReceipt?.id || wake.id === executionWaitRequestId) return true;
             if (wake.id === opts.queuedCommentInterruptId || wake.id === opts.queuedCommentRequestId) return true;
             const deferredPayload = parseObject(wake.payload);
             const deferredContext = parseObject(
@@ -4183,7 +4244,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                     adoptedComments.map((wake) => wake.id),
                   )
                 : enrichedContextSnapshot,
-              sessionIdBefore: explicitContinuation ? null : sessionBefore,
+              sessionIdBefore: explicitContinuation || livenessReceipt ? null : sessionBefore,
               continuationAttempt,
               ...(reconciledSourceRunId
                 ? { retryOfRunId: reconciledSourceRunId }
