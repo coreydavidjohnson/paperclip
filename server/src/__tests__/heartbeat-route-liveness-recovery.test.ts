@@ -219,7 +219,7 @@ describe("route liveness recovery", () => {
   } finally { releaseObserver(); releaseExecution(); await heartbeat.drainActiveRunExecutions(); }
  });
 
- it.each(["resume", "stop", "cleanup", "ack"])("keeps one recoverable intent during real budget rejection with %s", async fault => {
+ it.each(["resume", "stop", "cleanup", "ack", "ack-admitted"])("keeps one recoverable intent during real budget rejection with %s", async fault => {
   const run = await fixture();
   const [project] = await db.insert(projects).values({ companyId: run.companyId, name: "[test] budget" }).returning();
   const [task] = await db.insert(issues).values({ companyId: run.companyId, title: "[test] budget recovery", projectId: project.id, status: "in_progress", assigneeAgentId: run.agentId, responsibleUserId: "board-user", executionRunId: run.id }).returning();
@@ -239,7 +239,7 @@ describe("route liveness recovery", () => {
    await heartbeat.drainActiveRunExecutions();
   };
   await heartbeat.sweepExternalRunLiveness();
-  if (fault === "cleanup" || fault === "ack") {
+  if (fault === "cleanup" || fault === "ack" || fault === "ack-admitted") {
    const condition = fault === "cleanup"
     ? `NEW.id = '${task.id}' AND NEW.execution_run_id IS NULL`
     : `NEW.run_id = '${run.id}' AND NEW.action = 'finalize_external_run' AND NEW.status = 'done'`;
@@ -253,6 +253,20 @@ describe("route liveness recovery", () => {
     expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).toBe(fault === "cleanup" ? run.id : null);
    } finally {
     await db.execute(sql.raw(`DROP TRIGGER test_recovery_delivery_failure ON ${table}; DROP FUNCTION test_recovery_delivery_failure();`));
+   }
+   if (fault === "ack-admitted") {
+    await db.update(budgetPolicies).set({ amount: 100 }).where(eq(budgetPolicies.id, policy.id));
+    await db.update(agentWakeupRequests).set({ requestedAt: new Date(0) }).where(eq(agentWakeupRequests.agentId, run.agentId));
+    await heartbeat.resumeQueuedRuns(); await heartbeat.drainActiveRunExecutions();
+    expect(execute).toHaveBeenCalledOnce();
+    expect(execute.mock.calls[0][0].context).toMatchObject({ forceFreshSession: true, recovery: { predecessorRunId: run.id, outcomesUnknown: true } });
+    expect(execute.mock.calls[0][0].context.wakeCommentIds).toContain(comment.id);
+    expect((await receipts())[0].runId).toBe(execute.mock.calls[0][0].runId);
+    await retry(); await retry();
+    expect(execute).toHaveBeenCalledOnce(); expect(await receipts()).toHaveLength(1);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId))).toHaveLength(2);
+    expect((await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId, run.id))).find(row => row.action === "finalize_external_run")?.status).toBe("done");
+    return;
    }
    await retry();
   } else await heartbeat.consumeExternalRunLivenessOutbox();
