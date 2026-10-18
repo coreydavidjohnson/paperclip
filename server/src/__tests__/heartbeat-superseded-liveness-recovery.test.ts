@@ -2,14 +2,11 @@ import express from "express";
 import request from "supertest";
 import { issueRoutes } from "../routes/issues.js";
 import { agentRoutes } from "../routes/agents.js";
-import { approvalRoutes } from "../routes/approvals.js";
 import { errorHandler } from "../middleware/index.js";
-import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, approvals, issueApprovals, issueThreadInteractions, issueRelations, issueRecoveryActions, issueComments, budgetPolicies, costEvents, projects, companyMemberships, authUsers } from "@paperclipai/db";
-import { and, eq, sql } from "drizzle-orm";
+import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, budgetPolicies, costEvents, projects, companyMemberships, authUsers } from "@paperclipai/db";
+import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
-import { questionResponseDeliveryService } from "../services/question-response-delivery.js";
 import { heartbeatService } from "../services/heartbeat.js";
 const { execute, observe, probe } = vi.hoisted(() => ({ execute: vi.fn(), observe: vi.fn(), probe: vi.fn() }));
 vi.mock("../adapters/index.js", async original => ({ ...await original<typeof import("../adapters/index.js")>(), getServerAdapter: vi.fn(() => ({ type: "test_external", execute, observeRun: observe, probeRun: probe })) }));
@@ -74,6 +71,12 @@ describe("superseded liveness recovery", () => {
   const f = await held();
   await db.update(agentWakeupRequests).set({ status, finishedAt: new Date(), runId: null }).where(eq(agentWakeupRequests.id, f.receipt.id));
   await lift(f.policy.id); execute.mockImplementation(() => finish(f.task.id));
+  // Retry the real outbox consumer before fresh user admission. An old unbound
+  // receipt must retain its safety context without starting a duplicate turn.
+  await db.update(runLivenessOutbox).set({ status: "pending", nextAttemptAt: new Date(0) }).where(eq(runLivenessOutbox.id, f.outbox.id));
+  await heartbeat.consumeExternalRunLivenessOutbox();
+  expect(execute).not.toHaveBeenCalled();
+  expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.receipt.id)))[0]).toMatchObject({ status, runId: null });
   const resumed = await request(f.app).patch(`/api/issues/${f.task.id}`).send({ status: "todo", resume: true, comment: "Check prior effects and continue once.", commentClientRequestId: crypto.randomUUID() });
   expect(resumed.status, JSON.stringify(resumed.body)).toBe(200);
   await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce(), { timeout: 15000 }); await heartbeat.drainActiveRunExecutions();

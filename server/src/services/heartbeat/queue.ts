@@ -4214,7 +4214,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                       eq(agentWakeupRequests.companyId, issue.companyId),
                       inArray(agentWakeupRequests.agentId, handoffSource ? [agentId, handoffSource.agentId] : [agentId]),
                       or(eq(agentWakeupRequests.status, "deferred_issue_execution"),
-                        livenessReceipt && !livenessReceipt.runId ? eq(agentWakeupRequests.id, livenessReceipt.id) : undefined),
+                        livenessReceipt && !livenessReceipt.runId ? and(
+                          inArray(agentWakeupRequests.status, ["skipped", "coalesced"]),
+                          eq(agentWakeupRequests.id, livenessReceipt.id)) : undefined),
                       sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
                       canCoalesceComments ? undefined : inArray(agentWakeupRequests.id,
                          [executionWaitRequestId, livenessReceipt?.id].filter((id): id is string => Boolean(id))),
