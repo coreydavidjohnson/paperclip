@@ -42,6 +42,23 @@ suite("external liveness real transaction fences", () => {
   const w=createExternalRunLivenessWorker(db,{getAdapter:()=>undefined,resolveConfig:async(_company,config)=>config,onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
   await w.sweep();expect((await fresh(run.id)).errorCode).toBe("external_deadline_exceeded");
  });
+ it("bounds a hung configuration lookup and permits the next sweep to enforce deadlines", async () => {
+  const run = await fixture();
+  const deps = { getAdapter: () => ({ type: "test_external", probeRun: async () => ({ state: "active" }) } as any),
+   resolveConfig: (_company: string, _config: any): Promise<Record<string, unknown>> => new Promise(() => {}),
+   onSettled: async () => {}, onObserve: async () => {}, onTerminal: async () => {}, wake: async () => {} };
+  const w = createExternalRunLivenessWorker(db, deps);
+  let timer: ReturnType<typeof setTimeout>;
+  const completed = await Promise.race([
+   w.sweep().then(() => true),
+   new Promise<boolean>(resolve => { timer = setTimeout(() => resolve(false), 12000); }),
+  ]).finally(() => clearTimeout(timer!));
+  expect(completed).toBe(true);
+  expect((await fresh(run.id)).livenessProbe).toMatchObject({ state: "unknown" });
+  const expired = await fixture();
+  await db.update(heartbeatRuns).set({ deadlineAt: new Date(0) }).where(eq(heartbeatRuns.id, expired.id));
+  await w.sweep(); expect((await fresh(expired.id)).errorCode).toBe("external_deadline_exceeded");
+ }, 20000);
  it("bounds settled results when the adapter cannot harvest",async()=>{
   const run=await fixture();await worker(async()=>({state:"settled"})).sweep();expect((await fresh(run.id)).errorCode).toBe("external_result_unavailable");
  });
@@ -76,6 +93,24 @@ suite("external liveness real transaction fences", () => {
   })).rejects.toThrow("crash before commit");
   expect((await fresh(run.id)).status).toBe("running");
   expect(await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId,run.id))).toHaveLength(0);
+ });
+ it("rolls back actual worker finalization when writing its outbox fails", async () => {
+  const run = await fixture();
+  await db.execute(sql.raw(`CREATE FUNCTION test_liveness_outbox_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+   BEGIN IF NEW.run_id = '${run.id}' AND NEW.action = 'finalize_external_run' THEN RAISE EXCEPTION 'injected outbox failure'; END IF; RETURN NEW; END $$;
+   CREATE TRIGGER test_liveness_outbox_failure BEFORE INSERT ON run_liveness_outbox FOR EACH ROW EXECUTE FUNCTION test_liveness_outbox_failure();`));
+  try {
+   const w = worker(async () => ({ state: "gone", authoritative: true, reason: "missing" }));
+   await w.sweep();
+   expect(await fresh(run.id)).toMatchObject({ status: "running", observerEpoch: run.observerEpoch, errorCode: null });
+   expect(await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId, run.id))).toHaveLength(0);
+  } finally {
+   await db.execute(sql.raw("DROP TRIGGER test_liveness_outbox_failure ON run_liveness_outbox; DROP FUNCTION test_liveness_outbox_failure();"));
+  }
+  await db.update(heartbeatRuns).set({ livenessClaimedUntil: null }).where(eq(heartbeatRuns.id, run.id));
+  await worker(async () => ({ state: "gone", authoritative: true, reason: "missing" })).sweep();
+  expect(await fresh(run.id)).toMatchObject({ status: "failed", observerEpoch: run.observerEpoch + 1 });
+  expect(await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId, run.id))).toHaveLength(2);
  });
  it("deadline survives worker restart and queues stop without redispatch",async()=>{
   const run=await fixture();await db.update(heartbeatRuns).set({deadlineAt:new Date(Date.now()-1),lastProgressAt:new Date()}).where(eq(heartbeatRuns.id,run.id));

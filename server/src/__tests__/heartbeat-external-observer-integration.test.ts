@@ -5,6 +5,21 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 import { heartbeatService } from "../services/heartbeat.js";
 const { execute, observe, probe } = vi.hoisted(() => ({ execute: vi.fn(), observe: vi.fn(), probe: vi.fn() }));
 vi.mock("../adapters/index.js", async original => ({ ...await original<typeof import("../adapters/index.js")>(), getServerAdapter: vi.fn(() => ({ type: "test_external", execute, observeRun: observe, probeRun: probe })) }));
+const { resolveConfig, leaseStops } = vi.hoisted(() => ({ resolveConfig: vi.fn(), leaseStops: [] as Array<ReturnType<typeof vi.fn>> }));
+vi.mock("../services/secrets.js", async original => {
+ const actual = await original<typeof import("../services/secrets.js")>();
+ return { ...actual, secretService: (...args: Parameters<typeof actual.secretService>) => ({
+  ...actual.secretService(...args), resolveAdapterConfigForRuntime: resolveConfig,
+ }) };
+});
+vi.mock("../services/legacy-controller-lease.js", async original => {
+ const actual = await original<typeof import("../services/legacy-controller-lease.js")>();
+ return { ...actual, watchLegacyControllerLease: (...args: Parameters<typeof actual.watchLegacyControllerLease>) => {
+  const lease = actual.watchLegacyControllerLease(...args);
+  const stop = vi.fn(() => lease.stop()); leaseStops.push(stop);
+  return { ...lease, stop };
+ } };
+});
 const support = await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)("external heartbeat observer integration", () => {
  let db: ReturnType<typeof createDb>, temp: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, heartbeat: ReturnType<typeof heartbeatService>;
@@ -14,6 +29,8 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
   const {getServerAdapter}=await import("../adapters/index.js");
   vi.mocked(getServerAdapter).mockReset().mockReturnValue({type:"test_external",execute,observeRun:observe,probeRun:probe} as never);
   execute.mockReset(); observe.mockReset(); probe.mockReset();
+  resolveConfig.mockReset().mockImplementation(async (_company, config) => ({ config, secretKeys: new Set<string>() }));
+  leaseStops.length = 0;
   const [company] = await db.insert(companies).values({ name: "Observer", issuePrefix: crypto.randomUUID().slice(0, 8) }).returning();
   const [agent] = await db.insert(agents).values({ companyId: company.id, name: "Observer", adapterType: "test_external", status: "running" }).returning();
   return (await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id, runtimeMode: "legacy", status: "running", runnerProfileJson: { externalObservation: { adapterType: "test_external", config: {} } }, startedAt: new Date(Date.now()-3600000), externalRunHandle: { sessionId: "existing", turnRef: "turn", dispatch: "accepted" } }).returning())[0];
@@ -25,6 +42,45 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();
   expect(execute).not.toHaveBeenCalled(); expect(observe).toHaveBeenCalledOnce(); expect(await read(run.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "existing", observerEpoch: 2 });
  });
+ it("stops the observer lease when configuration resolution fails and later reattaches", async () => {
+  const run = await fixture();
+  await db.update(heartbeatRuns).set({ runnerProfileJson: { externalObservation: { adapterType: "test_external", config: { setupFailure: run.id } } } }).where(eq(heartbeatRuns.id, run.id));
+  let resolutions = 0;
+  resolveConfig.mockImplementation(async (_company, config) => {
+   if (config.setupFailure === run.id && ++resolutions === 2) throw new Error("temporary configuration failure");
+   return { config, secretKeys: new Set<string>() };
+  });
+  probe.mockResolvedValue({ state: "active" });
+  try {
+   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();
+   expect(observe).not.toHaveBeenCalled();
+   expect(leaseStops).toHaveLength(1); expect(leaseStops[0]).toHaveBeenCalledOnce();
+   await db.update(heartbeatRuns).set({ livenessClaimedUntil: null, controllerLeaseExpiresAt: new Date(0) }).where(eq(heartbeatRuns.id, run.id));
+   observe.mockResolvedValueOnce({ exitCode: 0, signal: null, timedOut: false, resultJson: { finalResponse: "Recovered" } });
+   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();
+   expect(observe).toHaveBeenCalledOnce(); expect(execute).not.toHaveBeenCalled();
+   expect(await read(run.id)).toMatchObject({ status: "succeeded", observerEpoch: 3 });
+  } finally { for (const stop of leaseStops) stop(); }
+ });
+ it("bounds hung observer setup and stops renewal before a later reattachment", async () => {
+  const run = await fixture();
+  await db.update(heartbeatRuns).set({ runnerProfileJson: { externalObservation: { adapterType: "test_external", config: { hungSetup: run.id } } } }).where(eq(heartbeatRuns.id, run.id));
+  let resolutions = 0;
+  resolveConfig.mockImplementation(async (_company, config) => {
+   if (config.hungSetup === run.id && ++resolutions === 2) return new Promise(() => {});
+   return { config, secretKeys: new Set<string>() };
+  });
+  probe.mockResolvedValue({ state: "active" });
+  try {
+   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();
+   expect(observe).not.toHaveBeenCalled(); expect(leaseStops[0]).toHaveBeenCalledOnce();
+   await db.update(heartbeatRuns).set({ livenessClaimedUntil: null, controllerLeaseExpiresAt: new Date(0) }).where(eq(heartbeatRuns.id, run.id));
+   observe.mockResolvedValueOnce({ exitCode: 0, signal: null, timedOut: false, resultJson: { finalResponse: "Recovered" } });
+   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();
+   expect(observe).toHaveBeenCalledOnce(); expect(execute).not.toHaveBeenCalled();
+   expect(await read(run.id)).toMatchObject({ status: "succeeded", observerEpoch: 3 });
+  } finally { for (const stop of leaseStops) stop(); }
+ }, 20000);
  it("harvests settled results without observe or execute", async () => {
   const run = await fixture(); probe.mockResolvedValue({ state: "settled", result: { exitCode: 0, signal: null, timedOut: false, sessionId: "harvested", resultJson: { finalResponse: "Finished" } } });
   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();

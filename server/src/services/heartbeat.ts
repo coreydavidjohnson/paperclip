@@ -1,4 +1,4 @@
-import { createExternalRunLivenessWorker } from "./heartbeat/external-run-liveness.js";
+import { boundedExternalRunOperation, createExternalRunLivenessWorker } from "./heartbeat/external-run-liveness.js";
 import { persistExternalRunHandle, recordedExternalRunConfiguration } from "./heartbeat/external-run-state.js";
 import type { AdapterExecutionResult, ExternalRunHandle } from "@paperclipai/adapter-utils";
 import { isControllerDraining } from "../controller-drain.js";
@@ -1816,13 +1816,13 @@ export function heartbeatService(
     if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
     const controller = new AbortController();
     const lease = settled ? null : watchLegacyControllerLease(db, run, controller);
-    const context = parseObject(run.contextSnapshot);
-    const issueId = run.issueId ?? run.nativeIssueId ?? readNonEmptyString(context.issueId);
-    const { config, secretKeys } = saved.config ? await secretsSvc.resolveAdapterConfigForRuntime(run.companyId, parseObject(saved.config))
-      : { config: {} as Record<string, unknown>, secretKeys: new Set<string>() };
-    const output = createHeartbeatRunOutput(db, { run, runId: run.id, issueId, runLogStore,
-      identityRedactor: createAgentIdentityRedactor(), secretKeys, appendRunEvent, getCurrentUserRedactionOptions });
     try {
+      const context = parseObject(run.contextSnapshot);
+      const issueId = run.issueId ?? run.nativeIssueId ?? readNonEmptyString(context.issueId);
+      const { config, secretKeys } = saved.config ? await boundedExternalRunOperation(() => secretsSvc.resolveAdapterConfigForRuntime(run.companyId, parseObject(saved.config)))
+        : { config: {} as Record<string, unknown>, secretKeys: new Set<string>() };
+      const output = createHeartbeatRunOutput(db, { run, runId: run.id, issueId, runLogStore,
+        identityRedactor: createAgentIdentityRedactor(), secretKeys, appendRunEvent, getCurrentUserRedactionOptions });
       const { onLog, onAdapterMeta, currentUserRedactionOptions } = await output.begin(run);
       const result = settled ?? await adapter.observeRun!({ runId: run.id, agent, config,
         handle: run.externalRunHandle as ExternalRunHandle, signal: controller.signal,

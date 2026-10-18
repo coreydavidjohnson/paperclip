@@ -68,7 +68,7 @@ interface Dependencies {
   wake: (run: Run) => Promise<void>;
 }
 
-async function bounded<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+export async function boundedExternalRunOperation<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout>;
   try {
@@ -145,11 +145,11 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       const saved = recordedExternalRunConfiguration(run);
       adapter = dependencies.getAdapter(saved.adapterType);
       if (!adapter?.probeRun) throw new Error("external_run_probe_unavailable");
-      const config = await dependencies.resolveConfig(run.companyId, saved.config);
+      const config = await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId, saved.config));
       key = `${adapter.type}:${String(config.baseUrl ?? config.apiUrl ?? config.gatewayUrl ?? "")}`;
       const breaker = breakers.get(key);
       if (breaker && breaker.until > now.getTime()) return;
-      result = await bounded(signal => adapter!.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
+      result = await boundedExternalRunOperation(signal => adapter!.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
     } catch (error) {
       result = { state: "unknown", reason: error instanceof Error ? error.message : "probe failed" };
     }
@@ -228,8 +228,8 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
           const saved=recordedExternalRunConfiguration(run);
           const adapter=dependencies.getAdapter(saved.adapterType);
           if (!adapter?.stopRun) throw new Error("adapter stopRun unavailable");
-          const config=await dependencies.resolveConfig(run.companyId,saved.config);
-          await bounded(signal=>adapter.stopRun!({config,handle:run.externalRunHandle as ExternalRunHandle,signal}));
+          const config=await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId,saved.config));
+          await boundedExternalRunOperation(signal=>adapter.stopRun!({config,handle:run.externalRunHandle as ExternalRunHandle,signal}));
         } else if (row.action === "finalize_external_run") {
           await dependencies.onTerminal(run);
           if (row.payload.redispatch === true) await dependencies.wake(run);

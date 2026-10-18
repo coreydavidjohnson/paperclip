@@ -216,6 +216,8 @@ heartbeat.ts.
   Unknown and deadline endings require reconciliation, never automatic replay.
   Confirmed-gone wakes preserve pending question/approval admission gates;
   one durable deferred receipt resumes after the card is resolved.
+  Observer setup always releases lease renewal on failure. Configuration lookup,
+  probe and stop each have a ten-second bound, including never-settling lookups.
   Prepared/submission-unknown handles become eligible for a probe after ten minutes.
 - Files: adapter-utils contract, database migration `0355_run_liveness`,
   `services/heartbeat/external-run-state.ts`, `external-run-liveness.ts`,
