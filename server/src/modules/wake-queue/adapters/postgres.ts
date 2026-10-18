@@ -220,6 +220,16 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
     },
 
     async findNextDeferredWake({ companyId, issueId, excludedWakeIds }) {
+      // Budget-blocked recovery can only leave its hold via fresh admission.
+      // Do not let release drain discard it or promote a plain human wake.
+      const [budgetRecovery] = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
+        eq(agentWakeupRequests.requestedByActorType, "system"), eq(agentWakeupRequests.requestedByActorId, "external-liveness"),
+        sql`${agentWakeupRequests.idempotencyKey} like 'liveness:%'`,
+        sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+        sql`${agentWakeupRequests.payload}->'executionWait'->>'reason' = 'budget.blocked'`,
+      )).limit(1);
+      if (budgetRecovery) return null;
       const heldWakeIds = [...(excludedWakeIds ?? [])];
       while (true) {
         const row = await tx

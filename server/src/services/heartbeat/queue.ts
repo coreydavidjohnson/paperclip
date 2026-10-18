@@ -2321,6 +2321,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       queuedCommentIdsFromRunContext(enrichedContextSnapshot).length === 0 &&
       !isInteractionResolutionWakePayload(payload ?? {}) &&
       !hasInteractionContinuationWakeContext(enrichedContextSnapshot);
+    const livenessRecovery = opts.requestedByActorType === "system" &&
+      opts.requestedByActorId === "external-liveness" && opts.idempotencyKey?.startsWith("liveness:") &&
+      issueId && isUuidLike(issueId);
     const writeSkippedRequest = async (
       skipReason: string,
       patch: Partial<typeof agentWakeupRequests.$inferInsert> = {},
@@ -2359,6 +2362,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         const waitIssueId = issueId;
         return db.transaction(async (tx) => {
           await tx.execute(sql`select id from issues where id = ${waitIssueId} and company_id = ${agent.companyId} for update`);
+          // Recovery is durable work, not a replaceable gate diagnostic. Persist
+          // its safety context before terminal cleanup can promote human input.
+          if (livenessRecovery) {
+            const [existing] = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, agent.companyId), eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey!),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${waitIssueId}`,
+            )).limit(1);
+            if (existing) return { created: false };
+            await tx.insert(agentWakeupRequests).values({ ...request, reason,
+              status: "deferred_issue_execution", finishedAt: null, runId: null,
+              payload: { ...payload, issueId: waitIssueId, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot,
+                executionWait: { ...waitCondition, reason: skipReason, message: patch.error } },
+            });
+            return { created: true };
+          }
           return recordExecutionWait(tx as unknown as Db, {
             issueId: waitIssueId, request, condition: waitCondition, coalesce: coalesceExecutionWait,
           });
@@ -2591,6 +2610,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       await writeSkippedRequest("budget.blocked", { error: budgetBlock.reason }, {
         scopeType: budgetBlock.scopeType, scopeId: budgetBlock.scopeId,
       });
+      // A persisted recovery hold is successful delivery, not permission to run.
+      if (livenessRecovery) return null;
       throw conflict(budgetBlock.reason, {
         scopeType: budgetBlock.scopeType,
         scopeId: budgetBlock.scopeId,
@@ -4149,23 +4170,20 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             enrichedContextSnapshot.explicitUserContinuation = explicitContinuation;
           }
 
-          const wakeupRequest = await tx
-            .insert(agentWakeupRequests)
-            .values({
-              ...durableReceiptFields,
-              companyId: agent.companyId,
-              agentId,
-              source,
-              triggerDetail,
-              reason,
-              payload,
-              status: "queued",
-              requestedByActorType: opts.requestedByActorType ?? null,
-              requestedByActorId: opts.requestedByActorId ?? null,
-              idempotencyKey: opts.idempotencyKey ?? null,
-            })
-            .returning()
-            .then((rows) => rows[0]);
+          const wakeValues = {
+            ...durableReceiptFields,
+            companyId: agent.companyId, agentId, source, triggerDetail, reason, payload,
+            status: "queued",
+            requestedByActorType: opts.requestedByActorType ?? null,
+            requestedByActorId: opts.requestedByActorId ?? null,
+            idempotencyKey: opts.idempotencyKey ?? null,
+          };
+          // Periodic recovery advances its receipt, not another liveness intent.
+          const wakeupRequest = await (livenessRecovery && executionWaitRequestId && livenessReceipt?.id === executionWaitRequestId
+            ? tx.update(agentWakeupRequests).set({ ...wakeValues, error: null, finishedAt: null })
+                .where(eq(agentWakeupRequests.id, executionWaitRequestId!))
+            : tx.insert(agentWakeupRequests).values(wakeValues))
+            .returning().then(rows => rows[0]);
 
           // A handoff changes the executor, not the owner of saved user input.
           // Validate its exact stopped source while the issue row is locked;

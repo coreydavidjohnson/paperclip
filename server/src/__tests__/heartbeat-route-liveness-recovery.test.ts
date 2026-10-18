@@ -3,8 +3,8 @@ import request from "supertest";
 import { issueRoutes } from "../routes/issues.js";
 import { approvalRoutes } from "../routes/approvals.js";
 import { errorHandler } from "../middleware/index.js";
-import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, approvals, issueApprovals, issueThreadInteractions, issueRelations, issueRecoveryActions, issueComments } from "@paperclipai/db";
-import { eq } from "drizzle-orm";
+import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, approvals, issueApprovals, issueThreadInteractions, issueRelations, issueRecoveryActions, issueComments, budgetPolicies, costEvents, projects } from "@paperclipai/db";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
@@ -217,5 +217,74 @@ describe("route liveness recovery", () => {
    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId))).toHaveLength(2);
    expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).not.toBe(run.id);
   } finally { releaseObserver(); releaseExecution(); await heartbeat.drainActiveRunExecutions(); }
+ });
+
+ it.each(["resume", "stop", "cleanup", "ack"])("keeps one recoverable intent during real budget rejection with %s", async fault => {
+  const run = await fixture();
+  const [project] = await db.insert(projects).values({ companyId: run.companyId, name: "[test] budget" }).returning();
+  const [task] = await db.insert(issues).values({ companyId: run.companyId, title: "[test] budget recovery", projectId: project.id, status: "in_progress", assigneeAgentId: run.agentId, responsibleUserId: "board-user", executionRunId: run.id }).returning();
+  await db.update(companies).set({ defaultResponsibleUserId: "board-user" }).where(eq(companies.id, run.companyId));
+  await db.update(heartbeatRuns).set({ issueId: task.id, contextSnapshot: { issueId: task.id } }).where(eq(heartbeatRuns.id, run.id));
+  const [comment] = await db.insert(issueComments).values({ companyId: run.companyId, issueId: task.id, authorUserId: "board-user", authorType: "user", body: "Keep my saved direction and verify prior effects." }).returning();
+  await db.insert(agentWakeupRequests).values({ companyId: run.companyId, agentId: run.agentId, source: "automation", reason: "issue_commented", requestedByActorType: "user", requestedByActorId: "board-user", status: "deferred_issue_execution", payload: { issueId: task.id, wakeCommentIds: [comment.id], _paperclipWakeContext: { issueId: task.id, wakeReason: "issue_commented", wakeCommentIds: [comment.id] } } });
+  const [policy] = await db.insert(budgetPolicies).values({ companyId: run.companyId, scopeType: "project", scopeId: project.id, metric: "billed_cents", windowKind: "lifetime", amount: 1, hardStopEnabled: true, unpricedUsagePolicy: "allow", notifyEnabled: false }).returning();
+  await db.insert(costEvents).values({ companyId: run.companyId, agentId: run.agentId, projectId: project.id, provider: "test", model: "test", costCents: 2, occurredAt: new Date() });
+  probe.mockResolvedValue({ state: "gone", authoritative: true });
+  execute.mockImplementation(async () => { await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, task.id)); return { exitCode: 0, signal: null, timedOut: false, resultJson: {} }; });
+  const receipts = () => db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `liveness:${run.id}`));
+  const retry = async () => {
+   await db.update(runLivenessOutbox).set({ status: "pending", nextAttemptAt: new Date(0) }).where(eq(runLivenessOutbox.runId, run.id));
+   await db.update(agentWakeupRequests).set({ requestedAt: new Date(0) }).where(eq(agentWakeupRequests.agentId, run.agentId));
+   await Promise.all([heartbeat.consumeExternalRunLivenessOutbox(), heartbeat.resumeQueuedRuns()]);
+   await heartbeat.drainActiveRunExecutions();
+  };
+  await heartbeat.sweepExternalRunLiveness();
+  if (fault === "cleanup" || fault === "ack") {
+   const condition = fault === "cleanup"
+    ? `NEW.id = '${task.id}' AND NEW.execution_run_id IS NULL`
+    : `NEW.run_id = '${run.id}' AND NEW.action = 'finalize_external_run' AND NEW.status = 'done'`;
+   const table = fault === "cleanup" ? "issues" : "run_liveness_outbox";
+   await db.execute(sql.raw(`CREATE FUNCTION test_recovery_delivery_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF ${condition} THEN RAISE EXCEPTION 'injected ${fault} failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER test_recovery_delivery_failure BEFORE UPDATE ON ${table} FOR EACH ROW EXECUTE FUNCTION test_recovery_delivery_failure();`));
+   try {
+    await heartbeat.consumeExternalRunLivenessOutbox();
+    expect(await receipts()).toHaveLength(1);
+    const rows = await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId, run.id));
+    expect(rows.find(row => row.action === "finalize_external_run")).toMatchObject({ status: "pending", lastError: expect.stringContaining("Failed query") });
+    expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).toBe(fault === "cleanup" ? run.id : null);
+   } finally {
+    await db.execute(sql.raw(`DROP TRIGGER test_recovery_delivery_failure ON ${table}; DROP FUNCTION test_recovery_delivery_failure();`));
+   }
+   await retry();
+  } else await heartbeat.consumeExternalRunLivenessOutbox();
+  expect(execute).not.toHaveBeenCalled();
+  expect(await receipts()).toHaveLength(1);
+  expect((await receipts())[0]).toMatchObject({ status: "deferred_issue_execution", runId: null });
+  expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).toBeNull();
+  await retry(); await retry();
+  expect(execute).not.toHaveBeenCalled(); expect(await receipts()).toHaveLength(1);
+  const heldInput = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, run.agentId));
+  expect(heldInput.find(wake => wake.requestedByActorType === "user")).toMatchObject({ status: "deferred_issue_execution", runId: null });
+  expect((await receipts())[0].payload?.executionWait).toMatchObject({ reason: "budget.blocked" });
+  expect((await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId, run.id))).find(row => row.action === "finalize_external_run")?.status).toBe("done");
+  expect((await receipts())[0].payload?._paperclipWakeContext).toMatchObject({ forceFreshSession: true, recovery: { predecessorRunId: run.id, outcomesUnknown: true } });
+  if (fault === "stop") {
+   await db.insert(heartbeatRuns).values({ companyId: run.companyId, agentId: run.agentId, issueId: task.id, runtimeMode: "legacy", status: "cancelled", startedAt: new Date(), finishedAt: new Date(), contextSnapshot: { issueId: task.id }, resultJson: { cancellation: { source: "user", reason: "Stop" } } });
+  }
+  await db.update(budgetPolicies).set({ amount: 100 }).where(eq(budgetPolicies.id, policy.id));
+  if (fault === "stop") {
+   await retry(); await retry();
+   expect(execute).not.toHaveBeenCalled(); expect(await receipts()).toHaveLength(1);
+   expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).toBeNull();
+   return;
+  }
+  await retry();
+  expect(execute).toHaveBeenCalledOnce();
+  expect(execute.mock.calls[0][0].context).toMatchObject({ forceFreshSession: true, recovery: { predecessorRunId: run.id, outcomesUnknown: true } });
+  expect(execute.mock.calls[0][0].context.wakeCommentIds).toContain(comment.id);
+  expect(execute.mock.calls[0][0].context.prompt).toContain("do not blindly replay");
+  await retry(); await retry();
+  expect(execute).toHaveBeenCalledOnce(); expect(await receipts()).toHaveLength(1);
+  expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId))).toHaveLength(2);
+  expect((await db.select().from(issues).where(eq(issues.id, task.id)))[0].executionRunId).not.toBe(run.id);
  });
 });

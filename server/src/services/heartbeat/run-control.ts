@@ -80,6 +80,7 @@ import {
   issueRecoveryActions,
   issues,
   nativeRunFinalizations,
+  runLivenessOutbox,
 } from "@paperclipai/db";
 import {
   conflict,
@@ -857,6 +858,15 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
           isNull(agentWakeupRequests.runId),
           scope.createdBefore ? lt(agentWakeupRequests.createdAt, scope.createdBefore) : undefined,
+          // Finalized gone work is held for fresh budget admission, not discarded.
+          // Protect its saved human input even before wake delivery writes a receipt.
+          sql`not exists (select 1 from ${runLivenessOutbox} o join ${heartbeatRuns} r on r.id = o.run_id
+            where o.company_id = ${agentWakeupRequests.companyId} and r.agent_id = ${agentWakeupRequests.agentId} and o.action = 'finalize_external_run'
+              and o.payload->>'redispatch' = 'true'
+              and coalesce(r.issue_id::text, r.context_snapshot->>'issueId') = ${agentWakeupRequests.payload}->>'issueId'
+              and (o.status = 'pending' or exists (select 1 from agent_wakeup_requests recovery
+                where recovery.company_id = o.company_id and recovery.idempotency_key = 'liveness:' || r.id::text
+                  and recovery.status = 'deferred_issue_execution')))`,
         ));
 
       return wakeupIds.length;
