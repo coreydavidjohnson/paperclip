@@ -20,6 +20,18 @@
    `docker buildx build --builder k3s-buildkit-dell --target luma-patch-tests -f Dockerfile .`
    It runs `pnpm -r typecheck`, token gates and every carried suite. Do not
    hide or skip failing tests.
+   Gate environment pitfalls (each cost a rerun in PER-980):
+   - BuildKit pods are capped at 6 GiB and upstream `pnpm install` is
+     OOM-killed there when the runner Rust build runs in parallel. If that
+     happens, run the same steps as a disposable `luma-ci-batch` Job on a
+     large node, at the exact fork SHA.
+   - Server typecheck runs `prepare:runner-vendor`, which needs cargo, a C
+     linker (`cc`) and Rust 1.97.1. Without them the failure is environmental.
+   - Under heavy host load, vitest fails with `Timeout waiting for worker`.
+     That is not a test result; rerun on an idle node.
+   - Carried tests drift with upstream UI copy and timing (trigger labels,
+     polling intervals, `window.location` guards). Fix the test to upstream's
+     current contract, never the product code back to the old one.
 6. Update PATCHES.md (base SHA, entries, removal conditions) and this file,
    push the branch to our fork only, and post the audit table on the ticket.
 7. In a fresh homelab worktree from `origin/main`, update
