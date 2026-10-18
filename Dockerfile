@@ -48,10 +48,13 @@ COPY packages/plugins/plugin-llm-wiki/package.json packages/plugins/plugin-llm-w
 COPY packages/plugins/plugin-workspace-diff/package.json packages/plugins/plugin-workspace-diff/
 COPY patches/ patches/
 COPY scripts/link-plugin-dev-sdk.mjs scripts/
+COPY scripts/pnpm-resource-budget.mjs scripts/
 
 # CI owns repository lock updates. Resolve manifest changes in the image's
 # private build tree, then install from that exact generated lock.
-RUN pnpm install --resolution-only --ignore-scripts --no-frozen-lockfile && pnpm install --frozen-lockfile
+ARG PAPERCLIP_BUILD_CPUS=""
+ARG PAPERCLIP_BUILD_MEMORY_BYTES=""
+RUN node scripts/pnpm-resource-budget.mjs install --resolution-only --ignore-scripts --no-frozen-lockfile && node scripts/pnpm-resource-budget.mjs install --frozen-lockfile
 
 FROM base AS rust-toolchain
 WORKDIR /app
@@ -149,6 +152,7 @@ RUN rm -rf packages/paperclip-runner/runner/target
 # Luma fork gate (PATCHES.md): every carried patch's regression suite and the
 # full workspace typecheck must pass before the production image is assembled.
 FROM build AS luma-patch-tests
+RUN node --test scripts/pnpm-resource-budget.test.mjs
 # BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
 RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
 RUN pnpm check:token-gates

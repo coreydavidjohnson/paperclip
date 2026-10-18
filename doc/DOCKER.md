@@ -32,6 +32,45 @@ docker build -t paperclip-local \
   --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) .
 ```
 
+## Dependency build resources
+
+The dependency install uses `scripts/pnpm-resource-budget.mjs` to size pnpm
+9.15.4's workers from the build's CPU and memory allocation. The worker budget
+is the smaller of allocated whole CPUs and one worker per GiB, with at least
+one worker and no more than pnpm's visible-CPU maximum. This memory ratio is a
+measured sizing heuristic, not a kernel memory limit. Independent builds and
+release gates remain unchanged; larger allocations get larger worker pools.
+
+When visible, the wrapper uses the cgroup-v2 CPU quota (including ancestors)
+and Node's constrained memory. Explicit inputs cannot exceed detected limits.
+Some remote BuildKit OCI workers hide cgroups and expose the physical host's
+CPU and memory instead. In that case the build fails with an actionable error:
+the caller must pass the selected worker's allocation, not the client host's
+CPU count or free memory. Both values are positive numbers; CPU may be
+fractional and memory is in bytes.
+
+For the existing Kubernetes builder with CPU `6` and memory `6Gi` limits:
+
+```sh
+docker buildx build --builder k3s-buildkit-ubuntu --target deps   --build-arg PAPERCLIP_BUILD_CPUS=6   --build-arg PAPERCLIP_BUILD_MEMORY_BYTES=6442450944   --output type=cacheonly .
+```
+
+Read the selected Buildx handle's pod endpoint and its live container resource
+limits before supplying those values; the example is not a fleet-wide default.
+For a shared worker, allocate each build a share of those limits rather than
+promising the whole worker to every simultaneous build. A build argument sizes
+the package manager but does not reserve or enforce capacity. A caller that
+cannot establish its allocation must not fall back to host capacity. On older
+or non-v2 cgroups, use explicit inputs as well.
+
+The wrapper changes only `PNPM_WORKERS` for the two existing install commands.
+It preserves resolution, frozen-lockfile installation, lifecycle scripts,
+package-manager version, and failure status. The pnpm-specific subtraction
+formula is covered by `node --test scripts/pnpm-resource-budget.test.mjs`, also
+registered in the image's existing fork gate. Recheck that formula when
+upgrading pnpm. Full image/release validation is separate from a deps-stage
+pass.
+
 ## Standard images and downstream composition
 
 The Docker workflow publishes the standard `production` target for Linux AMD64
