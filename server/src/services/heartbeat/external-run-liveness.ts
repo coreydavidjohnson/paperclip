@@ -1,10 +1,11 @@
 import { and, asc, eq, isNotNull, or, sql } from "drizzle-orm";
-import { agents, heartbeatRuns, issueRecoveryActions, issues, runLivenessOutbox, type Db } from "@paperclipai/db";
+import { heartbeatRuns, issueRecoveryActions, issues, runLivenessOutbox, type Db } from "@paperclipai/db";
 import type { AdapterExecutionResult, ExternalRunHandle, ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { terminalizeLegacyExecution } from "../legacy-execution-recovery.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { legacyControllerBootId } from "../legacy-controller-lease.js";
 import { logger } from "../../middleware/logger.js";
+import { recordedExternalRunConfiguration } from "./external-run-state.js";
 import type { ExternalRunProbe } from "@paperclipai/adapter-utils";
 
 export const EXTERNAL_RUN_PROGRESS_GRACE_MS = 15 * 60_000;
@@ -60,6 +61,7 @@ export function decideExternalRunLiveness(run: DecisionRun, result: ExternalRunP
 type Run = typeof heartbeatRuns.$inferSelect;
 interface Dependencies {
   getAdapter: (type: string) => ServerAdapterModule | undefined;
+  resolveConfig: (companyId: string, config: Record<string, unknown>) => Promise<Record<string, unknown>>;
   onSettled: (run: Run, result: AdapterExecutionResult) => Promise<void>;
   onObserve: (run: Run) => Promise<void>;
   onTerminal: (run: Run) => Promise<void>;
@@ -170,8 +172,7 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
     }
   }
   async function sweep() {
-    const candidates = await db.select({ run: heartbeatRuns, adapterType: agents.adapterType, config: agents.adapterConfig }).from(heartbeatRuns)
-      .innerJoin(agents, and(eq(agents.id, heartbeatRuns.agentId), eq(agents.companyId, heartbeatRuns.companyId)))
+    const candidates = await db.select().from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"), isNotNull(heartbeatRuns.externalRunHandle),
         or(sql`${heartbeatRuns.livenessClaimedUntil} is null`,sql`${heartbeatRuns.livenessClaimedUntil} <= clock_timestamp()`),
         or(sql`coalesce(${heartbeatRuns.lastProgressAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= clock_timestamp() - interval '15 minutes'`,
@@ -180,10 +181,13 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
           sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`),
       )).orderBy(asc(heartbeatRuns.livenessClaimedUntil), asc(heartbeatRuns.createdAt)).limit(25);
     for (let i = 0; i < candidates.length; i += 4) await Promise.all(candidates.slice(i, i+4).map(async candidate => {
-      const adapter = dependencies.getAdapter(candidate.adapterType);
-      if (!adapter?.probeRun) return;
-      try { await inspect(candidate.run, adapter, candidate.config ?? {}); }
-      catch (err) { logger.warn({ err, runId: candidate.run.id }, "External liveness remains retryable"); }
+      try {
+        const saved = recordedExternalRunConfiguration(candidate);
+        const adapter = dependencies.getAdapter(saved.adapterType);
+        if (!adapter?.probeRun) return;
+        const config = await dependencies.resolveConfig(candidate.companyId, saved.config);
+        await inspect(candidate, adapter, config);
+      } catch (err) { logger.warn({ err, runId: candidate.id }, "External liveness remains retryable"); }
     }));
   }
   async function consumeOutbox() {
@@ -197,16 +201,16 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       if (!claim) continue;
       const fence = and(eq(runLivenessOutbox.id,row.id),eq(runLivenessOutbox.status,"pending"),eq(runLivenessOutbox.attempts,claim.attempts));
       try {
-        const [entry] = await db.select({run:heartbeatRuns,agent:agents}).from(heartbeatRuns).innerJoin(agents,and(
-          eq(agents.id,heartbeatRuns.agentId),eq(agents.companyId,heartbeatRuns.companyId))).where(and(
-            eq(heartbeatRuns.id,row.runId!),eq(heartbeatRuns.companyId,row.companyId!)));
-        if (!entry) throw new Error("external run outbox source missing");
-        const {run,agent}=entry;
+        const [run] = await db.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id,row.runId!),eq(heartbeatRuns.companyId,row.companyId!)));
+        if (!run) throw new Error("external run outbox source missing");
         if (["running","queued"].includes(run.status)) throw new Error("external run is not terminal");
         if (row.action === "stop_provider_session") {
-          const adapter=dependencies.getAdapter(agent.adapterType);
+          const saved=recordedExternalRunConfiguration(run);
+          const adapter=dependencies.getAdapter(saved.adapterType);
           if (!adapter?.stopRun) throw new Error("adapter stopRun unavailable");
-          await bounded(signal=>adapter.stopRun!({config:agent.adapterConfig ?? {},handle:run.externalRunHandle as ExternalRunHandle,signal}));
+          const config=await dependencies.resolveConfig(run.companyId,saved.config);
+          await bounded(signal=>adapter.stopRun!({config,handle:run.externalRunHandle as ExternalRunHandle,signal}));
         } else if (row.action === "finalize_external_run") {
           await dependencies.onTerminal(run);
           if (row.payload.redispatch === true) await dependencies.wake(run);

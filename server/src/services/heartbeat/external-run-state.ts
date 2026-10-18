@@ -46,3 +46,13 @@ export async function persistExternalRunDispatchDeadline(db: Db, run: Observer) 
   }).where(externalObserverCondition(run)).returning({ id: heartbeatRuns.id });
   return Boolean(updated);
 }
+
+/** Never reinterpret an admitted run through the current agent configuration. */
+export function recordedExternalRunConfiguration(run: Pick<typeof heartbeatRuns.$inferSelect, "runnerProfileJson">) {
+  const saved = run.runnerProfileJson?.externalObservation as Record<string, unknown> | undefined;
+  if (!saved || typeof saved.adapterType !== "string" || !saved.adapterType ||
+      !saved.config || typeof saved.config !== "object" || Array.isArray(saved.config)) {
+    throw new Error("external_run_recorded_configuration_missing");
+  }
+  return { adapterType: saved.adapterType, config: saved.config as Record<string, unknown> };
+}

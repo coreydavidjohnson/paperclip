@@ -15,11 +15,11 @@ suite("external liveness real transaction fences", () => {
   const companyId=randomUUID(),agentId=randomUUID();
   await db.insert(companies).values({id:companyId,name:"Tests",issuePrefix:`T${companyId.slice(0,6)}`,defaultResponsibleUserId:"board-user"});
   await db.insert(agents).values({id:agentId,companyId,name:"[test] external",adapterType:"test_external",status:"running"});
-  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",startedAt:new Date(Date.now()-3600000),lastProgressAt:new Date(Date.now()-3600000),externalRunHandle:{sessionId:randomUUID(),turnRef:randomUUID(),dispatch:"accepted"},deadlineAt:new Date(Date.now()+3600000)}).returning();
+  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",runnerProfileJson:{externalObservation:{adapterType:"test_external",config:{}}},startedAt:new Date(Date.now()-3600000),lastProgressAt:new Date(Date.now()-3600000),externalRunHandle:{sessionId:randomUUID(),turnRef:randomUUID(),dispatch:"accepted"},deadlineAt:new Date(Date.now()+3600000)}).returning();
   return run;
  }
  async function fresh(id:string){return (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,id)))[0];}
- function worker(probeRun:()=>Promise<any>){ return createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",probeRun} as any),onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}}); }
+ function worker(probeRun:()=>Promise<any>){ return createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",probeRun} as any),resolveConfig:async(_company:string,config:any)=>config,onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}}); }
  it("authoritative gone ends once with epoch bump and outbox in one commit",async()=>{
   const run=await fixture();const w=worker(async()=>({state:"gone",reason:"deleted",authoritative:true}));
   await w.sweep();await w.sweep();const r=await fresh(run.id);
@@ -65,7 +65,7 @@ suite("external liveness real transaction fences", () => {
  });
  it("only one of two controllers attaches after an active probe",async()=>{
   const run=await fixture();await db.update(heartbeatRuns).set({controllerLeaseExpiresAt:new Date(Date.now()-1)}).where(eq(heartbeatRuns.id,run.id));
-  let observers=0;const deps={getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"active"}),observeRun:async()=>({exitCode:0})} as any),onSettled:async()=>{},onObserve:async(r:any)=>{if(r.id===run.id)observers++;},onTerminal:async()=>{},wake:async()=>{}};
+  let observers=0;const deps={getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"active"}),observeRun:async()=>({exitCode:0})} as any),resolveConfig:async(_company:string,config:any)=>config,onSettled:async()=>{},onObserve:async(r:any)=>{if(r.id===run.id)observers++;},onTerminal:async()=>{},wake:async()=>{}};
   await Promise.all([createExternalRunLivenessWorker(db,deps).sweep(),createExternalRunLivenessWorker(db,deps).sweep()]);
   expect(observers).toBe(1);expect((await fresh(run.id)).observerEpoch).toBe(1);
  });
@@ -75,7 +75,7 @@ suite("external liveness real transaction fences", () => {
  });
  it("stop outbox retries after a lost acknowledgment without repeating finalization",async()=>{
   const run=await fixture();await worker(async()=>({state:"gone",reason:"missing",authoritative:true})).sweep();
-  let stops=0;const consumer=createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",stopRun:async({handle}:any)=>{if(handle.sessionId!==run.externalRunHandle?.sessionId)return;stops++;if(stops===1)throw new Error("ack lost");}} as any),onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
+  let stops=0;const consumer=createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",stopRun:async({handle}:any)=>{if(handle.sessionId!==run.externalRunHandle?.sessionId)return;stops++;if(stops===1)throw new Error("ack lost");}} as any),resolveConfig:async(_company:string,config:any)=>config,onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
   await consumer.consumeOutbox();let rows=await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId,run.id));
   expect(rows.find(r=>r.action==="stop_provider_session")?.status).toBe("pending");
   await db.update(runLivenessOutbox).set({nextAttemptAt:new Date(0)}).where(eq(runLivenessOutbox.runId,run.id));
@@ -97,10 +97,10 @@ suite("external harvest recovery budget", () => {
   const companyId=randomUUID(),agentId=randomUUID();
   await db.insert(companies).values({id:companyId,name:"Harvest",issuePrefix:`H${companyId.slice(0,6)}`});
   await db.insert(agents).values({id:agentId,companyId,name:"Harvest",adapterType:"test_external"});
-  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",lastProgressAt:new Date(0),externalRunHandle:{sessionId:"harvest",dispatch:"accepted"}}).returning();
+  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",runnerProfileJson:{externalObservation:{adapterType:"test_external",config:{}}},lastProgressAt:new Date(0),externalRunHandle:{sessionId:"harvest",dispatch:"accepted"}}).returning();
   let harvests=0;
   const deps={getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"settled"}),observeRun:async()=>({exitCode:0})} as any),
-   onSettled:async()=>{},onObserve:async(r:any)=>{if(r.id!==run.id)return;harvests++;await recordExternalRunProgress(db,r);await persistExternalRunHandle(db,r,{sessionId:"harvest",turnRef:String(harvests),dispatch:"accepted"});},onTerminal:async()=>{},wake:async()=>{}};
+   resolveConfig:async(_company:string,config:any)=>config,onSettled:async()=>{},onObserve:async(r:any)=>{if(r.id!==run.id)return;harvests++;await recordExternalRunProgress(db,r);await persistExternalRunHandle(db,r,{sessionId:"harvest",turnRef:String(harvests),dispatch:"accepted"});},onTerminal:async()=>{},wake:async()=>{}};
   for(let i=0;i<4;i++){
    await db.update(heartbeatRuns).set({lastProgressAt:new Date(0),livenessClaimedUntil:null,controllerLeaseExpiresAt:new Date(0)}).where(eq(heartbeatRuns.id,run.id));
    await createExternalRunLivenessWorker(db,deps).sweep();
@@ -112,9 +112,24 @@ suite("external harvest recovery budget", () => {
   const companyId=randomUUID(),agentId=randomUUID();
   await db.insert(companies).values({id:companyId,name:"Lease",issuePrefix:`L${companyId.slice(0,6)}`});
   await db.insert(agents).values({id:agentId,companyId,name:"Lease",adapterType:"test_external"});
-  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",lastProgressAt:new Date(0),controllerLeaseExpiresAt:new Date(Date.now()+600000),externalRunHandle:{sessionId:"leased",dispatch:"accepted"}}).returning();
-  const w=createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"settled"}),observeRun:async()=>({exitCode:0})} as any),onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
+  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",runnerProfileJson:{externalObservation:{adapterType:"test_external",config:{}}},lastProgressAt:new Date(0),controllerLeaseExpiresAt:new Date(Date.now()+600000),externalRunHandle:{sessionId:"leased",dispatch:"accepted"}}).returning();
+  const w=createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"settled"}),observeRun:async()=>({exitCode:0})} as any),resolveConfig:async(_company:string,config:any)=>config,onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
   await w.sweep();const [current]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,run.id));
   expect(Number(current.livenessProbe?.harvestAttempts??0)).toBe(0);
  });
+ it("probes and stops with the recorded adapter and resolved config, not edited agent settings",async()=>{
+  const companyId=randomUUID(),agentId=randomUUID();
+  await db.insert(companies).values({id:companyId,name:"Config",issuePrefix:`C${companyId.slice(0,6)}`});
+  await db.insert(agents).values({id:agentId,companyId,name:"Config",adapterType:"new_adapter",adapterConfig:{baseUrl:"new-endpoint"}});
+  const saved={baseUrl:"admitted-endpoint",env:{TOKEN:{type:"secret_ref",secretId:randomUUID()}}};
+  const [run]=await db.insert(heartbeatRuns).values({companyId,agentId,status:"running",runtimeMode:"legacy",lastProgressAt:new Date(0),runnerProfileJson:{externalObservation:{adapterType:"admitted_adapter",config:saved}},externalRunHandle:{sessionId:"recorded",dispatch:"accepted"}}).returning();
+  const calls:string[]=[];const resolved={baseUrl:"admitted-endpoint",env:{TOKEN:"resolved-test-value"}};
+  const w=createExternalRunLivenessWorker(db,{getAdapter:(type:string)=>{if(type==="test_external")return undefined;calls.push(type);return {type,probeRun:async({config}:any)=>{expect(config).toEqual(resolved);return {state:"gone",reason:"missing",authoritative:true};},stopRun:async({config}:any)=>{expect(config).toEqual(resolved);}} as any;},
+   resolveConfig:async(company:string,config:any)=>{expect(company).toBe(companyId);expect(config).toEqual(saved);return resolved;},
+   onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}} as any);
+  await w.sweep();await w.consumeOutbox();
+  const [ended]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,run.id));
+  expect(ended.status).toBe("failed");expect(calls).toEqual(["admitted_adapter","admitted_adapter"]);
+ });
+
 });
