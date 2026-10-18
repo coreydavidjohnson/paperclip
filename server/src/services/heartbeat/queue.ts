@@ -3252,6 +3252,32 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             }
             return { kind: "deferred" as const };
           };
+          // Provider-stop evidence cannot answer a question or approve work.
+          // Keep one durable receipt under the issue lock; normal stranded-wake
+          // recovery rechecks these gates before admitting it after resolution.
+          if (opts.idempotencyKey?.startsWith("liveness:")) {
+            const cards = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+              eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
+              eq(issueThreadInteractions.status, "pending"),
+            ));
+            const pendingApprovals = await tx.select({ id: approvals.id }).from(issueApprovals)
+              .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId)))
+              .where(and(eq(issueApprovals.companyId, issue.companyId), eq(issueApprovals.issueId, issue.id),
+                inArray(approvals.status, ["pending", "revision_requested"])));
+            if (cards.length || pendingApprovals.length) {
+              const condition = { pendingInteractionIds: cards.map(card => card.id), pendingApprovalIds: pendingApprovals.map(approval => approval.id) };
+              if (executionWaitRequestId) await tx.update(agentWakeupRequests).set({
+                status: "deferred_issue_execution", runId: null, claimedAt: null, finishedAt: null,
+              }).where(eq(agentWakeupRequests.id, executionWaitRequestId));
+              else await tx.insert(agentWakeupRequests).values({
+                ...durableReceiptFields, companyId: issue.companyId, agentId, source, triggerDetail, reason,
+                requestedByActorType: opts.requestedByActorType ?? null, requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey, status: "deferred_issue_execution",
+                payload: { ...payload, issueId: issue.id, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot, executionWait: condition },
+              });
+              return { kind: "deferred" as const };
+            }
+          }
           const explicitContinuationRunId = randomUUID();
           const executionBlocker = await getExecutionBlocker(
             tx as unknown as Db, issue.companyId, issue.id,

@@ -214,6 +214,8 @@ heartbeat.ts.
   takeover and observer-epoch/version fencing. Terminal transitions persist the
   epoch and provider-stop intent together; a claimed outbox retries cleanup.
   Unknown and deadline endings require reconciliation, never automatic replay.
+  Confirmed-gone wakes preserve pending question/approval admission gates;
+  one durable deferred receipt resumes after the card is resolved.
   Prepared/submission-unknown handles become eligible for a probe after ten minutes.
 - Files: adapter-utils contract, database migration `0355_run_liveness`,
   `services/heartbeat/external-run-state.ts`, `external-run-liveness.ts`,
