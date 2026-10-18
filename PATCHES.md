@@ -723,3 +723,12 @@ into the current fork image or supplied by a fork migration.
 - Preserve PER-894 no-continuation delivery and dependency locks plus combined admission/UI/payload/cache history.
 - Regression uses real disposable PostgreSQL with malformed/noncanonical/missing/foreign bindings, native precedence, existing status-delivery/recovery suites and 192KiB contexts with 1000 same-company issues. The benchmark disables hash/merge joins transaction-locally to reproduce the observed live nested-loop shape; its timings are not production/API/browser latency claims.
 - Retire the backport when the next complete upstream upgrade includes this commit and passes the private contracts.
+
+## Client-blocking next-slot dispatch (PER-689)
+
+- Requested private fork patch: upstream master and latest stable v2026.1012.0 inspected; native priority lacks client dependency-path preference.
+- Home Lab only: ready queued high/critical issues on unresolved same-company blocks paths to open Co-Intelligence, Huron, AC Foods, AffirmedRx, Paragon or North Labs issues sort before internal work. Names deliberately match the requested client set; review this list on rename. Existing status/priority/FIFO remains within tiers and all claim/approval/dependency gates still run.
+- One recursive query over queued candidates, with UNION cycle termination and company/hidden/terminal filters. No schema, credentials, config, preemption, ownership or cap changes.
+- Native syncBlockedByIssueIds writes blocker issue_id -> dependent related_issue_id; query follows that direction.
+- RED: two high/critical next-free-slot regressions fail original source. GREEN: both pass with patch; expanded dependency suite 18/18 passes (priority, hidden, terminal, nonclient and malformed cycle cases) against disposable PostgreSQL. Held fixture adapter is not live provider evidence.
+- Retire when released upstream provides equivalent next-slot client-path dispatch and passes these contracts.
