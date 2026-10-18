@@ -245,3 +245,21 @@ heartbeat.ts.
 - PostgreSQL `jit: off` in `k8s/paperclip/10-cnpg.yaml` (PER-288/289).
 - The OmniGenT adapter and `register-adapter.sh` live in
   `luma-homelab/services/paperclip`, not in this fork.
+
+## Dependency-install worker budget (PER-1033)
+
+- Why: BuildKit OCI RUN hides cgroup resources on the private builder. Node
+  sees 24 physical CPUs while the pod has six CPUs and 6 GiB; pnpm 9.15.4
+  starts 23 workers and the dependency stage exits 137.
+- Contract: the existing resolution and frozen installs run through
+  `scripts/pnpm-resource-budget.mjs`. Visible cgroup limits or explicit build
+  allocations size the worker pool; hidden allocations fail with a clear
+  request for build arguments, never a physical-host fallback. No dependency,
+  lifecycle-script, lockfile, release-test or independent-build concurrency
+  semantics change.
+- Regression: `scripts/pnpm-resource-budget.test.mjs`, registered in
+  `luma-patch-tests`; real deps-stage evidence and integration instructions
+  are in `docs/incidents/2026-10-18-dependency-build-memory.md` and
+  `doc/DOCKER.md`.
+- Remove when: the pinned package manager detects the actual build allocation
+  and its resource use fits the allotted builder capacity without this wrapper.

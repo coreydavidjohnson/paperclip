@@ -15,6 +15,8 @@ test('pnpm uses the allotted CPU and memory, not the host CPU count', () => {
   assert.equal(budget(24, 6 * 1024 ** 3).workers, 6);
   assert.equal(budget(24, 24 * 1024 ** 3).workers, 23);
   assert.equal(budget(0.5, 512 * 1024 ** 2).workers, 1);
+  assert.equal(budget(1, 1024 ** 3, 1).workers, 1);
+  assert.equal(budget(1, 1024 ** 3, 1).pnpmWorkers, 0);
   for (const value of ['NaN', '-1', '0', '6Gi']) {
     const result = spawnSync(process.execPath, [script.pathname, '--print'], {
       encoding: 'utf8', env: { ...process.env, PAPERCLIP_BUILD_CPUS: value,
@@ -27,6 +29,7 @@ test('pnpm uses the allotted CPU and memory, not the host CPU count', () => {
 
 test('both dependency installs use the budget without changing install semantics', () => {
   const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
+  assert.ok(dockerfile.includes('RUN node --test scripts/pnpm-resource-budget.test.mjs'));
   assert.match(dockerfile, /COPY scripts\/pnpm-resource-budget.mjs scripts\//);
   assert.match(dockerfile, /node scripts\/pnpm-resource-budget.mjs install --resolution-only --ignore-scripts --no-frozen-lockfile && node scripts\/pnpm-resource-budget.mjs install --frozen-lockfile/);
 });
