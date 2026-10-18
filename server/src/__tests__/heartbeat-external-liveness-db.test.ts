@@ -27,6 +27,33 @@ suite("external liveness real transaction fences", () => {
   const rows=await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId,run.id));
   expect(rows.filter(r=>r.action==="stop_provider_session")).toHaveLength(1);
  });
+ it("claims a new observer epoch before accepting a settled provider result",async()=>{
+  const run=await fixture();let settled:any;
+  const w=createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"settled",result:{exitCode:0}})} as any),resolveConfig:async(_company,config)=>config,onSettled:async(r)=>{if(r.id===run.id)settled=r;},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
+  await w.sweep();expect(settled?.observerEpoch).toBe(run.observerEpoch+1);
+ });
+ it("does not settle provider results over an unexpired observer lease",async()=>{
+  const run=await fixture();await db.update(heartbeatRuns).set({controllerLeaseExpiresAt:new Date(Date.now()+600000)}).where(eq(heartbeatRuns.id,run.id));let settlements=0;
+  const w=createExternalRunLivenessWorker(db,{getAdapter:()=>({type:"test_external",probeRun:async()=>({state:"settled",result:{exitCode:0}})} as any),resolveConfig:async(_company,config)=>config,onSettled:async(r)=>{if(r.id===run.id)settlements++;},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
+  await w.sweep();expect(settlements).toBe(0);expect((await fresh(run.id)).status).toBe("running");
+ });
+ it("enforces an expired deadline without recorded configuration or an available adapter",async()=>{
+  const run=await fixture();await db.update(heartbeatRuns).set({runnerProfileJson:null,deadlineAt:new Date(0)}).where(eq(heartbeatRuns.id,run.id));
+  const w=createExternalRunLivenessWorker(db,{getAdapter:()=>undefined,resolveConfig:async(_company,config)=>config,onSettled:async()=>{},onObserve:async()=>{},onTerminal:async()=>{},wake:async()=>{}});
+  await w.sweep();expect((await fresh(run.id)).errorCode).toBe("external_deadline_exceeded");
+ });
+ it("bounds settled results when the adapter cannot harvest",async()=>{
+  const run=await fixture();await worker(async()=>({state:"settled"})).sweep();expect((await fresh(run.id)).errorCode).toBe("external_result_unavailable");
+ });
+ it("retires a renewing observer when positive provider evidence proves its session gone",async()=>{
+  const run=await fixture();await db.update(heartbeatRuns).set({controllerLeaseExpiresAt:new Date(Date.now()+600000)}).where(eq(heartbeatRuns.id,run.id));
+  await worker(async()=>({state:"gone",authoritative:true,reason:"garbage collected"})).sweep();
+  expect((await fresh(run.id)).errorCode).toBe("external_session_gone");expect((await fresh(run.id)).observerEpoch).toBe(run.observerEpoch+1);
+ });
+ it("backfills the original dispatch deadline rather than extending it on restart",async()=>{
+  const run=await fixture();await db.update(heartbeatRuns).set({deadlineAt:null,startedAt:new Date(Date.now()-13*3600000)}).where(eq(heartbeatRuns.id,run.id));
+  await worker(async()=>({state:"active"})).sweep();expect((await fresh(run.id)).errorCode).toBe("external_deadline_exceeded");
+ });
  it("late gone loses to concurrent output",async()=>{
   const run=await fixture();const w=worker(async()=>{await db.update(heartbeatRuns).set({lastProgressAt:sql`clock_timestamp()`,livenessVersion:sql`${heartbeatRuns.livenessVersion}+1`}).where(eq(heartbeatRuns.id,run.id));return {state:"gone",reason:"late",authoritative:true};});
   await w.sweep(); expect((await fresh(run.id)).status).toBe("running");

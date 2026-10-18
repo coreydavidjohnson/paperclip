@@ -167,6 +167,22 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     expect(deps.executeRun).not.toHaveBeenCalled();
   });
 
+  it("serializes concurrent liveness redelivery into exactly one admitted run", async () => {
+    const {run,issue,agent,company}=await fixture("failed");
+    await db.update(companies).set({defaultResponsibleUserId:"queue-test-user"}).where(eq(companies.id,company.id));
+    await db.update(issues).set({executionRunId:null,executionLockedAt:null,responsibleUserId:"queue-test-user"}).where(eq(issues.id,issue.id));
+    const deps=callbacks(db);deps.getAgent.mockResolvedValue(agent);
+    deps.instanceSettings.getExperimental.mockResolvedValue({} as Awaited<ReturnType<HeartbeatQueueDependencies["instanceSettings"]["getExperimental"]>>);
+    deps.issuesSvc.getDependencyReadiness.mockResolvedValue({isDependencyReady:true} as never);
+    const queue=createHeartbeatQueue(db,deps);
+    const opts={source:"automation" as const,triggerDetail:"system" as const,reason:"external_session_gone",requestedByActorType:"system" as const,requestedByActorId:"external-liveness",idempotencyKey:`liveness:${run.id}`,payload:{issueId:issue.id},contextSnapshot:{issueId:issue.id}};
+    const results=await Promise.all([queue.enqueueWakeup(agent.id,opts),queue.enqueueWakeup(agent.id,opts)]);
+    expect(results[0]?.id).toBeTruthy();expect(results[1]?.id).toBe(results[0]?.id);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId,agent.id))).toHaveLength(2);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey,opts.idempotencyKey)))).toHaveLength(1);
+    expect(deps.executeRun).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["claimed", "cancelled"] as const)("releases a running claim while preserving a %s wake", async (wakeStatus) => {
     const { run, issue, wake } = await fixture();
     await db.update(agentWakeupRequests).set({ status: wakeStatus }).where(eq(agentWakeupRequests.id, wake.id));

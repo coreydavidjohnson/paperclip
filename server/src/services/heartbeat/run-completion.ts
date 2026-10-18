@@ -386,7 +386,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
       )).for("update");
       const receipt = parseObject(current?.runnerProfileJson?.externalSettlement);
-      const ownsSettlement = allowSettlement && current?.status === "cancelled" && receipt.runId === run.id &&
+      const ownsSettlement = allowSettlement && current?.status === "cancelled" && receipt.status === "cancelled" && receipt.runId === run.id &&
         receipt.observerEpoch === run.observerEpoch && receipt.terminalEpoch === current.observerEpoch &&
         current.observerEpoch === run.observerEpoch + 1;
       if (!current || (current.observerEpoch !== run.observerEpoch && !ownsSettlement)) return false;

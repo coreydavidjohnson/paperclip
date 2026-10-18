@@ -99,7 +99,9 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
         patch: { errorCode: code, error: code.replaceAll("_", " "), finishedAt: sql`clock_timestamp()` as unknown as Date,
           observerEpoch: run.observerEpoch + 1, livenessVersion: run.livenessVersion + 1, livenessProbe: decision.probe,
           unknownSince: decision.unknownSince, livenessClaimedUntil: null, controllerLeaseExpiresAt: null, resultJson },
-        reconcileIfNeeded: true, writeConditions: [eq(heartbeatRuns.livenessVersion, run.livenessVersion), eq(heartbeatRuns.observerEpoch, run.observerEpoch)],
+        reconcileIfNeeded: true, writeConditions: [eq(heartbeatRuns.livenessVersion, run.livenessVersion), eq(heartbeatRuns.observerEpoch, run.observerEpoch),
+          ...(code === "external_result_unavailable"
+            ? [or(sql`${heartbeatRuns.controllerLeaseExpiresAt} is null`, sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`)!] : [])],
       });
       if (!updated) return;
       // Stop evidence closes only this run's liveness hold, never workspace, approvals or dependencies.
@@ -122,25 +124,43 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       counters[code] = (counters[code] ?? 0) + 1;
     });
   }
-  async function inspect(candidate: Run, adapter: ServerAdapterModule, config: Record<string, unknown>) {
-    const [run] = await db.update(heartbeatRuns).set({ livenessClaimedUntil: sql`clock_timestamp() + interval '30 seconds'` }).where(and(
+  async function inspect(candidate: Run) {
+    const [run] = await db.update(heartbeatRuns).set({ livenessClaimedUntil: sql`clock_timestamp() + interval '30 seconds'`,
+      deadlineAt: sql`coalesce(${heartbeatRuns.deadlineAt}, coalesce(${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) + interval '12 hours')` }).where(and(
       eq(heartbeatRuns.id, candidate.id), eq(heartbeatRuns.companyId, candidate.companyId), eq(heartbeatRuns.status, "running"),
       eq(heartbeatRuns.livenessVersion, candidate.livenessVersion),
       or(sql`${heartbeatRuns.livenessClaimedUntil} is null`, sql`${heartbeatRuns.livenessClaimedUntil} <= clock_timestamp()`),
     )).returning();
     if (!run) return;
     const [{ now }] = await db.select({ now: sql<Date>`clock_timestamp()`.mapWith(heartbeatRuns.createdAt) }).from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
-    const key = `${adapter.type}:${String(config.baseUrl ?? config.apiUrl ?? config.gatewayUrl ?? "")}`;
-    const breaker = breakers.get(key);
-    if (breaker && breaker.until > now.getTime() && (!run.deadlineAt || run.deadlineAt > now)) return;
+    // Deadline enforcement must not depend on adapter discovery, credentials or provider availability.
+    if (run.deadlineAt && run.deadlineAt <= now) {
+      await finish(run, decideExternalRunLiveness(run, { state: "unknown", reason: "dispatch deadline elapsed" }, now));
+      return;
+    }
+    let adapter: ServerAdapterModule | undefined;
     let result: ExternalRunProbe;
-    try { result = await bounded(signal => adapter.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal })); }
-    catch (error) { result = { state: "unknown", reason: error instanceof Error ? error.message : "probe failed" }; }
-    if (result.state === "unknown") {
-      const failures = (breaker?.failures ?? 0) + 1;
-      breakers.set(key, { failures, until: failures >= 5 ? now.getTime() + 60_000 : 0 });
-    } else breakers.delete(key);
+    let key: string | undefined;
+    try {
+      const saved = recordedExternalRunConfiguration(run);
+      adapter = dependencies.getAdapter(saved.adapterType);
+      if (!adapter?.probeRun) throw new Error("external_run_probe_unavailable");
+      const config = await dependencies.resolveConfig(run.companyId, saved.config);
+      key = `${adapter.type}:${String(config.baseUrl ?? config.apiUrl ?? config.gatewayUrl ?? "")}`;
+      const breaker = breakers.get(key);
+      if (breaker && breaker.until > now.getTime()) return;
+      result = await bounded(signal => adapter!.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
+    } catch (error) {
+      result = { state: "unknown", reason: error instanceof Error ? error.message : "probe failed" };
+    }
+    if (key) {
+      if (result.state === "unknown") {
+        const failures = (breakers.get(key)?.failures ?? 0) + 1;
+        breakers.set(key, { failures, until: failures >= 5 ? now.getTime() + 60_000 : 0 });
+      } else breakers.delete(key);
+    }
     const decision = decideExternalRunLiveness(run, result, now);
+    if (decision.harvest && !adapter?.observeRun) decision.end = "external_result_unavailable";
     if (decision.end) { await finish(run, decision); return; }
     const updated = await db.transaction(async tx => {
       const [updated] = await tx.update(heartbeatRuns).set({
@@ -157,9 +177,9 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
     });
     if (!updated) return;
     counters[result.state] = (counters[result.state] ?? 0) + 1;
-    if (result.state === "settled" && result.result) { await dependencies.onSettled(updated, result.result); return; }
-    if (decision.alive || decision.harvest) {
-      if (!adapter.observeRun) return;
+    const settledResult = result.state === "settled" ? result.result : undefined;
+    if (settledResult || decision.alive || decision.harvest) {
+      if (!settledResult && !adapter?.observeRun) return;
       const [claimed] = await db.update(heartbeatRuns).set({ controllerBootId: legacyControllerBootId,
         controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`, observerEpoch: sql`${heartbeatRuns.observerEpoch} + 1`,
         livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1`,
@@ -168,7 +188,10 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
         eq(heartbeatRuns.livenessVersion, updated.livenessVersion),
         or(sql`${heartbeatRuns.controllerLeaseExpiresAt} is null`,sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`),
       )).returning();
-      if (claimed) await dependencies.onObserve(claimed);
+      if (claimed) {
+        if (settledResult) await dependencies.onSettled(claimed, settledResult);
+        else await dependencies.onObserve(claimed);
+      }
     }
   }
   async function sweep() {
@@ -179,14 +202,10 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
           sql`(${heartbeatRuns.externalRunHandle}->>'dispatch') in ('prepared', 'submission_unknown') and coalesce(${heartbeatRuns.lastProgressAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= clock_timestamp() - interval '10 minutes'`,
           sql`${heartbeatRuns.deadlineAt} <= clock_timestamp()`,
           sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`),
-      )).orderBy(asc(heartbeatRuns.livenessClaimedUntil), asc(heartbeatRuns.createdAt)).limit(25);
+      )).orderBy(sql`${heartbeatRuns.livenessClaimedUntil} asc nulls first`, asc(heartbeatRuns.createdAt)).limit(25);
     for (let i = 0; i < candidates.length; i += 4) await Promise.all(candidates.slice(i, i+4).map(async candidate => {
       try {
-        const saved = recordedExternalRunConfiguration(candidate);
-        const adapter = dependencies.getAdapter(saved.adapterType);
-        if (!adapter?.probeRun) return;
-        const config = await dependencies.resolveConfig(candidate.companyId, saved.config);
-        await inspect(candidate, adapter, config);
+        await inspect(candidate);
       } catch (err) { logger.warn({ err, runId: candidate.id }, "External liveness remains retryable"); }
     }));
   }

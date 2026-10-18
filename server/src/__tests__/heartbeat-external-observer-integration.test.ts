@@ -26,7 +26,19 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
  it("harvests settled results without observe or execute", async () => {
   const run = await fixture(); probe.mockResolvedValue({ state: "settled", result: { exitCode: 0, signal: null, timedOut: false, sessionId: "harvested", resultJson: { finalResponse: "Finished" } } });
   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();
-  expect(execute).not.toHaveBeenCalled(); expect(observe).not.toHaveBeenCalled(); expect(await read(run.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "harvested", observerEpoch: 1 });
+  expect(execute).not.toHaveBeenCalled(); expect(observe).not.toHaveBeenCalled(); expect(await read(run.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "harvested", observerEpoch: 2 });
+ });
+ it("settles under the admitted adapter type after the agent configuration changes", async () => {
+  const run=await fixture();await db.update(agents).set({adapterType:"edited_adapter",adapterConfig:{model:"edited"}}).where(eq(agents.id,run.agentId));
+  probe.mockResolvedValue({state:"active"});
+  observe.mockImplementationOnce(async ctx=>{expect(ctx.agent.adapterType).toBe("test_external");expect(ctx.agent.adapterConfig).toEqual({});return {exitCode:0,signal:null,timedOut:false,sessionId:"original",resultJson:{finalResponse:"Finished"}};});
+  await heartbeat.sweepExternalRunLiveness();await heartbeat.drainActiveRunExecutions();
+  expect(await read(run.id)).toMatchObject({status:"succeeded",sessionIdAfter:"original"});
+ });
+ it("keeps recorded remote handles with liveness when the current adapter cannot probe", async () => {
+  const run=await fixture();const {getServerAdapter}=await import("../adapters/index.js");
+  vi.mocked(getServerAdapter).mockReturnValueOnce({type:"edited_adapter",execute} as never);
+  await heartbeat.reapOrphanedRuns();expect(await read(run.id)).toMatchObject({status:"running",errorCode:null});
  });
  it("does not reap remote handles as process_lost", async () => { const run = await fixture(); await heartbeat.reapOrphanedRuns(); expect(await read(run.id)).toMatchObject({ status: "running", errorCode: null }); });
 });

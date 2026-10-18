@@ -1807,9 +1807,10 @@ export function heartbeatService(
   // Recovery only attaches to an existing provider handle. No preparation or dispatch.
   async function observeExternalRun(run: typeof heartbeatRuns.$inferSelect, settled?: AdapterExecutionResult) {
     if (!run.externalRunHandle) return;
-    const agent = await getAgent(run.agentId);
-    if (!agent || agent.companyId !== run.companyId) return;
+    const currentAgent = await getAgent(run.agentId);
+    if (!currentAgent || currentAgent.companyId !== run.companyId) return;
     const saved = recordedExternalRunConfiguration(run);
+    const agent = { ...currentAgent, adapterType: saved.adapterType, adapterConfig: saved.config };
     const adapter = getServerAdapter(saved.adapterType);
     if (!settled && (!adapter.observeRun || !saved.config)) return;
     if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
