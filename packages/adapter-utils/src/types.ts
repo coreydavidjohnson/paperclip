@@ -281,6 +281,8 @@ export interface AdapterExecutionContext {
    * remote operation.
    */
   onDispatch?: () => void;
+  /** Persist the adapter's durable turn identity before and after each provider write (PER-966). */
+  onExternalRunHandle?: (handle: ExternalRunHandle) => Promise<void>;
   onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void>;
   authToken?: string;
   /**
@@ -502,6 +504,40 @@ export interface AcpTargetDescriptor {
   };
 }
 
+/**
+ * Adapter-owned identity of the remote turn a run dispatched (PER-966).
+ * `dispatch` is durable: `prepared` before any provider write, `submission_unknown`
+ * when a write may have reached the provider, `accepted` once it confirmed,
+ * `observed` once the turn itself was seen. A run never sends a second message
+ * after `submission_unknown` unless a read-only check proved non-acceptance.
+ */
+export interface ExternalRunHandle {
+  sessionId: string;
+  turnRef?: string | null;
+  dispatch: "prepared" | "submission_unknown" | "accepted" | "observed";
+  [key: string]: unknown;
+}
+
+export type ExternalRunProbe =
+  | { state: "active"; detail?: string }
+  | { state: "settled"; result?: AdapterExecutionResult | null; detail?: string }
+  | { state: "gone"; reason: string; authoritative?: boolean }
+  | { state: "unknown"; reason: string };
+
+export interface ExternalRunProbeContext {
+  config: Record<string, unknown>;
+  handle: ExternalRunHandle;
+  signal: AbortSignal;
+}
+
+export interface ExternalRunObserveContext extends ExternalRunProbeContext {
+  runId: string;
+  agent: AdapterAgent;
+  onLog: AdapterExecutionContext["onLog"];
+  onMeta?: AdapterExecutionContext["onMeta"];
+  onHandle?: (handle: ExternalRunHandle) => Promise<void>;
+}
+
 export interface ServerAdapterModule {
   type: string;
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
@@ -553,6 +589,16 @@ export interface ServerAdapterModule {
    * resolved inside this method — the caller receives a fully hydrated schema.
    */
   getConfigSchema?: () => Promise<AdapterConfigSchema> | AdapterConfigSchema;
+  /**
+   * Read-only liveness of a dispatched remote turn (PER-966), 10 s budget.
+   * `gone` requires positive turn-scoped evidence; transport failure is `unknown`.
+   * Core's liveness worker is the only caller and the only owner of ending.
+   */
+  probeRun?: (ctx: ExternalRunProbeContext) => Promise<ExternalRunProbe>;
+  /** Attach to an already-dispatched turn and wait for its result. Must never send provider input. */
+  observeRun?: (ctx: ExternalRunObserveContext) => Promise<AdapterExecutionResult>;
+  /** Stop the provider session of an ended run (interrupt, confirm idle). Idempotent. */
+  stopRun?: (ctx: ExternalRunProbeContext) => Promise<void>;
 
   // ---------------------------------------------------------------------------
   // Adapter capability flags
