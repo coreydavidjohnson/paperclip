@@ -3331,7 +3331,18 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
                 sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`),
             )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
-            if (latest?.status === "cancelled" ||
+            // A new authenticated user comment is new authority, not replay of
+            // the cancelled turn. Cleanup and normal execution blockers still gate it.
+            const [newUserComment] = latest?.status === "cancelled" && latest.finishedAt &&
+                opts.requestedByActorType === "user" && opts.requestedByActorId && wakeCommentId &&
+                ["issue_commented", "issue_reopened_via_comment"].includes(reason ?? "")
+              ? await tx.select({ id: issueComments.id }).from(issueComments).where(and(
+                  eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
+                  eq(issueComments.id, wakeCommentId), eq(issueComments.authorType, "user"),
+                  eq(issueComments.authorUserId, opts.requestedByActorId), isNull(issueComments.createdByRunId),
+                  isNull(issueComments.deletedAt), gt(issueComments.createdAt, latest.finishedAt),
+                )) : [];
+            if ((latest?.status === "cancelled" && !newUserComment) ||
                 (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
               return { kind: "deferred" as const };
             }

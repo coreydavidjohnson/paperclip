@@ -175,6 +175,25 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     return id;
   }
 
+  it.each(["native_stop", "configuration_incomplete"])("retains held liveness context through non-plain release (%s)", async mode => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId });
+    const runId = await seedRun({ companyId, agentId, status: mode === "native_stop" ? "cancelled" : "failed", contextSnapshot: { issueId }, errorCode: mode === "configuration_incomplete" ? "configuration_incomplete" : null });
+    if (mode === "native_stop") await db.update(heartbeatRuns).set({ runtimeMode: "native", nativeIssueId: issueId, resultJson: {
+      reassignmentStopRequested: true, nativeCancellation: { schema: "paperclip.native-cancellation.v1", runId, companyId, issueId, scope: "run", reasonCode: "cancellation_run_only", dispatchState: "acknowledged", dispatched: true, intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID() },
+    } }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, issueId));
+    const wakeId = await seedDeferredWake({ companyId, agentId, issueId, requestedByActorType: "system", requestedByActorId: "external-liveness", payload: { executionWait: { reason: "budget.blocked" }, _paperclipWakeContext: { forceFreshSession: true, recovery: { predecessorRunId: runId, outcomesUnknown: true }, prompt: "do not blindly replay" } } });
+    await db.update(agentWakeupRequests).set({ idempotencyKey: `liveness:${runId}` }).where(eq(agentWakeupRequests.id, wakeId));
+    const before = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0];
+    const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+    const result = await adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async () => { throw new Error("non-plain release must not drain held recovery"); });
+    expect(result.outcome.kind).toBe(mode === "native_stop" ? "released" : "blocked");
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId)))[0]).toEqual(before);
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ executionRunId: null, checkoutRunId: null });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(1);
+  });
   it.each([
     "completed", "multiple_comments", "repeated_reference", "parent_reference", "mixed_issue_references", "mixed_foreign_references", "mixed_unknown_references", "no_comments", "missing_comment",
     "human_comment", "other_run_comment", "foreign_comment", "other_issue_comment", "deleted_comment",

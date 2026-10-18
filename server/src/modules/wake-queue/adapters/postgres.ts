@@ -221,9 +221,13 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
 
     async findNextDeferredWake({ companyId, issueId, excludedWakeIds }) {
       // Budget-blocked recovery can only leave its hold via fresh admission.
-      // Do not let release drain discard it or promote a plain human wake.
+      // Only the current owner can hold the issue; stale/bound receipts cannot
+      // prevent a new assignee from receiving saved input.
       const [budgetRecovery] = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
         eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.status, DEFERRED_WAKE_STATUS),
+        isNull(agentWakeupRequests.runId),
+        sql`exists (select 1 from ${issues} where ${issues.id} = ${issueId}
+          and ${issues.companyId} = ${companyId} and ${issues.assigneeAgentId} = ${agentWakeupRequests.agentId})`,
         eq(agentWakeupRequests.requestedByActorType, "system"), eq(agentWakeupRequests.requestedByActorId, "external-liveness"),
         sql`${agentWakeupRequests.idempotencyKey} like 'liveness:%'`,
         sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
@@ -251,6 +255,12 @@ function buildTransaction(tx: Db, deps: WakeQueuePostgresAdapterDeps, db: Db, ru
         if (!row) return null;
         // Releasing the terminal source again cannot consume a held recovery wake.
         if (row.idempotencyKey?.startsWith("liveness:")) {
+          const [owner] = await tx.select({ agentId: issues.assigneeAgentId }).from(issues)
+            .where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
+          if (owner?.agentId !== row.agentId || row.runId) {
+            heldWakeIds.push(row.id);
+            continue;
+          }
           const readiness = await issuesSvc.getDependencyReadiness(issueId);
           const [card] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
             .where(and(eq(issueThreadInteractions.companyId, companyId), eq(issueThreadInteractions.issueId, issueId),
