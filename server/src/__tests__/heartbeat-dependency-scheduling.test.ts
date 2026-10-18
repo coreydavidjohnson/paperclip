@@ -1335,31 +1335,40 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
   });
 
   it.each([
-    ['high', 'Huron', 'blocked', false, false, true],
-    ['critical', 'Huron', 'blocked', false, false, true],
-    ['medium', 'Huron', 'blocked', false, false, false],
-    ['high', 'Internal', 'blocked', false, false, false],
-    ['high', 'Huron', 'done', false, false, false],
-    ['high', 'Huron', 'blocked', true, false, false],
-    ['high', 'Huron', 'blocked', false, true, true],
-  ] as const)('orders %s dependency for %s %s (hidden=%s cycle=%s boost=%s) without preemption', async (priority, clientName, clientStatus, hidden, cycle, boosted) => {
+    ['high', 'Huron', 'blocked', false, false, true, 'transitive'],
+    ['critical', 'Huron', 'blocked', false, false, true, 'transitive'],
+    ['medium', 'Huron', 'blocked', false, false, false, 'transitive'],
+    ['high', 'Internal', 'blocked', false, false, false, 'transitive'],
+    ['high', 'Huron', 'done', false, false, false, 'transitive'],
+    ['high', 'Huron', 'blocked', true, false, false, 'transitive'],
+    ['high', 'Huron', 'blocked', false, true, true, 'transitive'],
+    ['high', 'Huron', 'blocked', false, false, true, 'direct'],
+    ['high', 'Huron', 'blocked', false, false, false, 'foreign-agent'],
+    ['high', 'Huron', 'blocked', false, false, false, 'foreign-issue'],
+    ['high', 'Huron', 'blocked', false, false, false, 'foreign-edge'],
+    ['high', 'Huron', 'blocked', false, false, false, 'other-agent'],
+    ['high', 'Huron', 'blocked', false, false, false, 'unassigned'],
+    ['high', 'Huron', 'blocked', false, false, false, 'unready'],
+  ] as const)('orders %s dependency for %s %s (hidden=%s cycle=%s boost=%s mode=%s) without preemption', async (priority, clientName, clientStatus, hidden, cycle, boosted, mode) => {
+    const foreignCompanyId = randomUUID();
     const companyId = randomUUID(), agentId = randomUUID(), clientId = randomUUID();
     const activeId = randomUUID(), internalId = randomUUID(), candidateId = randomUUID(), middleId = randomUUID(), clientIssueId = randomUUID();
     await db.insert(companies).values({id: companyId, name: 'Client queue', issuePrefix: `C${companyId.slice(0, 6)}`, defaultResponsibleUserId: 'responsible-user'});
+    await db.insert(companies).values({id: foreignCompanyId, name: 'Foreign', issuePrefix: `F${foreignCompanyId.slice(0, 6)}`});
     await db.insert(agents).values([
-      {id: agentId, companyId, name: 'Home Lab', role: 'engineer', status: 'active', adapterType: 'codex_local', runtimeConfig: {heartbeat: {wakeOnDemand: true, maxConcurrentRuns: 1}}},
-      {id: clientId, companyId, name: clientName, role: 'general', status: 'active'},
+      {id: agentId, companyId, name: mode === 'other-agent' ? 'Internal Worker' : 'Home Lab', role: 'engineer', status: 'active', adapterType: 'codex_local', runtimeConfig: {heartbeat: {wakeOnDemand: true, maxConcurrentRuns: 1}}},
+      {id: clientId, companyId: mode === 'foreign-agent' || mode === 'foreign-issue' ? foreignCompanyId : companyId, name: clientName, role: 'general', status: 'active'},
     ]);
     await db.insert(issues).values([
       {id: activeId, companyId, title: 'Already working', status: 'todo', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
       {id: internalId, companyId, title: 'Older critical internal', status: 'in_progress', priority: 'critical', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
       {id: candidateId, companyId, title: 'Ready client blocker', status: 'todo', priority, assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
       {id: middleId, companyId, title: 'Intermediate blocker', status: 'blocked', assigneeAgentId: agentId},
-      {id: clientIssueId, companyId, title: 'Client deliverable', status: clientStatus, hiddenAt: hidden ? new Date() : null, assigneeAgentId: clientId},
+      {id: clientIssueId, companyId: mode === 'foreign-issue' ? foreignCompanyId : companyId, title: 'Client deliverable', status: clientStatus, hiddenAt: hidden ? new Date() : null, assigneeAgentId: mode === 'unassigned' ? null : clientId},
     ]);
     await db.insert(issueRelations).values([
-      {companyId, issueId: candidateId, relatedIssueId: middleId, type: 'blocks'},
-      {companyId, issueId: middleId, relatedIssueId: clientIssueId, type: 'blocks'},
+      {companyId, issueId: candidateId, relatedIssueId: mode === 'direct' ? clientIssueId : middleId, type: 'blocks'},
+      {companyId: mode === 'foreign-edge' ? foreignCompanyId : companyId, issueId: middleId, relatedIssueId: clientIssueId, type: 'blocks'},
     ]);
     if (cycle) await db.insert(issueRelations).values({companyId, issueId: clientIssueId, relatedIssueId: middleId, type: 'blocks'});
     let finish!: () => void;
@@ -1373,10 +1382,11 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       expect(await waitForCondition(async () => order.length === 1, 10000)).toBe(true);
       await wake(internalId);
       await wake(candidateId);
+      if (mode === 'unready') await db.insert(issueRelations).values({companyId, issueId: middleId, relatedIssueId: candidateId, type: 'blocks'});
       expect(order).toEqual([activeId]);
     } finally { finish(); }
-    expect(await waitForCondition(async () => order.length === 3, 15000)).toBe(true);
+    expect(await waitForCondition(async () => order.length === (mode === 'unready' ? 2 : 3), 15000)).toBe(true);
     await heartbeat.drainActiveRunExecutions();
-    expect(order.slice(0, 3)).toEqual(boosted ? [activeId, candidateId, internalId] : [activeId, internalId, candidateId]);
+    expect(order.slice(0, 3)).toEqual(mode === 'unready' ? [activeId, internalId] : boosted ? [activeId, candidateId, internalId] : [activeId, internalId, candidateId]);
   }, 60000);
 });
