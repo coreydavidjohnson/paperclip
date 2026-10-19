@@ -9180,10 +9180,20 @@ export function issueRoutes(
           sourceIssueStatus === "todo" &&
           activeRecoveryAction.kind === "deliberate_wait_without_target"
         ) {
+          // A bounded owner repair is the recorded owner's own lane: the owner
+          // (or board) may hand the parked task back while that same owner is
+          // still assigned. Any other owner, policy or source state is stale.
+          const currentOwnerRepair =
+            activeRecoveryAction.ownerType === "agent" &&
+            activeRecoveryAction.wakePolicy?.type === "bounded_owner_disposition_repair" &&
+            (lockedIssue.status === "blocked" || lockedIssue.status === "in_progress") &&
+            activeRecoveryAction.ownerAgentId === activeRecoveryAction.returnOwnerAgentId;
+          const currentBoardEscalation =
+            lockedIssue.status === "blocked" &&
+            activeRecoveryAction.ownerType === "board" &&
+            activeRecoveryAction.wakePolicy?.type === "board_escalation";
           if (
-            lockedIssue.status !== "blocked" ||
-            activeRecoveryAction.ownerType !== "board" ||
-            activeRecoveryAction.wakePolicy?.type !== "board_escalation" ||
+            !(currentOwnerRepair || currentBoardEscalation) ||
             !activeRecoveryAction.returnOwnerAgentId ||
             lockedIssue.assigneeAgentId !== activeRecoveryAction.returnOwnerAgentId
           ) {

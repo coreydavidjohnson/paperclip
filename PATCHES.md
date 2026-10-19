@@ -732,3 +732,30 @@ into the current fork image or supplied by a fork migration.
 - Native syncBlockedByIssueIds writes blocker issue_id -> dependent related_issue_id; query follows that direction.
 - RED: two high/critical next-free-slot regressions fail original source. GREEN: both pass with patch; expanded dependency suite 18/18 passes (priority, hidden, terminal, nonclient and malformed cycle cases) against disposable PostgreSQL. Held fixture adapter is not live provider evidence.
 - Retire when released upstream provides equivalent next-slot client-path dispatch and passes these contracts.
+
+## Current-owner disposition repair hand-back (PER-1091)
+
+- Root cause: the resolver required a blocked board-escalation action, while
+  recovery creates agent-owned bounded_owner_disposition_repair actions on
+  parked in_progress work. Fresh action IDs therefore failed stale validation.
+- Permit only the current agent-owned bounded repair on blocked/in_progress
+  work when owner, recorded return owner and locked source assignee agree.
+  Keep exact-action, company, run, dependency, interaction, execution hold,
+  approval, pending stage, pause, availability and budget gates unchanged.
+- Keep the existing blocked board-escalation lane and action-ID replay.
+  The ordinary restored wake remains post-commit/best-effort; this patch does
+  not add an exactly-once outbox or claim crash-window delivery guarantees.
+- Upstream master 4970d5ed3d184b8b3ddfb2c1185be6cb6dc8c2ea inspected
+  2026-10-19 still has the board-only predicate. This private own-fork repair
+  is authorized by PER-1091. No schema, dependency, adapter or grant change.
+- Regression: unpatched current-owner cases returned 409 instead of 200
+  (3 failed, 14 safety/replay cases passed). Patched ownership routes pass
+  152 tests; embedded PostgreSQL recovery suite passes 77, including persisted
+  action history, one audit resolution and lost-response replay without a
+  duplicate wake. Token gates pass. Local Node 22 is below the required 24;
+  cluster typecheck/build and live delivery remain separate release gates.
+- Independent GPT-6.1 Sol source review accepted the fix. Its initial missing
+  run-ID concern was disproved by the existing route-level guard and a passing
+  negative regression; no unnecessary guard was added.
+- Retire when a released upstream equivalent admits current bounded owner
+  repairs and passes these regression/safety/replay contracts.
