@@ -874,3 +874,18 @@ into the current fork image or supplied by a fork migration.
 ### PER-218 migration release correction
 
 The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
+## Assignment wake comment carrier (PER-1092)
+
+- Why: assignment-only markdown printed comment headings while omitting their
+  bodies. The shared wake renderer owns those bodies; turning assignment bodies
+  back on would duplicate them in native and OmniGenT prompts.
+- Change: emit comment headings only with their bodies. Preserve follow-up
+  policy and attachment descriptors when the wake prompt owns comments.
+- Upstream checked: 06d4fe3121e57ca834b533e757bd0f540fadabc5 still has the same
+  conditional-body/unconditional-heading behavior in heartbeat/task-markdown.ts.
+  No equivalent fix found in the fetched recent comment/wake history.
+- Retirement: drop when a released upstream renderer never emits bodyless
+  headings and passes the real full/compact assignment carrier regression.
+- Test: heartbeat-context-summary.test.ts combines real assignment markdown
+  with five ordered wake comments on fresh and resumed paths, asserting each
+  body exactly once and no bodyless headings; also covers a single comment.
