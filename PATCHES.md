@@ -732,3 +732,19 @@ into the current fork image or supplied by a fork migration.
 - Native syncBlockedByIssueIds writes blocker issue_id -> dependent related_issue_id; query follows that direction.
 - RED: two high/critical next-free-slot regressions fail original source. GREEN: both pass with patch; expanded dependency suite 18/18 passes (priority, hidden, terminal, nonclient and malformed cycle cases) against disposable PostgreSQL. Held fixture adapter is not live provider evidence.
 - Retire when released upstream provides equivalent next-slot client-path dispatch and passes these contracts.
+
+## Assignment wake comment carrier (PER-1092)
+
+- Why: assignment-only markdown printed comment headings while omitting their
+  bodies. The shared wake renderer owns those bodies; turning assignment bodies
+  back on would duplicate them in native and OmniGenT prompts.
+- Change: emit comment headings only with their bodies. Preserve follow-up
+  policy and attachment descriptors when the wake prompt owns comments.
+- Upstream checked: 06d4fe3121e57ca834b533e757bd0f540fadabc5 still has the same
+  conditional-body/unconditional-heading behavior in heartbeat/task-markdown.ts.
+  No equivalent fix found in the fetched recent comment/wake history.
+- Retirement: drop when a released upstream renderer never emits bodyless
+  headings and passes the real full/compact assignment carrier regression.
+- Test: heartbeat-context-summary.test.ts combines real assignment markdown
+  with five ordered wake comments on fresh and resumed paths, asserting each
+  body exactly once and no bodyless headings; also covers a single comment.

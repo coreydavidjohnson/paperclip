@@ -8828,10 +8828,8 @@ export function buildPaperclipTaskMarkdown(input: {
       "",
       "Follow-up directive:",
       "Apply the latest wake comment to the current task. Later direction replaces conflicting scope; preserve other requirements and approval gates. Clarification is not approval. Reuse completed work rather than repeating it.",
-      "",
-      "Latest wake comment:",
       ...(renderWakeCommentBodies
-        ? [fenceTaskText(effectiveWakeComments[0]!.body)]
+        ? ["", "Latest wake comment:", fenceTaskText(effectiveWakeComments[0]!.body)]
         : []),
     );
     appendWakeAttachments(effectiveWakeComments[0]!);
@@ -8840,14 +8838,15 @@ export function buildPaperclipTaskMarkdown(input: {
       "",
       "Follow-up directive:",
       "Apply the pending wake comments in order to the current task. Later direction replaces conflicting scope; preserve other requirements and approval gates. Clarification is not approval. Address every comment without repeating completed work.",
-      "",
-      "Pending wake comments (oldest to newest):",
+      ...(renderWakeCommentBodies
+        ? ["", "Pending wake comments (oldest to newest):"]
+        : []),
     );
     for (const [index, comment] of effectiveWakeComments.entries()) {
       lines.push(
-        "",
-        `Wake comment ${index + 1} (${quoteTaskScalar(comment.id)}):`,
-        ...(renderWakeCommentBodies ? [fenceTaskText(comment.body)] : []),
+        ...(renderWakeCommentBodies
+          ? ["", `Wake comment ${index + 1} (${quoteTaskScalar(comment.id)}):`, fenceTaskText(comment.body)]
+          : []),
       );
       appendWakeAttachments(comment);
     }
