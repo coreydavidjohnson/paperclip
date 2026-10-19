@@ -2528,15 +2528,30 @@ describe("agent issue mutation checkout ownership", () => {
 
     it.each(["run", "executionRun", "budget", "stage", "blocker", "approval", "pause", "pausedAgent"])("keeps the %s gate for an agent-owned hand-back", async gate => {
       seed({ status: "in_progress", ...(gate === "run" ? { checkoutRunId: "66666666-6666-4666-8666-666666666666" } : {}) });
-      if (gate === "executionRun") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", executionRunId: "66666666-6666-4666-8666-666666666666" }));
+      if (gate === "executionRun") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId, executionRunId: "66666666-6666-4666-8666-666666666666" }));
       if (gate === "budget") mockBudgetService.getInvocationBlock.mockResolvedValue({ scope: "agent", reason: "hard_limit_reached" });
-      if (gate === "stage") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", executionState: { status: "pending", currentStageId: recoveryActionId, currentStageIndex: 0, currentStageType: "review", currentParticipant: { type: "agent", agentId: peerAgentId }, returnAssignee: { type: "agent", agentId: ownerAgentId }, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } }));
+      if (gate === "stage") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId, executionState: { status: "pending", currentStageId: recoveryActionId, currentStageIndex: 0, currentStageType: "review", currentParticipant: { type: "agent", agentId: peerAgentId }, returnAssignee: { type: "agent", agentId: ownerAgentId }, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } }));
       if (gate === "blocker") mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
       if (gate === "approval") mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([{ status: "pending" }]);
       if (gate === "pause") mockIssueTreeControlService.getActivePauseHoldGate.mockResolvedValue({ holdId: "hold", mode: "pause" });
       if (gate === "pausedAgent") mockAgentService.getById.mockResolvedValue(makeAgent(ownerAgentId, { status: "paused" }));
       const res = await send(ownerActor());
       expect(res.status, JSON.stringify(res.body)).toBe(409);
+      const expectedCodes: Record<string, string> = {
+        run: "recovery_source_run_lock",
+        executionRun: "recovery_source_run_lock",
+        budget: "recovery_safe_hand_back_budget_blocked",
+        stage: "recovery_governed_stage_pending",
+        blocker: "disposition_recovery_retry_blocked",
+        approval: "recovery_governed_approval_pending",
+        pausedAgent: "disposition_recovery_owner_unavailable",
+      };
+      if (gate === "pause") {
+        expect(res.body.error).toContain("active subtree pause hold");
+        expect(res.body.details?.holdId).toBe("hold");
+      } else {
+        expect(res.body.details?.code, JSON.stringify(res.body)).toBe(expectedCodes[gate]);
+      }
       expect(mockIssueService.update).not.toHaveBeenCalled();
       expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
       expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();

@@ -2289,6 +2289,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "Owner work path restored." };
     const first = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect(first.body.issue).toMatchObject({ status: "todo", assigneeAgentId: coderId, activeRecoveryAction: null });
+    expect(first.body.issue).toMatchObject({ checkoutRunId: null, executionRunId: null });
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toMatchObject({ checkoutRunId: null, executionRunId: null });
     expect(first.body.recoveryAction).toMatchObject({ id: action.id, status: "resolved", outcome: "handed_back", fingerprint: action.fingerprint, evidence: action.evidence });
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect(wake).toHaveBeenCalledTimes(1);
