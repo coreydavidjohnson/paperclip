@@ -23,17 +23,18 @@ suite("Home Lab delegation real transaction fence", () => {
     await db.insert(issues).values({ id: parentId, companyId, title: "[test] caller-owned foreign root", assigneeAgentId: caller, createdByAgentId: target, status: "in_progress" });
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: caller, status: "running", contextSnapshot: { issueId: parentId }, responsibleUserId: "board-user" });
     const actor: Express.Request["actor"] = { type: "agent", source: "agent_key", agentId: caller, companyId, runId, onBehalfOfUserId: "board-user", keyScope: { kind: "standard" } };
-    const child = { title: "[test] native platform child", status: "todo", assigneeAgentId: target, blockParentUntilDone: true,
+    const child = { title: "[test] native platform child", status: "todo", assigneeAgentId: target, blockParentUntilDone: false,
       actorAgentId: caller, createdByAgentId: caller, actorRunId: runId, homeLabDelegationActor: actor };
     return { companyId, caller, target, parentId, runId, actor, child };
   }
-  it("commits the real child and native blocker together", async () => {
+  it("commits the real nonblocking child without a parent blocker", async () => {
     const f = await fixture();
     const result = await issueService(db).createChild(f.parentId, f.child);
     expect(result.issue.assigneeAgentId).toBe(f.target);
     expect(result.issue.createdByAgentId).toBe(f.caller);
     const blockers = await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, f.parentId));
-    expect(blockers.map(b => b.issueId)).toContain(result.issue.id);
+    expect(blockers).toHaveLength(0);
+    expect(result.issue.parentId).toBe(f.parentId);
   });
   it("rejects ownership changed after route admission, leaving no child", async () => {
     const f = await fixture();
@@ -49,17 +50,9 @@ suite("Home Lab delegation real transaction fence", () => {
     await expect(issueService(db).createChild(f.parentId, f.child)).rejects.toThrow();
     expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
   });
-  it("rolls back the child if its parent blocker cannot be inserted", async () => {
+  it("rejects blocking platform delegation without writing a child", async () => {
     const f = await fixture();
-    // A transaction-local trigger rejects only this test company's relation write.
-    await db.execute((await import("drizzle-orm")).sql.raw(`CREATE FUNCTION reject_test_relation_${f.companyId.replaceAll("-", "")}() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test blocker failure'; END $$`));
-    const fn = `reject_test_relation_${f.companyId.replaceAll("-", "")}`;
-    await db.execute((await import("drizzle-orm")).sql.raw(`CREATE TRIGGER ${fn} BEFORE INSERT ON issue_relations FOR EACH ROW WHEN (NEW.company_id = '${f.companyId}') EXECUTE FUNCTION ${fn}()`));
-    try {
-      await expect(issueService(db).createChild(f.parentId, f.child)).rejects.toThrow();
-      expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
-    } finally {
-      await db.execute((await import("drizzle-orm")).sql.raw(`DROP TRIGGER ${fn} ON issue_relations; DROP FUNCTION ${fn}()`));
-    }
+    await expect(issueService(db).createChild(f.parentId, { ...f.child, blockParentUntilDone: true })).rejects.toThrow();
+    expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
   });
 });
