@@ -3350,14 +3350,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   eq(issueComments.authorUserId, opts.requestedByActorId), isNull(issueComments.createdByRunId),
                   isNull(issueComments.deletedAt), gt(issueComments.createdAt, latest.finishedAt),
                 )) : [];
-            if ((latest?.status === "cancelled" && !newUserComment) ||
-                (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
-              return { kind: "deferred" as const };
-            }
+            // Saving a resolved decision does not authorize restarting stopped work.
             await tx.update(agentWakeupRequests).set({
               payload: { ...livenessReceipt.payload, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot },
               updatedAt: new Date(),
             }).where(eq(agentWakeupRequests.id, livenessReceipt.id));
+            if ((latest?.status === "cancelled" && !newUserComment) ||
+                (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
+              return { kind: "deferred" as const };
+            }
           }
           // Provider-stop evidence cannot answer a question or approve work.
           // Keep one durable receipt under the issue lock; normal stranded-wake
