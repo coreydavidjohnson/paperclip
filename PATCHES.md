@@ -764,3 +764,10 @@ into the current fork image or supplied by a fork migration.
 - New assigned tasks and previously unassigned projectless tasks use their agent project. Saving an unchanged assignee does not refill an explicitly cleared project.
 - Upstream master b448710986d0e79d73341c07470459fa11956965 inspected: no equivalent default. Retire when a released upstream equivalent supports the same contracts.
 - Regression: issue-agent-project.test.ts exercises root, cross-agent child, explicit choice, assignment, no configuration and cleared project behavior against disposable PostgreSQL.
+
+## Nonblocking Home Lab delegation alignment (PER-309)
+
+- Align the existing shared-assignee carry with explicit nonblocking children. No new target or board identity.
+- Unknown parent statuses fail closed; retain transaction locks and repeated caller/run/task checks.
+- Delegation unit/database tests retain changed-owner, cancellation, task-status and post-insert rollback checks. Native child-completion wake uses the parent relation independently of blocker links.
+- Tracked upstream/release inspected before change: no equivalent shared Home Lab capability. Retire when a released shared assignee has equivalent bounded delegation.

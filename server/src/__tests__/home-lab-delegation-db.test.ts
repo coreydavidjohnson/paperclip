@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRuns, issueRelations, issues } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase, getEmbeddedPostgresTestSupport } from "./helpers/embedded-postgres.js";
@@ -56,6 +56,18 @@ suite("Home Lab delegation real transaction fence", () => {
     await db.update(issues).set({ status }).where(eq(issues.id, f.parentId));
     await expect(issueService(db).createChild(f.parentId, f.child)).rejects.toThrow();
     expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
+  });
+  it("rolls back a child after an idempotency-write failure", async () => {
+    const f = await fixture();
+    await db.execute(sql.raw(`create function reject_test_idempotency() returns trigger language plpgsql as $fn$ begin raise exception $err$post-insert failure$err$; end $fn$`));
+    await db.execute(sql.raw(`create trigger reject_test_idempotency before insert on issue_create_idempotency_keys for each row execute function reject_test_idempotency()`));
+    try {
+      await expect(issueService(db).createChild(f.parentId, { ...f.child, idempotencyKey: randomUUID() })).rejects.toThrow("post-insert failure");
+      expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw(`drop trigger reject_test_idempotency on issue_create_idempotency_keys`));
+      await db.execute(sql.raw(`drop function reject_test_idempotency()`));
+    }
   });
   it("rejects blocking platform delegation without writing a child", async () => {
     const f = await fixture();
