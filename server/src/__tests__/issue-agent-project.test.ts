@@ -51,6 +51,16 @@ describeDb("agent project defaults", () => {
     expect(task.projectId).toBeNull();
     expect((await service.update(task.id, { assigneeAgentId: agentId }))?.projectId).toBe(projectId);
   });
+  it("preserves a cleared project when the same assignee is saved", async () => {
+    const service = issueService(db);
+    const task = await service.create(companyId, { title: "Clear project", assigneeAgentId: agentId });
+    await service.update(task.id, { projectId: null });
+    expect((await service.update(task.id, { assigneeAgentId: agentId }))?.projectId).toBeNull();
+  });
+  it("preserves an explicit no-project choice on create", async () => {
+    const task = await issueService(db).create(companyId, { title: "No project", projectId: null, assigneeAgentId: agentId });
+    expect(task.projectId).toBeNull();
+  });
   it("does not invent defaults for an unconfigured agent", async () => {
     const task = await issueService(db).create(companyId, { title: "No config", assigneeAgentId: plainAgent });
     expect(task.projectId).toBeNull();

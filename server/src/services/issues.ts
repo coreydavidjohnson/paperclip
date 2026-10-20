@@ -9994,7 +9994,7 @@ export function issueService(db: Db) {
             Record<string, unknown> | null | undefined) ?? null;
         // Explicit project/workspace choices win; otherwise use the assignee's default
         // before parent inheritance so cross-agent children get their own project.
-        if (issueData.projectId == null && !projectWorkspaceId && !executionWorkspaceId) {
+        if (issueData.projectId === undefined && !projectWorkspaceId && !executionWorkspaceId) {
           issueData.projectId = await agentDefaultIssueProject(tx as unknown as Db, companyId, issueData.assigneeAgentId);
         }
         const workspaceInheritanceIssueId = skipExecutionWorkspaceInheritance
@@ -10882,7 +10882,8 @@ export function issueService(db: Db) {
         );
       }
       if (issueData.projectId === undefined && !existing.projectId &&
-          issueData.assigneeAgentId && !existing.projectWorkspaceId && !existing.executionWorkspaceId &&
+          issueData.assigneeAgentId && issueData.assigneeAgentId !== existing.assigneeAgentId &&
+          !existing.projectWorkspaceId && !existing.executionWorkspaceId &&
           !issueData.projectWorkspaceId && !issueData.executionWorkspaceId) {
         const defaultProject = await agentDefaultIssueProject(dbOrTx as Db, existing.companyId, issueData.assigneeAgentId);
         if (defaultProject) {

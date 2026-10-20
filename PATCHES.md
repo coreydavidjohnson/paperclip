@@ -732,3 +732,10 @@ into the current fork image or supplied by a fork migration.
 - Native syncBlockedByIssueIds writes blocker issue_id -> dependent related_issue_id; query follows that direction.
 - RED: two high/critical next-free-slot regressions fail original source. GREEN: both pass with patch; expanded dependency suite 18/18 passes (priority, hidden, terminal, nonclient and malformed cycle cases) against disposable PostgreSQL. Held fixture adapter is not live provider evidence.
 - Retire when released upstream provides equivalent next-slot client-path dispatch and passes these contracts.
+
+## Per-agent task project defaults (PER-1106)
+
+- Requested own-fork feature: project defaults from agent runtimeConfig.defaultIssueProjectId, validated by company and non-archived project. Explicit project/workspace choices win; parent workspace inheritance already checks project identity. Chat creation returns before this path.
+- New assigned tasks and previously unassigned projectless tasks use their agent project. Saving an unchanged assignee does not refill an explicitly cleared project.
+- Upstream master b448710986d0e79d73341c07470459fa11956965 inspected: no equivalent default. Retire when a released upstream equivalent supports the same contracts.
+- Regression: issue-agent-project.test.ts exercises root, cross-agent child, explicit choice, assignment, no configuration and cleared project behavior against disposable PostgreSQL.
