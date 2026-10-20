@@ -3569,7 +3569,7 @@ const heartbeatRunIssueSummaryColumns = {
   lastOutputBytes: heartbeatRuns.lastOutputBytes,
   issueId: sql<
     string | null
-  >`${heartbeatRuns}.context_issue_id`.as("issueId"),
+  >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
 } as const;
 
 function appendExcerpt(prev: string, chunk: string) {

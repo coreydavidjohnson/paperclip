@@ -870,3 +870,7 @@ into the current fork image or supplied by a fork migration.
   no request aborts, no extra idle reads, and no queued refresh after disposal.
   Sustained six-minute traffic retains 37 issue and attention reads each
   including initial loads; detail and other-company reads remain 121 each.
+
+### PER-218 migration release correction
+
+The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
