@@ -732,3 +732,25 @@ into the current fork image or supplied by a fork migration.
 - Native syncBlockedByIssueIds writes blocker issue_id -> dependent related_issue_id; query follows that direction.
 - RED: two high/critical next-free-slot regressions fail original source. GREEN: both pass with patch; expanded dependency suite 18/18 passes (priority, hidden, terminal, nonclient and malformed cycle cases) against disposable PostgreSQL. Held fixture adapter is not live provider evidence.
 - Retire when released upstream provides equivalent next-slot client-path dispatch and passes these contracts.
+
+## Bounded exhausted-run suppression (PER-218)
+
+- Requested by Corey in df0fe808-0ca4-46ea-a836-0e457a49e609. Private fork only.
+- Replace Inbox's all-later-agent-history fetch with a same-company/agent
+  anti-lookup on each exhausted failed run. Preserve event deduplication,
+  strict JavaScript millisecond Date ordering, original raw candidate JSON
+  vs newer ->> text fallback semantics, and all feed fields/authorization.
+- Expand newer issue/task fallback into separate predicates so existing
+  company/context-issue and company/context-task indexes can serve it.
+  No migration, snapshot deletion, retention change or new index is required.
+- Read-only live diagnostic: unconstrained coalesce anti-lookup 13.56 s;
+  equivalent split predicate using existing indexes 251 ms on current data.
+  This is a query diagnostic, not a deployed or phone-speed claim.
+- Regression: attention-failure-history-db.test.ts, baseline-failing first
+  case, 12 fallback/type/isolation fixtures, duplicate events, timestamp ties
+  and a baseline-failing microsecond precision case. All three tests pass
+  against embedded PostgreSQL on the approved cluster builder.
+- Upstream released v2026.1012.0 retains the history scan. Drop this patch
+  when a released equivalent passes these regressions and live measurements.
+- Production gate: exact fork typecheck/image tests, homelab CI, isolated
+  staging, main and full Argo reconciliation, then comparable API/SQL windows.
