@@ -3516,13 +3516,17 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
 `.as("resultJson");
 
 const heartbeatRunSafeColumns = {
-  ...getTableColumns(heartbeatRuns),
+  ...Object.fromEntries(Object.entries(getTableColumns(heartbeatRuns)).filter(
+    ([key]) => key !== "contextIssueId" && key !== "contextTaskId",
+  )) as Omit<ReturnType<typeof getTableColumns<typeof heartbeatRuns>>, "contextIssueId" | "contextTaskId">,
   processGroupId: heartbeatRunProcessGroupIdColumn,
   resultJson: heartbeatRunSafeResultJsonColumn,
 } as const;
 
 const heartbeatRunSqlAsciiSafeColumns = {
-  ...getTableColumns(heartbeatRuns),
+  ...Object.fromEntries(Object.entries(getTableColumns(heartbeatRuns)).filter(
+    ([key]) => key !== "contextIssueId" && key !== "contextTaskId",
+  )) as Omit<ReturnType<typeof getTableColumns<typeof heartbeatRuns>>, "contextIssueId" | "contextTaskId">,
   processGroupId: heartbeatRunProcessGroupIdColumn,
   error: sql<string | null>`NULL`.as("error"),
   resultJson: sql<Record<string, unknown> | null>`NULL`.as("resultJson"),
