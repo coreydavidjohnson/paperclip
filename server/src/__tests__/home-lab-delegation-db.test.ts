@@ -50,6 +50,13 @@ suite("Home Lab delegation real transaction fence", () => {
     await expect(issueService(db).createChild(f.parentId, f.child)).rejects.toThrow();
     expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
   });
+  it.each(["done", "cancelled", "unknown"])("rejects parent status %s after route admission", async (status) => {
+    const f = await fixture();
+    expect(await authorizeHomeLabChild(db, f.parentId, f.actor, f.child)).toBe(true);
+    await db.update(issues).set({ status }).where(eq(issues.id, f.parentId));
+    await expect(issueService(db).createChild(f.parentId, f.child)).rejects.toThrow();
+    expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
+  });
   it("rejects blocking platform delegation without writing a child", async () => {
     const f = await fixture();
     await expect(issueService(db).createChild(f.parentId, { ...f.child, blockParentUntilDone: true })).rejects.toThrow();
