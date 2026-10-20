@@ -1372,13 +1372,13 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(order.slice(0, 3)).toEqual(boosted ? [activeId, candidateId, internalId] : [activeId, internalId, candidateId]);
   }, 60000);
   it.each([
-    ['high', 'Huron', 'blocked', false, false, true],
-    ['critical', 'Huron', 'blocked', false, false, true],
+    ['high', 'Huron', 'blocked', false, false, false],
+    ['critical', 'Huron', 'blocked', false, false, false],
     ['medium', 'Huron', 'blocked', false, false, false],
     ['high', 'Internal', 'blocked', false, false, false],
     ['high', 'Huron', 'done', false, false, false],
     ['high', 'Huron', 'blocked', true, false, false],
-    ['high', 'Huron', 'blocked', false, true, true],
+    ['high', 'Huron', 'blocked', false, true, false],
   ] as const)('orders %s dependency for %s %s (hidden=%s cycle=%s boost=%s) without preemption', async (priority, clientName, clientStatus, hidden, cycle, boosted) => {
     const companyId = randomUUID(), agentId = randomUUID(), clientId = randomUUID();
     const activeId = randomUUID(), internalId = randomUUID(), candidateId = randomUUID(), middleId = randomUUID(), clientIssueId = randomUUID();

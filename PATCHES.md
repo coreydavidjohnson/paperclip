@@ -764,3 +764,10 @@ into the current fork image or supplied by a fork migration.
 - New assigned tasks and previously unassigned projectless tasks use their agent project. Saving an unchanged assignee does not refill an explicitly cleared project.
 - Upstream master b448710986d0e79d73341c07470459fa11956965 inspected: no equivalent default. Retire when a released upstream equivalent supports the same contracts.
 - Regression: issue-agent-project.test.ts exercises root, cross-agent child, explicit choice, assignment, no configuration and cleared project behavior against disposable PostgreSQL.
+
+## Priority-first next-slot queue ordering (PER-1117)
+
+- Ready queued issue runs sort critical > high > medium > low, then creation time. In-progress status no longer outranks priority. Non-issue FIFO tier, dependency, approval, ownership and admission gates remain unchanged; no running preemption.
+- Supersedes PER-689 client-path preference: strict priority/FIFO applies to every agent, so high client blockers cannot jump critical internal tasks.
+- Upstream source retains status-before-priority ordering. Retire when a released equivalent passes the next-slot regression.
+- Regression: heartbeat-dependency-scheduling.test.ts holds a first run, queues older low in-progress work then critical todo work, and checks critical starts second.
