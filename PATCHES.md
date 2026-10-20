@@ -874,3 +874,25 @@ into the current fork image or supplied by a fork migration.
 ### PER-218 migration release correction
 
 The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
+
+
+## Split exhausted-run anti-probes (PER-218)
+
+- Authorized isolated repair on released fork `7d1f98205876cc46dfdec9798b42750dc05030a8`.
+- Replace the single newer-run `NOT EXISTS` containing three OR branches with
+  three conjunctive `NOT EXISTS` probes. Reuse the unchanged candidate issue-key
+  SQL expression; preserve raw JSON type/fallback behavior, blank/null handling,
+  company and agent scope, and the JavaScript-millisecond newer boundary.
+  Selection, ordering, retention and event deduplication are unchanged.
+- Upstream checked: fetched `upstream/master` at
+  `cb2d6e80d3f7ccb6cb6fb1ebbca528a608a9dd0e`; its service still has no newer-run
+  suppression anti-probe. Latest locally listed upstream release tag is
+  `v2026.1012.0`; no equivalent split repair found in service history.
+- TDD: added database-backed generated-SQL shape regression. Released source
+  fails with one probe instead of three (4 existing database tests pass);
+  repaired source passes all 5 tests using disposable embedded PostgreSQL.
+  Existing fallback/type/isolation, microsecond ties, duplicate-event and
+  seven-day-retention cases remain intact.
+- No migration, index, deployment, build, main-branch or production-data change.
+  This commit carries no endpoint latency/p95 claim. Retire when upstream
+  supplies equivalent bounded suppression and passes these contracts.
