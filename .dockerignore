@@ -73,3 +73,8 @@ packages/grok-acp/bin
 !packages/paperclip-runner/runner/crates/runner-core/tests
 packages/paperclip-runner/runner/crates/runner-core/tests/**
 !packages/paperclip-runner/runner/crates/runner-core/tests/stdio_mcp.rs
+
+# UI typecheck imports the canonical native-event boundary fixture.
+!packages/paperclip-runner/test-support
+packages/paperclip-runner/test-support/**
+!packages/paperclip-runner/test-support/local-integrity-boundary-golden.ts

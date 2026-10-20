@@ -32,7 +32,9 @@ RUN node packages/paperclip-runner/scripts/generate-acpx-profiles.mjs --check
 RUN test -f packages/paperclip-runner/generated/capability/semantic-tool-contracts.json \
  && test -f packages/paperclip-runner/generated/semantic-action-catalog.json \
  && test -f packages/paperclip-runner/spec/evals/stress-workflow-traceability.json \
- && test -d packages/paperclip-runner/protocol/fixtures/replay
+ && test -d packages/paperclip-runner/protocol/fixtures/replay \
+ && test -f packages/paperclip-runner/test-support/local-integrity-boundary-golden.ts \
+ && test -f packages/paperclip-runner/protocol/fixtures/provider-boundary/local-integrity.json
 # check:runner-workflow-traceability access()es every regression test its
 # spec names (it needs dist/ to RUN, so it cannot run here) — replicate
 # exactly its existence walk, driven by the spec itself so this never
