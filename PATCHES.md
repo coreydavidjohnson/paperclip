@@ -940,3 +940,5 @@ The startup generated-column migration timed out and rolled back on production. 
   indexed membership and passes these contracts/comparable measurements.
 - Packaging: compile/copy server/dist/services/issues.js with the existing
   run-history-query.js dependency; no build or deployment performed here.
+
+Native service coverage added during delivery: real schema/comments/log-store tests cover membership, tenant isolation, own-run bypass, pagination, stored attribution and redaction. Equal created_at values retain the existing unspecified SQL tie order and first-in-input marker winner; no deterministic tie-equivalence claim. No migration or snapshot rewrite.
