@@ -874,3 +874,10 @@ into the current fork image or supplied by a fork migration.
 ### PER-218 migration release correction
 
 The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
+
+## Nonblocking Home Lab delegation alignment (PER-309)
+
+- Align the existing shared-assignee carry with explicit nonblocking children. No new target or board identity.
+- Unknown parent statuses fail closed; retain transaction locks and repeated caller/run/task checks.
+- Delegation unit/database tests retain changed-owner, cancellation, task-status and post-insert rollback checks. Native child-completion wake uses the parent relation independently of blocker links.
+- Tracked upstream/release inspected before change: no equivalent shared Home Lab capability. Retire when a released shared assignee has equivalent bounded delegation.
