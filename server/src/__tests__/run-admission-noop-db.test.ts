@@ -1,0 +1,26 @@
+import { randomUUID } from "node:crypto";
+import { afterAll, beforeAll, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
+import { agents, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { suspendOmnigentAdmissions } from "../services/run-admission.js";
+let fixture: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>;
+beforeAll(async()=>{fixture=await startEmbeddedPostgresTestDatabase("admission-noop-");db=createDb(fixture.connectionString);},90000);
+afterAll(async()=>{await db?.$client.end({timeout:0});await fixture?.cleanup();});
+it("skips ineligible profile writes and saves eligible evidence once",async()=>{
+ const companyId=randomUUID(), agentId=randomUUID(), issueId=randomUUID(), id=randomUUID();
+ await db.insert(companies).values({id:companyId,name:"Admission",issuePrefix:"A"+companyId.slice(0,7)});
+ await db.insert(agents).values({id:agentId,companyId,name:"Worker",role:"engineer"});
+ await db.insert(issues).values({id:issueId,companyId,title:"Working",status:"in_progress",assigneeAgentId:agentId});
+ await db.insert(heartbeatRuns).values({id,companyId,agentId,status:"running",runtimeMode:"legacy",executionStage:"external_attached",startedAt:new Date(),contextSnapshot:{issueId},runnerProfileJson:{adapterDispatch:{adapterType:"omnigent"}},resultJson:{omnigentDispatchReceipt:{version:1,state:"accepted",runId:id,companyId,agentId,omnigentSessionId:"session"}}});
+ let updates=0;
+ const watched=new Proxy(db,{get(target,key){if(key==="update")return (...args: Parameters<typeof db.update>)=>{updates++;return target.update(...args);};return Reflect.get(target,key);}});
+ expect(await suspendOmnigentAdmissions(watched)).toEqual([]);
+ expect(updates).toBe(0);
+ await db.execute(sql`update issues set status='done', updated_at=clock_timestamp()-interval '1 minute' where id=${issueId}`);
+ await db.execute(sql`update heartbeat_runs set started_at=clock_timestamp()-interval '1 minute' where id=${id}`);
+ expect((await suspendOmnigentAdmissions(watched)).map(row=>row.id)).toEqual([id]);
+ expect(updates).toBe(1);
+ expect(await suspendOmnigentAdmissions(watched)).toEqual([]);
+ expect(updates).toBe(1);
+});
