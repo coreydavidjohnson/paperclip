@@ -102,24 +102,26 @@ export function dashboardService(db: Db) {
       // restart-killed run whose retry succeeded is pulled out of the headline
       // failed count. error_code is carried through so a failure spike can be
       // attributed to an error class (e.g. process_lost, provider_quota).
-      // Both recursive arms are bounded to the chart window: a retry is always
-      // created after the run it retries, so ancestors of an out-of-window
-      // child are themselves out of window and invisible to the membership
-      // test below. Unbounded, the seed walks every run the company ever had.
+      // Materialize only narrow chart-window rows once, not wide heartbeat
+      // tuples at each recursive step. UNION deduplicates IDs, so even cycles
+      // terminate within the finite company/window set without truncating
+      // legitimate long retry chains or following cross-company links.
       const runActivityRows = (await db.execute(sql`
-        WITH RECURSIVE recovered_runs(id) AS (
+        WITH RECURSIVE window_runs AS MATERIALIZED (
+          SELECT id, retry_of_run_id, created_at, status, error_code
+          FROM ${heartbeatRuns}
+          WHERE company_id = ${companyId}
+            AND created_at >= ${runActivityStart.toISOString()}::timestamptz
+        ), recovered_runs(id) AS (
           SELECT parent.id
-          FROM ${heartbeatRuns} AS child
-          JOIN ${heartbeatRuns} AS parent ON parent.id = child.retry_of_run_id
-          WHERE child.company_id = ${companyId}
-            AND child.status = 'succeeded'
-            AND child.created_at >= ${runActivityStart.toISOString()}::timestamptz
+          FROM window_runs child
+          JOIN window_runs parent ON parent.id = child.retry_of_run_id
+          WHERE child.status = 'succeeded'
           UNION
           SELECT parent.id
           FROM recovered_runs rr
-          JOIN ${heartbeatRuns} AS child ON child.id = rr.id
-          JOIN ${heartbeatRuns} AS parent ON parent.id = child.retry_of_run_id
-          WHERE child.created_at >= ${runActivityStart.toISOString()}::timestamptz
+          JOIN window_runs child ON child.id = rr.id
+          JOIN window_runs parent ON parent.id = child.retry_of_run_id
         )
         SELECT
           to_char(run.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS date,
@@ -127,9 +129,7 @@ export function dashboardService(db: Db) {
           run.error_code AS error_code,
           (run.id IN (SELECT id FROM recovered_runs)) AS recovered,
           count(*)::double precision AS count
-        FROM ${heartbeatRuns} AS run
-        WHERE run.company_id = ${companyId}
-          AND run.created_at >= ${runActivityStart.toISOString()}::timestamptz
+        FROM window_runs AS run
         GROUP BY date, run.status, run.error_code, recovered
       `)) as unknown as Iterable<{
         date: string;

@@ -237,4 +237,37 @@ describeEmbeddedPostgres("dashboard service", () => {
     // process_lost kills that recovered must not leak into the failed breakdown.
     expect(bucket?.failedByErrorCode.process_lost).toBeUndefined();
   });
+  it("recovers long chains, branches and cycles without truncation", async () => {
+    const companyId = randomUUID(), agentId = randomUUID();
+    await db.insert(companies).values({id:companyId,name:companyId,issuePrefix:companyId.slice(0,8),requireBoardApprovalForNewAgents:false});
+    await db.insert(agents).values({id:agentId,companyId,name:agentId,role:"engineer",status:"idle",adapterType:"codex_local",adapterConfig:{},runtimeConfig:{},permissions:{}});
+    const createdAt = utcDay(-1);
+    const ids = Array.from({length:130}, () => randomUUID());
+    for (let n=0; n<ids.length; n++) {
+      await db.insert(heartbeatRuns).values({id:ids[n],companyId,agentId,status:"failed",retryOfRunId:n ? ids[n-1] : null,createdAt});
+    }
+    await db.insert(heartbeatRuns).values([{companyId,agentId,status:"succeeded",retryOfRunId:ids[129],createdAt},{companyId,agentId,status:"succeeded",retryOfRunId:ids[64],createdAt}]);
+    const cycle = [randomUUID(),randomUUID(),randomUUID()];
+    await db.insert(heartbeatRuns).values(cycle.map(id=>({id,companyId,agentId,status:"failed",createdAt})));
+    const {eq} = await import("drizzle-orm");
+    for (let n=0; n<cycle.length; n++) await db.update(heartbeatRuns).set({retryOfRunId:cycle[(n+1)%cycle.length]}).where(eq(heartbeatRuns.id,cycle[n]));
+    await db.insert(heartbeatRuns).values({companyId,agentId,status:"succeeded",retryOfRunId:cycle[0],createdAt});
+    const summary = await dashboardService(db).summary(companyId);
+    expect(summary.runActivity.find(b => b.date === utcDateKey(createdAt))).toMatchObject({succeeded:3,failed:0,recovered:133,total:136});
+  });
+
+  it("does not follow recovery links through another company", async () => {
+    const companyId = randomUUID(), otherCompanyId = randomUUID();
+    const agentId = randomUUID(), otherAgentId = randomUUID();
+    await db.insert(companies).values([companyId, otherCompanyId].map(id => ({id, name: id, issuePrefix: id.slice(0,8), requireBoardApprovalForNewAgents:false})));
+    await db.insert(agents).values([{id:agentId,companyId},{id:otherAgentId,companyId:otherCompanyId}].map(row => ({...row,name:row.id,role:"engineer",status:"idle",adapterType:"codex_local",adapterConfig:{},runtimeConfig:{},permissions:{}})));
+    const original = randomUUID(), bridge = randomUUID(), success = randomUUID();
+    const createdAt = utcDay(-1);
+    await db.insert(heartbeatRuns).values({id:original,companyId,agentId,status:"failed",errorCode:"process_lost",createdAt});
+    await db.insert(heartbeatRuns).values({id:bridge,companyId:otherCompanyId,agentId:otherAgentId,status:"failed",retryOfRunId:original,createdAt});
+    await db.insert(heartbeatRuns).values({id:success,companyId,agentId,status:"succeeded",retryOfRunId:bridge,createdAt});
+    const summary = await dashboardService(db).summary(companyId);
+    expect(summary.runActivity.find(b => b.date === utcDateKey(createdAt))).toMatchObject({succeeded:1,failed:1,recovered:0,total:2});
+  });
+
 });

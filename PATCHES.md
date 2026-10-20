@@ -823,3 +823,10 @@ into the current fork image or supplied by a fork migration.
 - New assigned tasks and previously unassigned projectless tasks use their agent project. Saving an unchanged assignee does not refill an explicitly cleared project.
 - Upstream master b448710986d0e79d73341c07470459fa11956965 inspected: no equivalent default. Retire when a released upstream equivalent supports the same contracts.
 - Regression: issue-agent-project.test.ts exercises root, cross-agent child, explicit choice, assignment, no configuration and cleared project behavior against disposable PostgreSQL.
+
+## Bounded recovered-run chart traversal (PER-218)
+
+- Corey requested repair of recovered_runs in 8cc00e8e. Materialize the narrow company/chart-window run projection once, then traverse only that finite set with UNION deduplication. No arbitrary depth cap or persisted recovery backfill.
+- Preserves long retry chains, branching, cyclic-link termination, dates/status/error-code totals and all response fields. Cross-company malformed retry links cannot confer recovery.
+- Regression first failed cross-company isolation; all five dashboard tests then pass, including a 130-link chain and cycle. Live repeatable-read comparison returned 197 identical buckets; diagnostic old/new execution 1290/142 ms, not a release effect.
+- Checked upstream master dashboard source on 2026-10-20; it retains the recursive wide-table joins. Retire when a released equivalent passes the same contracts.
