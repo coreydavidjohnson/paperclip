@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { agents, companies, createDb, heartbeatRunEvents, heartbeatRuns } from "@paperclipai/db";
@@ -42,6 +43,17 @@ describe("bounded failure history", () => {
   expect(rows.map(r=>r.id).sort()).toEqual(expected.sort());
   expect(rows.every(r=>r.companyId===companyId)).toBe(true);
   expect(new Set(rows.map(r=>r.id)).size).toBe(rows.length);
+ });
+
+ it("preserves millisecond Date ties for microsecond-newer rows",async()=>{
+  const companyId=randomUUID(),agentId=randomUUID(),id=randomUUID(),newer=randomUUID();
+  await db.insert(companies).values({id:companyId,name:"Precision",issuePrefix:"P"+companyId.slice(0,7)});
+  await db.insert(agents).values({id:agentId,companyId,name:"Worker",role:"engineer"});
+  await db.insert(heartbeatRuns).values([{id,companyId,agentId,status:"failed",contextSnapshot:{issueId:"precision"}},{id:newer,companyId,agentId,status:"succeeded",contextSnapshot:{issueId:"precision"}}]);
+  await db.execute(sql`update heartbeat_runs set created_at='2026-10-20 00:00:00.000100+00' where id=${id}`);
+  await db.execute(sql`update heartbeat_runs set created_at='2026-10-20 00:00:00.000900+00' where id=${newer}`);
+  await db.insert(heartbeatRunEvents).values({companyId,agentId,runId:id,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted precision"});
+  expect((await listAttentionExhaustedRuns(db,companyId)).map(r=>r.id)).toEqual([id]);
  });
 
 });
