@@ -810,3 +810,10 @@ into the current fork image or supplied by a fork migration.
   before testing a partial-uppercase variant. All-digit random first segments
   made that variant identical to the valid canonical ID and caused false red.
   No production identity logic or acceptance assertion was weakened.
+
+- Authenticated parent request d28ab627/09:27 follow-up: integrate PER-628
+  fork 278f9c9 before shipment; do not touch production manifests until that
+  release is live. Exhausted failures older than seven days are omitted from
+  Attention only. Historical rows/events and recovery semantics are retained.
+  Regression first fails without the cutoff (two results instead of one), then
+  checks a recent result and continued existence of the old run.

@@ -12,7 +12,7 @@ describe("bounded failure history", () => {
   const companyId=randomUUID(),agentId=randomUUID(),id=randomUUID(),issueId=randomUUID();
   await db.insert(companies).values({id:companyId,name:"A",issuePrefix:"A"+companyId.slice(0,7)});
   await db.insert(agents).values({id:agentId,companyId,name:"Worker",role:"engineer"});
-  await db.insert(heartbeatRuns).values([{id,companyId,agentId,status:"failed",contextSnapshot:{issueId},createdAt:new Date(1700000000000)},{companyId,agentId,status:"succeeded",contextSnapshot:{issueId},createdAt:new Date(1700000001000)}]);
+  await db.insert(heartbeatRuns).values([{id,companyId,agentId,status:"failed",contextSnapshot:{issueId},createdAt:new Date(Date.now()-86400000)},{companyId,agentId,status:"succeeded",contextSnapshot:{issueId},createdAt:new Date(Date.now()-86400000+1000)}]);
   await db.insert(heartbeatRunEvents).values({companyId,agentId,runId:id,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted test"});
   expect((await listAttentionExhaustedRuns(db,companyId)).some(row=>row.id===id)).toBe(false);
  });
@@ -32,7 +32,7 @@ describe("bounded failure history", () => {
   for (let n=0;n<pairs.length;n++) {
    const [oldContext,newContext,delta,suppressed]=pairs[n],id=randomUUID(),worker=randomUUID();
    await db.insert(agents).values({id:worker,companyId,name:"Case"+n,role:"engineer"});
-   const at=1700100000000+n*10000;
+   const at=Date.now()-86400000+n*10000;
    await db.insert(heartbeatRuns).values([{id,companyId,agentId:worker,status:"failed",contextSnapshot:oldContext,createdAt:new Date(at)},
     {companyId:n===11?otherCompany:companyId,agentId:n===11?otherAgent:worker,status:"succeeded",contextSnapshot:newContext,createdAt:new Date(at+delta*1000)}]);
    await db.insert(heartbeatRunEvents).values([{companyId,agentId:worker,runId:id,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted fixture"},
@@ -50,10 +50,19 @@ describe("bounded failure history", () => {
   await db.insert(companies).values({id:companyId,name:"Precision",issuePrefix:"P"+companyId.slice(0,7)});
   await db.insert(agents).values({id:agentId,companyId,name:"Worker",role:"engineer"});
   await db.insert(heartbeatRuns).values([{id,companyId,agentId,status:"failed",contextSnapshot:{issueId:"precision"}},{id:newer,companyId,agentId,status:"succeeded",contextSnapshot:{issueId:"precision"}}]);
-  await db.execute(sql`update heartbeat_runs set created_at='2026-10-20 00:00:00.000100+00' where id=${id}`);
-  await db.execute(sql`update heartbeat_runs set created_at='2026-10-20 00:00:00.000900+00' where id=${newer}`);
+  await db.execute(sql`update heartbeat_runs set created_at=date_trunc('day',now())+interval '0.0001 seconds' where id=${id}`);
+  await db.execute(sql`update heartbeat_runs set created_at=date_trunc('day',now())+interval '0.0009 seconds' where id=${newer}`);
   await db.insert(heartbeatRunEvents).values({companyId,agentId,runId:id,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted precision"});
   expect((await listAttentionExhaustedRuns(db,companyId)).map(r=>r.id)).toEqual([id]);
  });
 
+ it("omits exhausted failures older than seven days without deleting history",async()=>{
+  const companyId=randomUUID(),agentId=randomUUID(),old=randomUUID(),recent=randomUUID();
+  await db.insert(companies).values({id:companyId,name:"Age limit",issuePrefix:"D"+companyId.slice(0,7)});
+  await db.insert(agents).values({id:agentId,companyId,name:"Worker",role:"engineer"});
+  await db.insert(heartbeatRuns).values([{id:old,companyId,agentId,status:"failed",contextSnapshot:{issueId:"old"},createdAt:new Date(Date.now()-8*86400000)},{id:recent,companyId,agentId,status:"failed",contextSnapshot:{issueId:"recent"},createdAt:new Date(Date.now()-6*86400000)}]);
+  await db.insert(heartbeatRunEvents).values([{companyId,agentId,runId:old,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted old"},{companyId,agentId,runId:recent,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted recent"}]);
+  expect((await listAttentionExhaustedRuns(db,companyId)).map(r=>r.id)).toEqual([recent]);
+  const preserved=await db.execute(sql`select id from heartbeat_runs where id=${old}`);expect(preserved.length).toBe(1);
+ });
 });

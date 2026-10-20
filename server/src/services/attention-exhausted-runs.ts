@@ -44,6 +44,8 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
     .innerJoin(latestExhaustion, eq(latestExhaustion.runId, heartbeatRuns.id))
     .where(and(
       eq(heartbeatRuns.companyId, companyId),
+      // Feed retention only: keep historical runs and recovery evidence intact.
+      sql`${heartbeatRuns.createdAt} >= now() - interval '7 days'`,
       eq(agents.companyId, companyId),
       // Probe newer runs for this issue/agent, not every historical snapshot.
       sql`not exists (select 1 from heartbeat_runs newer
