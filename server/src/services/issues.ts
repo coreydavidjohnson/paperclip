@@ -1,3 +1,4 @@
+import { issueRunIdsCondition } from "./run-history-query.js";
 import { authorizeHomeLabChild } from "./home-lab-delegation.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
@@ -7023,17 +7024,7 @@ export function issueService(db: Db) {
           eq(heartbeatRuns.companyId, companyId),
           or(
             and(
-              or(
-                sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
-                sql`exists (
-                  select 1
-                  from ${activityLog}
-                  where ${activityLog.companyId} = ${companyId}
-                    and ${activityLog.entityType} = 'issue'
-                    and ${activityLog.entityId} = ${issueId}
-                    and ${activityLog.runId} = ${heartbeatRuns.id}
-                )`,
-              ),
+              issueRunIdsCondition(companyId, issueId),
               sql`coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt}) >= ${minCommentCreatedAt}::timestamptz`,
               sql`coalesce(${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= ${maxCommentCreatedAt}::timestamptz`,
             ),

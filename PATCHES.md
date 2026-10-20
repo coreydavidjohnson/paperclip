@@ -911,3 +911,32 @@ The startup generated-column migration timed out and rolled back on production. 
 - No migration, index, deployment, build, main-branch or production-data change.
   This commit carries no endpoint latency/p95 claim. Retire when upstream
   supplies equivalent bounded suppression and passes these contracts.
+
+## Comment attribution run lookup (PER-218)
+
+- Why: seven app-local comment GETs still took 3038–3246 ms for 25 rows.
+  In that comments-only pg_stat_statements window, the attribution run lookup
+  executed seven times for 20940.586 ms total database execution. Ambient
+  traffic remains possible; this is not a browser or phone measurement.
+- Minimal repair: reuse existing issueRunIdsCondition in issues.ts instead
+  of context OR correlated activity EXISTS. The union retains context-only,
+  activity-only and duplicate membership. Outer company, timestamp bounds,
+  own-createdByRunId bypass, complete run projection/order, log evidence,
+  persisted attribution, comment fields, pagination, authorization and secret
+  redaction are unchanged. Applies to listComments and getComment.
+- Upstream: fetched master cb2d6e80d and inspected released v2026.1012.0;
+  attribution still uses OR/EXISTS. This reuses our existing approved
+  run-history helper, not unrelated new upstream body/auth policy changes.
+- Read-only production comparison: full eight-column projection returned 13
+  rows on both sides with zero EXCEPT ALL differences. Initial EXPLAIN ANALYZE
+  was 3582.486 ms old / 36.344 ms new. This establishes query improvement,
+  not a deployed API latency claim. No index or migration required.
+- Regression: issue-comment-attribution-query.test.ts failed on baseline for
+  the missing helper call, then passed. Extended run-history-query-db.test.ts
+  covers window boundaries/null fallback, activity duplicates, own-run outside
+  window and cross-company exclusions. Offline PostgreSQL fixture and helper
+  shape checks pass; parent owns full pinned-dependency CI and API verification.
+- Retirement: remove when a released upstream lookup provides equivalent
+  indexed membership and passes these contracts/comparable measurements.
+- Packaging: compile/copy server/dist/services/issues.js with the existing
+  run-history-query.js dependency; no build or deployment performed here.
