@@ -40,7 +40,7 @@ describe("native comment attribution service", () => {
     const ids = Array.from({ length: 9 }, () => randomUUID());
     const comments = Array.from({ length: 13 }, () => randomUUID()).sort();
     const human = randomUUID();
-    await db.insert(authUsers).values({ id: human, name: "Human", email: `${human}@example.test`, emailVerified: true });
+    await db.insert(authUsers).values({ id: human, name: "Human", email: `${human}@example.test`, emailVerified: true, createdAt: at, updatedAt: at });
     await db.insert(instanceSettings).values({ singletonKey: "default", general: { censorUsernameInLogs: false } }).onConflictDoNothing();
     const store = getRunLogStore();
     for (let i = 0; i < ids.length; i++) {
