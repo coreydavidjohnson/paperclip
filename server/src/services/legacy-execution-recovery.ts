@@ -33,6 +33,20 @@ export function isRetiredOmnigentObserver(run: Pick<Run, "runtimeMode" | "status
 }
 
 /** Error families describe availability, not whether earlier actions happened. */
+/**
+ * PER-847: Paperclip cancels a suppressed disposition repair before the adapter
+ * is entered, so no provider work started. Record that as bootstrap evidence;
+ * without it the generic cancelled-run rule places a reconciliation hold.
+ */
+export function suppressedLegacyRepairPatch(block: string) {
+  return {
+    finishedAt: new Date(),
+    errorCode: "legacy_disposition_repair_suppressed",
+    error: `Disposition repair suppressed: ${block}`,
+    resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+  };
+}
+
 export function legacyExecutionNeedsReconciliation(
   run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson"> & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot" | "id" | "companyId" | "agentId">>,
 ): boolean {
