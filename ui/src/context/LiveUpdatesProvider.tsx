@@ -17,6 +17,7 @@ import {
 import {
   createCoalescingQueryClient,
   createInvalidationBatcher,
+  reconcileActiveQueries,
 } from "../lib/query-invalidation-batcher";
 import {
   patchRunStatusInList,
@@ -1936,7 +1937,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     if (wasHidden.current) {
       wasHidden.current = false;
       // Reconcile events missed while hidden, including completed runs/issues.
-      void queryClient.invalidateQueries({ type: "active" }, { cancelRefetch: false });
+      reconcileActiveQueries(queryClient, invalidationBatcher, liveCompanyId);
     }
 
     let closed = false;
@@ -1963,7 +1964,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
       if (closed || pollTimer !== null) return;
       // Visible queries still need fresh state when realtime is unavailable.
       pollTimer = window.setInterval(() => {
-        void queryClient.invalidateQueries({ type: "active" }, { cancelRefetch: false });
+        reconcileActiveQueries(queryClient, invalidationBatcher, liveCompanyId);
       }, DISCONNECTED_POLL_INTERVAL_MS);
     };
 
@@ -2004,7 +2005,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
         }
         // The initial page queries can finish before the first subscription,
         // too. Reconcile that gap as well as reconnects: events are not replayed.
-        void queryClient.invalidateQueries({ type: "active" }, { cancelRefetch: false });
+        reconcileActiveQueries(queryClient, invalidationBatcher, liveCompanyId);
         reconnectAttempt = 0;
       };
 

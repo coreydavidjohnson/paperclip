@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { QueryClient } from "@tanstack/react-query";
+import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import * as invalidation from "./query-invalidation-batcher";
 import {
   createCoalescingQueryClient,
   createInvalidationBatcher,
@@ -185,5 +186,68 @@ describe("prefix filter safety", () => {
     await batcher.flush();
     expect(client.invalidateQueries).toHaveBeenCalledTimes(2);
     batcher.dispose();
+  });
+});
+
+
+describe("PER-827 recovery request budget", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+  it("shares 36 list request slots across six minutes of activity and reconnects", async () => {
+    expect(invalidation).toHaveProperty("reconcileActiveQueries", expect.any(Function));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity, staleTime: Infinity } } });
+    const reads = { issues: 0, attention: 0, detail: 0, otherCompany: 0 };
+    const keys = { issues: ["issues", "company-1"], attention: ["attention", "company-1"], detail: ["issues", "detail", "issue-1"], otherCompany: ["issues", "company-2"] };
+    const subscriptions = Object.entries(keys).map(([name, queryKey]) => {
+      const observer = new QueryObserver(client, { queryKey, queryFn: async () => ++reads[name as keyof typeof reads] });
+      return observer.subscribe(() => {});
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const batcher = createInvalidationBatcher(client, undefined, "company-1");
+    try {
+      for (let second = 0; second < 360; second++) {
+        void batcher.schedule({ queryKey: keys.issues });
+        void batcher.schedule({ queryKey: [...keys.issues, "mine"] });
+        void batcher.schedule({ queryKey: keys.attention });
+        if (second % 3 === 0) invalidation.reconcileActiveQueries(client, batcher, "company-1");
+        await vi.advanceTimersByTimeAsync(1000);
+      }
+      console.info(JSON.stringify({ sixMinuteRequestsIncludingInitial: reads }));
+      expect(reads).toEqual({ issues: 37, attention: 37, detail: 121, otherCompany: 121 });
+      // Inactive matching projections still become stale without a request.
+      client.setQueryData(["issues", "company-1", "inactive"], []);
+      invalidation.reconcileActiveQueries(client, batcher, "company-1");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(client.getQueryState(["issues", "company-1", "inactive"])?.isInvalidated).toBe(true);
+    } finally {
+      batcher.dispose();
+      subscriptions.forEach(unsubscribe => unsubscribe());
+      client.clear();
+    }
+  });
+
+  it.each(["issues", "attention"])("does not cancel a slow %s request at the next batch window", async (projection) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity, staleTime: Infinity } } });
+    const queryKey = [projection, "company-1"];
+    client.setQueryData(queryKey, "cached");
+    const aborted = vi.fn();
+    const read = vi.fn(({ signal }: { signal: AbortSignal }) => {
+      signal.addEventListener("abort", aborted);
+      return new Promise<string>(resolve => setTimeout(() => resolve("fresh"), 25_000));
+    });
+    const observer = new QueryObserver(client, { queryKey, queryFn: read });
+    const unsubscribe = observer.subscribe(() => {});
+    const batcher = createInvalidationBatcher(client, undefined, "company-1");
+    try {
+      void batcher.schedule({ queryKey });
+      await vi.advanceTimersByTimeAsync(10_000);
+      void batcher.schedule({ queryKey });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(aborted).not.toHaveBeenCalled();
+      expect(read).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(client.getQueryData(queryKey)).toBe("fresh");
+    } finally { batcher.dispose(); unsubscribe(); client.clear(); }
   });
 });

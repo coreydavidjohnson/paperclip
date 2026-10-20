@@ -830,3 +830,34 @@ into the current fork image or supplied by a fork migration.
 - Preserves long retry chains, branching, cyclic-link termination, dates/status/error-code totals and all response fields. Cross-company malformed retry links cannot confer recovery.
 - Regression first failed cross-company isolation; all five dashboard tests then pass, including a 130-link chain and cycle. Live repeatable-read comparison returned 197 identical buckets; diagnostic old/new execution 1290/142 ms, not a release effect.
 - Checked upstream master dashboard source on 2026-10-20; it retains the recursive wide-table joins. Retire when a released equivalent passes the same contracts.
+
+### PER-218 / PER-827 reconciliation repair
+
+- Base: deployed fork `23a6cd6ab06160615911c554b6eae245f836383b`.
+  Rechecked upstream master `813e808af` on 2026-10-20: its batcher still
+  lacks company-list isolation. Prior fork merge
+  `71fa92ccbb6a88d93d9da0d4f25c72e5d171b77d` is not an ancestor of this
+  base. Source comparison found the 15-second issue/browser polling,
+  ten-second issue/attention batching and filter-safe prefix merging already
+  present; preserve them rather than reimplementing.
+- Restore only the two client protections present in that prior merge:
+  route first-open/reconnect, visibility restore and disconnected fallback
+  reconciliation through the shared company-list budget; keep in-flight
+  issue/attention reads instead of aborting and restarting them each window.
+  Other active queries still reconcile immediately. Inactive matching lists
+  are marked stale. Direct user mutations remain outside the live batcher.
+- Targeted TDD: existing 14 tests passed; new regressions failed for the
+  missing recovery helper/provider wiring and aborted slow request before
+  source restoration. A real QueryClient/QueryObserver six-minute simulation
+  counts 37 issue and 37 attention reads including the initial fetch, versus
+  157 each with broad invalidation restored; detail/other-company reads stay
+  121 in both. Slow issue and attention reads finish without cancellation.
+  The count is an offline regression budget, not observed Safari traffic.
+- Verification: focused Vitest batcher and issue-refresh suites, standalone
+  batcher/page-visibility TypeScript check, token gates and diff whitespace.
+  No API, auth, response, ETag, redaction, infrastructure or dependency
+  changes. Build/deploy and full integration/browser checks are intentionally
+  delegated to the parent release gate; historical build failure is not
+  claimed resolved. Retire with an equivalent released upstream implementation
+  passing these same request-count and in-flight-read regressions.
+
