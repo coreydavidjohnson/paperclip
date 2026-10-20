@@ -1334,6 +1334,43 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     });
   });
 
+  it.each([['critical', 'Internal', 'blocked', false, false, true]] as const)('starts later %s before older low in-progress work when a slot frees (%s %s %s %s %s)', async (priority, clientName, clientStatus, hidden, cycle, boosted) => {
+    const companyId = randomUUID(), agentId = randomUUID(), clientId = randomUUID();
+    const activeId = randomUUID(), internalId = randomUUID(), candidateId = randomUUID(), middleId = randomUUID(), clientIssueId = randomUUID();
+    await db.insert(companies).values({id: companyId, name: 'Client queue', issuePrefix: `C${companyId.slice(0, 6)}`, defaultResponsibleUserId: 'responsible-user'});
+    await db.insert(agents).values([
+      {id: agentId, companyId, name: 'Home Lab', role: 'engineer', status: 'active', adapterType: 'codex_local', runtimeConfig: {heartbeat: {wakeOnDemand: true, maxConcurrentRuns: 1}}},
+      {id: clientId, companyId, name: clientName, role: 'general', status: 'active'},
+    ]);
+    await db.insert(issues).values([
+      {id: activeId, companyId, title: 'Already working', status: 'todo', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
+      {id: internalId, companyId, title: 'Older low internal', status: 'in_progress', priority: 'low', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
+      {id: candidateId, companyId, title: 'Ready client blocker', status: 'todo', priority, assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
+      {id: middleId, companyId, title: 'Intermediate blocker', status: 'blocked', assigneeAgentId: agentId},
+      {id: clientIssueId, companyId, title: 'Client deliverable', status: clientStatus, hiddenAt: hidden ? new Date() : null, assigneeAgentId: clientId},
+    ]);
+    await db.insert(issueRelations).values([
+      {companyId, issueId: candidateId, relatedIssueId: middleId, type: 'blocks'},
+      {companyId, issueId: middleId, relatedIssueId: clientIssueId, type: 'blocks'},
+    ]);
+    if (cycle) await db.insert(issueRelations).values({companyId, issueId: clientIssueId, relatedIssueId: middleId, type: 'blocks'});
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const order: string[] = [];
+    const result = {exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: 'queue regression', provider: 'test', model: 'test'};
+    mockAdapterExecute.mockImplementation(async (context: any) => { order.push(context.context.issueId); if (order.length === 1) await gate; await db.update(issues).set({status: 'done'}).where(eq(issues.id, context.context.issueId)); return result; });
+    const wake = (issueId: string) => heartbeat.wakeup(agentId, {source: 'assignment', triggerDetail: 'system', reason: 'issue_assigned', payload: {issueId}, contextSnapshot: {issueId}});
+    try {
+      await wake(activeId);
+      expect(await waitForCondition(async () => order.length === 1, 10000)).toBe(true);
+      await wake(internalId);
+      await wake(candidateId);
+      expect(order).toEqual([activeId]);
+    } finally { finish(); }
+    expect(await waitForCondition(async () => order.length === 3, 15000)).toBe(true);
+    await heartbeat.drainActiveRunExecutions();
+    expect(order.slice(0, 3)).toEqual(boosted ? [activeId, candidateId, internalId] : [activeId, internalId, candidateId]);
+  }, 60000);
   it.each([
     ['high', 'Huron', 'blocked', false, false, true],
     ['critical', 'Huron', 'blocked', false, false, true],
