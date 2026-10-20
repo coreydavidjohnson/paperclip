@@ -50,7 +50,7 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
         where newer.company_id = ${heartbeatRuns.companyId}
           and newer.agent_id = ${heartbeatRuns.agentId}
           and newer.created_at >= date_trunc('milliseconds', ${heartbeatRuns.createdAt}) + interval '1 millisecond'
-          and (newer.context_snapshot ->> 'issueId' = (case when jsonb_typeof(case
+          and (newer.context_issue_id = (case when jsonb_typeof(case
               when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
                 or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
               then ${heartbeatRuns.contextSnapshot} -> 'taskId'
@@ -58,7 +58,7 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
               then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
                             ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
               else '' end)
-            or (newer.context_snapshot ->> 'issueId' is null and newer.context_snapshot ->> 'taskId' = (case when jsonb_typeof(case
+            or (newer.context_issue_id is null and newer.context_task_id = (case when jsonb_typeof(case
               when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
                 or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
               then ${heartbeatRuns.contextSnapshot} -> 'taskId'
@@ -66,7 +66,7 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
               then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
                             ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
               else '' end))
-            or (newer.context_snapshot ->> 'issueId' is null and newer.context_snapshot ->> 'taskId' is null and (case when jsonb_typeof(case
+            or (newer.context_issue_id is null and newer.context_task_id is null and (case when jsonb_typeof(case
               when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
                 or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
               then ${heartbeatRuns.contextSnapshot} -> 'taskId'

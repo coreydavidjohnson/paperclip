@@ -3568,7 +3568,7 @@ const heartbeatRunIssueSummaryColumns = {
   lastOutputBytes: heartbeatRuns.lastOutputBytes,
   issueId: sql<
     string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
+  >`${heartbeatRuns.contextIssueId}`.as("issueId"),
 } as const;
 
 function appendExcerpt(prev: string, chunk: string) {
@@ -13429,8 +13429,8 @@ export function heartbeatService(
                   ...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
                 ]),
                 sql`(
-                ${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}
-                or ${heartbeatRuns.contextSnapshot} ->> 'taskId' = ${issue.id}
+                ${heartbeatRuns.contextIssueId} = ${issue.id}
+                or ${heartbeatRuns.contextTaskId} = ${issue.id}
               )`,
                 sql`${heartbeatRuns.id} <> ${run.id}`,
               ),
@@ -15622,8 +15622,8 @@ export function heartbeatService(
                   ...MAX_TURN_CONTINUATION_LIVE_RUN_STATUSES,
                 ]),
                 issueId
-                  ? sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`
-                  : sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' is null`,
+                  ? sql`${heartbeatRuns.contextIssueId} = ${issueId}`
+                  : sql`${heartbeatRuns.contextIssueId} is null`,
               ),
             )
             .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id))
@@ -15689,8 +15689,8 @@ export function heartbeatService(
                   ...MAX_TURN_CONTINUATION_LIVE_RUN_STATUSES,
                 ]),
                 issueId
-                  ? sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`
-                  : sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' is null`,
+                  ? sql`${heartbeatRuns.contextIssueId} = ${issueId}`
+                  : sql`${heartbeatRuns.contextIssueId} is null`,
               ),
             )
             .orderBy(asc(heartbeatRuns.createdAt), asc(heartbeatRuns.id))
@@ -16187,7 +16187,7 @@ export function heartbeatService(
         issues,
         and(
           eq(issues.companyId, heartbeatRuns.companyId),
-          sql`${issues.id}::text = ${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
+          sql`${issues.id}::text = ${heartbeatRuns.contextIssueId}`,
         ),
       )
       .where(
@@ -16440,7 +16440,7 @@ export function heartbeatService(
         and(
           eq(heartbeatRuns.companyId, companyId),
           inArray(heartbeatRuns.status, statuses),
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
+          sql`${heartbeatRuns.contextIssueId} = ${issueId}`,
           sql`${heartbeatRuns.retryOfRunId} is not null`,
         ),
       )
@@ -28182,7 +28182,7 @@ export function heartbeatService(
                   inArray(heartbeatRuns.status, [
                     ...EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
                   ]),
-                  sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                  sql`${heartbeatRuns.contextIssueId} = ${issue.id}`,
                 ),
               )
               .orderBy(
@@ -28516,7 +28516,7 @@ export function heartbeatService(
                     heartbeatRuns.finishedAt,
                     new Date(throttleNow.getTime() - ISSUE_REWAKE_LOOKBACK_MS),
                   ),
-                  sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issue.id}`,
+                  sql`${heartbeatRuns.contextIssueId} = ${issue.id}`,
                 ),
               )
               .orderBy(desc(heartbeatRuns.finishedAt))
@@ -29383,7 +29383,7 @@ export function heartbeatService(
   async function listProjectScopedRunIds(companyId: string, projectId: string) {
     const runIssueId = sql<
       string | null
-    >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`;
+    >`${heartbeatRuns.contextIssueId}`;
     const effectiveProjectId = sql<
       string | null
     >`coalesce(${heartbeatRuns.contextSnapshot} ->> 'projectId', ${issues.projectId}::text)`;
