@@ -960,3 +960,9 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
 - No production behavior changes. Exact native full-image gate remains required.
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
+## Priority-first next-slot queue ordering (PER-1117)
+
+- Ready queued issue runs sort critical > high > medium > low, then creation time. In-progress status no longer outranks priority. Non-issue FIFO tier, dependency, approval, ownership and admission gates remain unchanged; no running preemption.
+- Supersedes PER-689 client-path preference: strict priority/FIFO applies to every agent, so high client blockers cannot jump critical internal tasks.
+- Upstream source retains status-before-priority ordering. Retire when a released equivalent passes the next-slot regression.
+- Regression: heartbeat-dependency-scheduling.test.ts holds a first run, queues older low in-progress work then critical todo work, and checks critical starts second.
