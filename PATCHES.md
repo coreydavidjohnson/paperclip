@@ -764,3 +764,10 @@ into the current fork image or supplied by a fork migration.
 - New assigned tasks and previously unassigned projectless tasks use their agent project. Saving an unchanged assignee does not refill an explicitly cleared project.
 - Upstream master b448710986d0e79d73341c07470459fa11956965 inspected: no equivalent default. Retire when a released upstream equivalent supports the same contracts.
 - Regression: issue-agent-project.test.ts exercises root, cross-agent child, explicit choice, assignment, no configuration and cleared project behavior against disposable PostgreSQL.
+
+PER669: Completion-stage diagnostics
+
+- Instance-local, closed-field monotonic spans for legacy adapter return and awaited controller finalization; no outbound telemetry, payload, URL or error text.
+- Preserves polling, ownership, approvals, cancellation and original error identity. Includes immutable captured log handles in both callbacks.
+- Focused checks: server/test/completion-timing.node.ts and completion-timing-semantic.node.cjs; normal full semantic/build gates remain required.
+- Retire when an upstream release provides equivalent sanitized completion boundaries.
