@@ -881,3 +881,18 @@ The startup generated-column migration timed out and rolled back on production. 
 Reapply only the missing settled recovery history/exact actionId lookup, idempotent late disposition annotation, and typed routing/coordination child contracts from retained c9aab87c0 onto 5e83e5491. Preserve newer execution-hold reconciliation, dependency locking, admission fencing, list query and observer changes. Late annotations apply only to settled disposition actions; other kinds retain their existing idempotent resolution behavior. Original resolution outcome and timestamps remain unchanged. Ordinary blocked tasks remain terminal to the legacy continuation classifier; only an explicitly typed routing-child hand-back is evaluated as productive continuation, with every real wait, approval, budget and owner gate retained.
 
 Regression evidence: current baseline failed both settled history tests and five typed routing-child checks. Helper action_id failed validation before restoration. Full recovery/legacy and helper suites must pass before image publication. Homelab build/typecheck contexts include shared validator source so childPurpose is not silently stripped by a stale dependency-image validator. Retire this carry when equivalent upstream contracts are available.
+## Assignment wake comment carrier (PER-1092)
+
+- Why: assignment-only markdown printed comment headings while omitting their
+  bodies. The shared wake renderer owns those bodies; turning assignment bodies
+  back on would duplicate them in native and OmniGenT prompts.
+- Change: emit comment headings only with their bodies. Preserve follow-up
+  policy and attachment descriptors when the wake prompt owns comments.
+- Upstream checked: 06d4fe3121e57ca834b533e757bd0f540fadabc5 still has the same
+  conditional-body/unconditional-heading behavior in heartbeat/task-markdown.ts.
+  No equivalent fix found in the fetched recent comment/wake history.
+- Retirement: drop when a released upstream renderer never emits bodyless
+  headings and passes the real full/compact assignment carrier regression.
+- Test: heartbeat-context-summary.test.ts combines real assignment markdown
+  with five ordered wake comments on fresh and resumed paths, asserting each
+  body exactly once and no bodyless headings; also covers a single comment.
