@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import { activityLog, agents, authUsers, companies, createDb, heartbeatRuns, ins
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { deriveIssueCommentRunLogAttribution, issueService } from "../services/issues.js";
 import { getRunLogStore } from "../services/run-log-store.js";
+import { createRunSecretRedactionRegistry } from "../services/run-secret-redaction.js";
 import { issueRunIdsCondition } from "../services/run-history-query.js";
 
 // Deliberately no supported/skip gate: this contract must execute on native PG.
@@ -18,6 +19,7 @@ describe("native comment attribution service", () => {
   beforeAll(async () => {
     vi.stubEnv("RUN_LOG_BASE_PATH", logDir);
     vi.stubEnv("RUN_LOG_S3_BUCKET", "");
+    vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", randomBytes(32).toString("hex"));
     fixture = await startEmbeddedPostgresTestDatabase("luma-comment-attribution-");
     db = createDb(fixture.connectionString);
     expect((await db.execute(sql`select version() as version`))[0].version).toMatch(/PostgreSQL 18/);
@@ -66,7 +68,14 @@ comment id: ${comments[12]}
     expect(result[10]).toMatchObject({ authorAgentId: f.secondAgent, derivedAuthorAgentId: null });
     expect(result[11]).toMatchObject({ derivedAuthorAgentId: f.secondAgent, derivedAuthorSource: "run_id" });
     expect(JSON.stringify(result)).not.toContain("context-secret-not-returned");
-    expect(JSON.stringify(result)).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz1234567890");
+    // Internal service returns raw stored data; the HTTP route applies this
+    // registered-secret boundary. Do not invent generic token masking here.
+    const redactions = createRunSecretRedactionRegistry(db);
+    await redactions.register(f.company, ids[0], "ghp_abcdefghijklmnopqrstuvwxyz1234567890");
+    const response = await redactions.redactForIssue(f.company, f.issue, result);
+    expect(JSON.stringify(response)).not.toContain("ghp_abcdefghijklmnopqrstuvwxyz1234567890");
+    expect(result[0].body).toContain("ghp_");
+    expect(response.map(c => c.id)).toEqual(result.map(c => c.id));
     const stored = await db.select().from(issueComments).where(eq(issueComments.issueId, f.issue)).orderBy(issueComments.id);
     expect(stored[3]).toMatchObject({ authorAgentId: null, authorUserId: "local-board", createdByRunId: ids[3], derivedCreatedByRunId: ids[3] });
     expect(stored[0].body).toContain("ghp_");
