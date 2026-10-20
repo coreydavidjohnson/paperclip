@@ -227,14 +227,15 @@ describe("PER-827 recovery request budget", () => {
     }
   });
 
-  it.each(["issues", "attention"])("does not cancel a slow %s request at the next batch window", async (projection) => {
+  it.each(["issues", "attention"])("preserves one trailing refresh without cancelling a slow %s request", async (projection) => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity, staleTime: Infinity } } });
     const queryKey = [projection, "company-1"];
     client.setQueryData(queryKey, "cached");
     const aborted = vi.fn();
     const read = vi.fn(({ signal }: { signal: AbortSignal }) => {
       signal.addEventListener("abort", aborted);
-      return new Promise<string>(resolve => setTimeout(() => resolve("fresh"), 25_000));
+      const response = read.mock.calls.length === 1 ? "stale snapshot" : "fresh";
+      return new Promise<string>(resolve => setTimeout(() => resolve(response), 25_000));
     });
     const observer = new QueryObserver(client, { queryKey, queryFn: read });
     const unsubscribe = observer.subscribe(() => {});
@@ -242,12 +243,49 @@ describe("PER-827 recovery request budget", () => {
     try {
       void batcher.schedule({ queryKey });
       await vi.advanceTimersByTimeAsync(10_000);
-      void batcher.schedule({ queryKey });
+      for (let event = 0; event < 20; event++) void batcher.schedule({ queryKey });
       await vi.advanceTimersByTimeAsync(10_000);
       expect(aborted).not.toHaveBeenCalled();
       expect(read).toHaveBeenCalledTimes(1);
       await vi.advanceTimersByTimeAsync(15_000);
+      expect(client.getQueryData(queryKey)).toBe("stale snapshot");
+      expect(read).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(read).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(25_000);
       expect(client.getQueryData(queryKey)).toBe("fresh");
+      expect(aborted).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { batcher.dispose(); unsubscribe(); client.clear(); }
+  });
+
+  it.each(["issues", "attention"])("discards a slow %s trailing refresh on dispose", async (projection) => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: Infinity, staleTime: Infinity } } });
+    const queryKey = [projection, "company-1"];
+    client.setQueryData(queryKey, "cached");
+    const aborted = vi.fn();
+    const read = vi.fn(({ signal }: { signal: AbortSignal }) => {
+      signal.addEventListener("abort", aborted);
+      return new Promise<string>(resolve => setTimeout(() => resolve("stale snapshot"), 25_000));
+    });
+    const observer = new QueryObserver(client, { queryKey, queryFn: read });
+    const unsubscribe = observer.subscribe(() => {});
+    const batcher = createInvalidationBatcher(client, undefined, "company-1");
+    try {
+      void batcher.schedule({ queryKey });
+      await vi.advanceTimersByTimeAsync(10_000);
+      const pending = batcher.schedule({ queryKey });
+      await vi.advanceTimersByTimeAsync(10_000);
+      batcher.dispose();
+      await vi.advanceTimersByTimeAsync(15_000);
+      await pending;
+      expect(client.getQueryData(queryKey)).toBe("stale snapshot");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(aborted).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
     } finally { batcher.dispose(); unsubscribe(); client.clear(); }
   });
 });

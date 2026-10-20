@@ -40,6 +40,7 @@ function createDeferred(): Deferred {
 function createWindowBatcher(
   queryClient: Pick<QueryClient, "invalidateQueries">,
   intervalMs: number = DEFAULT_INVALIDATION_INTERVAL_MS,
+  isFetching?: (filters: InvalidateQueryFilters) => boolean,
 ): InvalidationBatcher {
   // Keyed by a stable serialization of the filters so repeated invalidations of
   // the same key (the common case) collapse to one entry.
@@ -70,9 +71,18 @@ function createWindowBatcher(
     ));
     pending.clear();
     try {
-      await Promise.all(filtersList.map((filters) => queryClient.invalidateQueries(
-        getPageVisibility().visible ? filters : { ...filters, refetchType: "none" },
-      )));
+      await Promise.all(filtersList.map((filters) => {
+        const visible = getPageVisibility().visible;
+        // A non-cancelling invalidation would join the old request, whose
+        // success clears isInvalidated. Carry the dirty filter to the next
+        // window instead, retaining one trailing refresh without an abort.
+        if (visible && filters.refetchType !== "none" && isFetching?.(filters)) {
+          return schedule(filters);
+        }
+        return queryClient.invalidateQueries(
+          visible ? filters : { ...filters, refetchType: "none" },
+        );
+      }));
     } finally {
       deferred?.resolve();
     }
@@ -105,14 +115,16 @@ function createWindowBatcher(
 
 // Company-wide projections need not follow transcript cadence.
 export function createInvalidationBatcher(
-  queryClient: Pick<QueryClient, "invalidateQueries">,
+  queryClient: Pick<QueryClient, "invalidateQueries"> & Partial<Pick<QueryClient, "getQueryCache">>,
   intervalMs: number = DEFAULT_INVALIDATION_INTERVAL_MS,
   companyId?: string,
 ): InvalidationBatcher {
   const fast = createWindowBatcher(queryClient, intervalMs);
   const lists = createWindowBatcher({
     invalidateQueries: filters => queryClient.invalidateQueries(filters, { cancelRefetch: false }),
-  }, 10_000);
+  }, 10_000, filters => queryClient.getQueryCache?.().findAll(filters).some(
+    query => query.state.fetchStatus === "fetching",
+  ) ?? false);
   return {
     schedule(filters) {
       const key = filters.queryKey;

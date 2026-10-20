@@ -861,3 +861,12 @@ into the current fork image or supplied by a fork migration.
   claimed resolved. Retire with an equivalent released upstream implementation
   passing these same request-count and in-flight-read regressions.
 
+### PER-218 / PER-827 trailing list refresh repair
+
+- Non-cancelling company-list invalidations carry dirty filters to the next
+  ten-second window while a matching request is fetching. Its stale response
+  no longer consumes a later live event without a trailing refresh.
+- Real QueryClient tests require one stale response followed by one fresh read,
+  no request aborts, no extra idle reads, and no queued refresh after disposal.
+  Sustained six-minute traffic retains 37 issue and attention reads each
+  including initial loads; detail and other-company reads remain 121 each.
