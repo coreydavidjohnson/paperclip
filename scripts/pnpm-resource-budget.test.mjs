@@ -29,7 +29,7 @@ test('pnpm uses the allotted CPU and memory, not the host CPU count', () => {
 
 test('both dependency installs use the budget without changing install semantics', () => {
   const dockerfile = readFileSync(new URL('../Dockerfile', import.meta.url), 'utf8');
-  assert.ok(dockerfile.includes('RUN node --test scripts/pnpm-resource-budget.test.mjs'));
+  assert.ok(dockerfile.includes('node --test scripts/pnpm-resource-budget.test.mjs'));
   assert.match(dockerfile, /COPY scripts\/pnpm-resource-budget.mjs scripts\//);
   assert.match(dockerfile, /node scripts\/pnpm-resource-budget.mjs install --resolution-only --ignore-scripts --no-frozen-lockfile && node scripts\/pnpm-resource-budget.mjs install --frozen-lockfile/);
 });

@@ -115,3 +115,28 @@ corrected that diagnostic context. All four checks then passed on Node24.22.0,
 and a direct read of installed pnpm9.15.4 confirmed the subtraction formula.
 Neither diagnostic context is a release gate pass. The final documentation-only
 follow-up leaves the dependency recipe unchanged.
+
+## Disposable-builder follow-up (2026-10-20, PER-1010)
+
+The exact parent `1a67bf76808ffb8f7144624ced86b9183b8fc686` was rerun
+in a disposable cluster Job with CPU limit 8 and memory limit 20 GiB, not on
+a shared host. Explicit build-budget arguments matched those limits. After
+passing server compilation, the luma-patch-tests workspace typecheck failed
+with TS2688 in create-paperclip-plugin: its manifest was absent from the
+Docker deps stage. The existing manifest checker explicitly ignored that
+package and all examples, even though workspace typecheck includes them.
+This is a distinct deterministic failure, not another OOM. The larger
+allocation does not by itself prove that the old OOM root cause is fixed.
+
+Correct the deps-stage COPY coverage for the generator and example manifests;
+remove hard-coded checker exclusions, honor workspace negations instead,
+and run that checker in the image gate. The strengthened checker failed on
+the unchanged Dockerfile (generator plus four included example manifests)
+and passes after the COPY correction. All four resource-budget checks pass.
+An earlier diagnostic edit failed Python parsing and did not change source;
+its subsequent old-checker PASS was not red evidence.
+
+Rule: every package included by recursive workspace typecheck must have its
+manifest present before image dependency installation. Workspace exclusions,
+not category names, define exceptions. Full image/regression acceptance is
+still pending; this entry does not claim a release or deployment.

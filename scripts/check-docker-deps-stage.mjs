@@ -36,9 +36,7 @@ function parseWorkspaceRoots(workspaceText) {
     .filter(Boolean)
     .filter((entry) => !entry.startsWith("!"))
     .map((entry) => entry.replace(/\*+$/, ""))
-    .filter((entry) => entry.length > 0)
-    .filter((entry) => !entry.includes("examples"))
-    .filter((entry) => !entry.includes("create-paperclip-plugin"));
+    .filter((entry) => entry.length > 0);
 }
 
 function walkPackageJsonFiles(rootRelative, maxDepth) {
@@ -61,11 +59,7 @@ function walkPackageJsonFiles(rootRelative, maxDepth) {
         continue;
       }
 
-      if (
-        entry.name === "package.json" &&
-        !relative.includes("/examples/") &&
-        !relative.includes("/create-paperclip-plugin/")
-      ) {
+      if (entry.name === "package.json") {
         results.push(relative);
       }
     }
@@ -132,14 +126,20 @@ function main() {
     process.exit(1);
   }
 
-  const workspaceRoots = parseWorkspaceRoots(readFileSync(workspacePath, "utf8"));
+  const workspaceText = readFileSync(workspacePath, "utf8");
+  const workspaceRoots = parseWorkspaceRoots(workspaceText);
+  const excludedRoots = workspaceText.split("\n").flatMap((line) => {
+    const entry = line.trim().replace(/^- /, "").replace(/^["']|["']$/g, "");
+    return entry.startsWith("!") ? [globToRegExp(entry.slice(1) + "/package.json")] : [];
+  });
   if (workspaceRoots.length === 0) {
     console.error("Could not derive workspace roots from pnpm-workspace.yaml.");
     process.exit(1);
   }
 
   const requiredPackageJsons = [...new Set(
-    workspaceRoots.flatMap((root) => walkPackageJsonFiles(root, 2)),
+    workspaceRoots.flatMap((root) => walkPackageJsonFiles(root, 2))
+      .filter((file) => !excludedRoots.some((regex) => regex.test(file))),
   )].sort();
 
   const copySources = parseCopySources(depsStage);
