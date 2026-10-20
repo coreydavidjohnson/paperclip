@@ -62,7 +62,7 @@ suite("Home Lab delegation real transaction fence", () => {
     await db.execute(sql.raw(`create function reject_test_idempotency() returns trigger language plpgsql as $fn$ begin raise exception $err$post-insert failure$err$; end $fn$`));
     await db.execute(sql.raw(`create trigger reject_test_idempotency before insert on issue_create_idempotency_keys for each row execute function reject_test_idempotency()`));
     try {
-      await expect(issueService(db).createChild(f.parentId, { ...f.child, idempotencyKey: randomUUID() })).rejects.toThrow("post-insert failure");
+      await expect(issueService(db).createChild(f.parentId, { ...f.child, idempotencyKey: randomUUID() })).rejects.toMatchObject({ cause: { message: "post-insert failure" } });
       expect(await db.select().from(issues).where(eq(issues.parentId, f.parentId))).toHaveLength(0);
     } finally {
       await db.execute(sql.raw(`drop trigger reject_test_idempotency on issue_create_idempotency_keys`));
