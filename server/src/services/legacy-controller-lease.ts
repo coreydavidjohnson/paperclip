@@ -64,12 +64,13 @@ export async function revokeExpiredLegacyController(db: Db, run: Run): Promise<b
 
 /** Abort the adapter if the controller cannot renew. Bound each check by the
  * lease duration even when the database connection never settles. */
-export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortController) {
+export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortController, onCancellationRequested?: () => Promise<unknown>) {
   if (run.runtimeMode === "native" || !run.controllerBootId) {
     return { stop() {}, async assertOwned(_stage?: "dispatching") {} };
   }
   let stopped = false;
   let pending = false;
+  let cancelling = false;
   const lost = () => { if (!stopped) controller.abort(new Error("Legacy controller lease lost")); };
   let deadline = setTimeout(lost, Math.max(0,
     (run.controllerLeaseExpiresAt?.getTime() ?? 0) - Date.now()));
@@ -95,6 +96,16 @@ export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortCo
       controller.signal.throwIfAborted();
     }
     controller.signal.throwIfAborted();
+    if (onCancellationRequested) {
+      const [current] = await db.select({ resultJson: heartbeatRuns.resultJson }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+          eq(heartbeatRuns.controllerBootId, legacyControllerBootId), eq(heartbeatRuns.status, "running")));
+      const intent = current?.resultJson?.executionCancellation as { state?: string } | undefined;
+      if (intent?.state === "requested" && !cancelling) {
+        cancelling = true;
+        void onCancellationRequested().catch(() => {}).finally(() => { cancelling = false; });
+      }
+    }
     if (!stopped) {
       clearTimeout(deadline);
       deadline = setTimeout(lost, Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - startedAt)));
