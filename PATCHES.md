@@ -1001,3 +1001,10 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - No production code, concurrency limit, timeout increase or retry waiver.
 - Regression: existing mandatory stale-queue suite and complete image gate.
 - Retire when upstream fixtures wait for the complete executor lifetime.
+
+PER669: Completion-stage diagnostics
+
+- Instance-local, closed-field monotonic spans for legacy adapter return and awaited controller finalization; no outbound telemetry, payload, URL or error text.
+- Preserves polling, ownership, approvals, cancellation and original error identity. Includes immutable captured log handles in both callbacks.
+- Focused checks: server/test/completion-timing.node.ts and completion-timing-semantic.node.cjs; normal full semantic/build gates remain required.
+- Retire when an upstream release provides equivalent sanitized completion boundaries.
