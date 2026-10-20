@@ -817,3 +817,9 @@ into the current fork image or supplied by a fork migration.
   Attention only. Historical rows/events and recovery semantics are retained.
   Regression first fails without the cutoff (two results instead of one), then
   checks a recent result and continued existence of the old run.
+## Per-agent task project defaults (PER-1106)
+
+- Requested own-fork feature: project defaults from agent runtimeConfig.defaultIssueProjectId, validated by company and non-archived project. Explicit project/workspace choices win; parent workspace inheritance already checks project identity. Chat creation returns before this path.
+- New assigned tasks and previously unassigned projectless tasks use their agent project. Saving an unchanged assignee does not refill an explicitly cleared project.
+- Upstream master b448710986d0e79d73341c07470459fa11956965 inspected: no equivalent default. Retire when a released upstream equivalent supports the same contracts.
+- Regression: issue-agent-project.test.ts exercises root, cross-agent child, explicit choice, assignment, no configuration and cleared project behavior against disposable PostgreSQL.
