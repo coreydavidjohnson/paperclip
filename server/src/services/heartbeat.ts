@@ -3516,17 +3516,13 @@ const heartbeatRunSafeResultJsonColumn = sql<Record<string, unknown> | null>`
 `.as("resultJson");
 
 const heartbeatRunSafeColumns = {
-  ...Object.fromEntries(Object.entries(getTableColumns(heartbeatRuns)).filter(
-    ([key]) => key !== "contextIssueId" && key !== "contextTaskId",
-  )) as Omit<ReturnType<typeof getTableColumns<typeof heartbeatRuns>>, "contextIssueId" | "contextTaskId">,
+  ...getTableColumns(heartbeatRuns),
   processGroupId: heartbeatRunProcessGroupIdColumn,
   resultJson: heartbeatRunSafeResultJsonColumn,
 } as const;
 
 const heartbeatRunSqlAsciiSafeColumns = {
-  ...Object.fromEntries(Object.entries(getTableColumns(heartbeatRuns)).filter(
-    ([key]) => key !== "contextIssueId" && key !== "contextTaskId",
-  )) as Omit<ReturnType<typeof getTableColumns<typeof heartbeatRuns>>, "contextIssueId" | "contextTaskId">,
+  ...getTableColumns(heartbeatRuns),
   processGroupId: heartbeatRunProcessGroupIdColumn,
   error: sql<string | null>`NULL`.as("error"),
   resultJson: sql<Record<string, unknown> | null>`NULL`.as("resultJson"),
@@ -3572,7 +3568,7 @@ const heartbeatRunIssueSummaryColumns = {
   lastOutputBytes: heartbeatRuns.lastOutputBytes,
   issueId: sql<
     string | null
-  >`${heartbeatRuns.contextIssueId}`.as("issueId"),
+  >`${heartbeatRuns}.context_issue_id`.as("issueId"),
 } as const;
 
 function appendExcerpt(prev: string, chunk: string) {

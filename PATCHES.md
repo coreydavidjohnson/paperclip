@@ -763,7 +763,7 @@ into the current fork image or supplied by a fork migration.
   correct for every writer. Full snapshots, recovery and ownership data stay intact.
 - Summary projection reads the stored key. Predicates retain existing JSON
   expressions so current expression indexes remain usable. New keys are internal
-  and excluded from explicit safe run-list projections.
+  and deliberately absent from the Drizzle row model and wire projections.
 - Admission suspension prefilters the same receipt, issue, stage and age checks
   before attempting UPDATE. All authoritative write-time predicates remain.
   The expensive merge is an eligibility attempt, not an ever-growing append log.

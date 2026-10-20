@@ -94,9 +94,6 @@ export const heartbeatRuns = pgTable(
     lastUsefulActionAt: timestamp("last_useful_action_at", { withTimezone: true }),
     nextAction: text("next_action"),
     contextSnapshot: jsonb("context_snapshot").$type<Record<string, unknown>>(),
-    // Stored projections avoid detoasting context just to read hot lookup keys.
-    contextIssueId: text("context_issue_id").generatedAlwaysAs(sql`context_snapshot ->> 'issueId'`),
-    contextTaskId: text("context_task_id").generatedAlwaysAs(sql`context_snapshot ->> 'taskId'`),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
