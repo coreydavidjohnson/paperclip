@@ -3,7 +3,7 @@ import request from "supertest";
 import { issueRoutes } from "../routes/issues.js";
 import { agentRoutes } from "../routes/agents.js";
 import { errorHandler } from "../middleware/index.js";
-import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, budgetPolicies, costEvents, projects, companyMemberships, authUsers } from "@paperclipai/db";
+import { agents, companies, createDb, heartbeatRuns, issues, agentWakeupRequests, runLivenessOutbox, budgetPolicies, costEvents, projects, companyMemberships, authUsers, issueThreadInteractions } from "@paperclipai/db";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -87,4 +87,30 @@ describe("superseded liveness recovery", () => {
   expect(execute).toHaveBeenCalledOnce();
   expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.receipt.id)))[0].runId).toBe(execute.mock.calls[0][0].runId);
  });
+ it.each(["skipped", "coalesced"])("legacy %s adoption stays schedulable while a card holds new input", async status => {
+  const f = await held();
+  await db.update(agentWakeupRequests).set({ status, finishedAt: new Date(), runId: null }).where(eq(agentWakeupRequests.id, f.receipt.id));
+  await lift(f.policy.id);
+  const [card] = await db.insert(issueThreadInteractions).values({ companyId: f.run.companyId, issueId: f.task.id, kind: "ask_user_questions", status: "pending", payload: { version: 1, questions: [{ id: "next", prompt: "Which task must continue?", selectionMode: "single", required: true, options: [{ id: "verify", label: "Verify prior effects" }] }] } }).returning();
+  const message = await request(f.app).post(`/api/issues/${f.task.id}/comments`).send({ body: "Keep this instruction until the card is clear.", clientRequestId: crypto.randomUUID() });
+  expect(message.status, JSON.stringify(message.body)).toBe(201);
+  await vi.waitFor(async () => {
+   const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.receipt.id));
+   expect((receipt.payload?._paperclipWakeContext as { wakeCommentIds?: string[] })?.wakeCommentIds).toContain(message.body.id);
+  }, { timeout: 15000 });
+  const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.receipt.id));
+  expect(receipt).toMatchObject({ status: "deferred_issue_execution", runId: null, finishedAt: null, claimedAt: null });
+  expect(execute).not.toHaveBeenCalled();
+  await age(f.receipt.id); await heartbeat.resumeQueuedRuns(); await heartbeat.drainActiveRunExecutions();
+  expect(execute).not.toHaveBeenCalled();
+  expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id)))[0].status).toBe("pending");
+  await db.update(issueThreadInteractions).set({ status: "answered" }).where(eq(issueThreadInteractions.id, card.id));
+  await age(f.receipt.id); execute.mockImplementation(() => finish(f.task.id));
+  await heartbeat.resumeQueuedRuns(); await heartbeat.drainActiveRunExecutions();
+  expect(execute).toHaveBeenCalledOnce();
+  expect(execute.mock.calls[0][0].context.wakeCommentIds).toContain(message.body.id);
+  expect(execute.mock.calls[0][0].context.recovery).toMatchObject({ predecessorRunId: f.run.id, outcomesUnknown: true });
+  await heartbeat.resumeQueuedRuns(); await heartbeat.drainActiveRunExecutions(); expect(execute).toHaveBeenCalledOnce();
+ });
+
 });

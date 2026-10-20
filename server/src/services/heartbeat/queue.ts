@@ -1814,7 +1814,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const issueKey = `${wake.companyId}:${String(wake.payload?.issueId)}`;
       if (["todo", "in_progress"].includes(issueStatus) && wake.requestedAt.getTime() <= Date.now() - 120_000 &&
           !wake.idempotencyKey?.startsWith("chat-inbound:") && !wake.payload?.dotRequestId &&
-          !queuedCommentIdsFromWakePayload(wake.payload).length && wake.payload?.mutation !== "interaction") {
+          ((!queuedCommentIdsFromWakePayload(wake.payload).length && wake.payload?.mutation !== "interaction") ||
+            (wake.requestedByActorType === "system" && wake.requestedByActorId === "external-liveness" &&
+              wake.idempotencyKey?.startsWith("liveness:")))) {
         if (strandedIssues.has(issueKey)) continue;
         strandedIssues.add(issueKey);
         const context = parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
@@ -2809,7 +2811,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               if (opts.strandedWakeRequestId !== executionWaitRequestId ||
                   pending.requestedAt.getTime() > Date.now() - 120_000 || pending.payload?.queuedCommentInterrupt ||
                   pending.idempotencyKey?.startsWith("chat-inbound:") || pending.payload?.dotRequestId ||
-                  queuedCommentIdsFromWakePayload(pending.payload).length || pending.payload?.mutation === "interaction" ||
+                  ((!livenessRecovery || pending.requestedByActorType !== "system" ||
+                    pending.requestedByActorId !== "external-liveness" ||
+                    pending.idempotencyKey !== opts.idempotencyKey) &&
+                    (queuedCommentIdsFromWakePayload(pending.payload).length || pending.payload?.mutation === "interaction")) ||
                   !task || task.executionRunId || task.hiddenAt || task.assigneeUserId ||
                   task.assigneeAgentId !== agentId || !["todo", "in_progress"].includes(task.status) ||
                   live || card || approval || await getExecutionBlocker(tx as unknown as Db, agent.companyId, issueId)) {
@@ -3353,8 +3358,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             // Saving a resolved decision does not authorize restarting stopped work.
             await tx.update(agentWakeupRequests).set({
               payload: { ...livenessReceipt.payload, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot },
+              // Adoption must be visible to periodic admission even if another
+              // decision still holds this legacy, previously terminal receipt.
+              status: "deferred_issue_execution", claimedAt: null, finishedAt: null,
               updatedAt: new Date(),
-            }).where(eq(agentWakeupRequests.id, livenessReceipt.id));
+            }).where(and(eq(agentWakeupRequests.id, livenessReceipt.id),
+              eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
+              isNull(agentWakeupRequests.runId),
+              inArray(agentWakeupRequests.status, ["deferred_issue_execution", "skipped", "coalesced"])));
             if ((latest?.status === "cancelled" && !newUserComment) ||
                 (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
               return { kind: "deferred" as const };

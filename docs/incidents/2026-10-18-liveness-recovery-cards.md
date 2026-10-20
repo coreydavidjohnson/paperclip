@@ -73,3 +73,42 @@ Regression: heartbeat-stale-liveness-recovery.test.ts, registered in the
 existing Dockerfile image gate. Routes, delivery service and PostgreSQL are
 real; provider probe/execute are simulated. Parent owns the separate legacy
 adoption status correction, final image gate and real-provider acceptance.
+
+
+### Retained-candidate recovery (2026-10-20)
+
+The interrupted final suite and PostgreSQL queue executions finished with
+exit 0 (5 and 63 tests). Fresh retained-candidate regressions passed 5/5;
+server tsc --noEmit exited 0. Earlier five-suite acceptance: 41 passed, exit 0.
+Earlier red runs include an invalid transient-answer assertion (durable
+answer present) and a nonexistent fixture delivery column; neither is a
+production defect.
+
+Local commit found an empty stale task index.lock. Inspection found no
+process/file-descriptor owner; only that task lock was removed. Preserve
+parent 1a67bf768 scoped update predicate, deferred status and cleared
+timestamps alongside context-before-Stop ordering. Its test and incident
+file remain exact.
+
+Local checks used Node 22.23.1/pnpm 9.15.4 with Node >=24.11.0 engine and
+simulated-provider connection-tool warnings. Parent owns Node24 image and
+real-provider Stop/tool-effect acceptance. No push/deploy/full image build.
+
+### Verified merge completion (2026-10-20)
+
+After the planned host restart, inspection found the three child commits
+already present and a resolved but uncommitted merge of parent 1a67bf768.
+The pre-restart integration-focused log has no final outcome and is not a pass.
+A fresh three-suite command reached its 600-second command lifetime and was
+killed before reporting a suite result; no OOM attribution is made.
+
+Separate unchanged-source reruns passed stale recovery/post-Stop delivery
+5/5 (390.75 seconds, exit 0) and legacy supersession 5/5 (338.26 seconds,
+exit 0). Server tsc --noEmit exited 0; staged and working diff checks exited 0.
+The parent test and external-liveness incident file match 1a67bf768 exactly.
+The combined-suite timing limitation remains for the parent image gate.
+
+Scoped durable-memory promotion was attempted once but rejected its dataset
+binding (home_lab_agent_memory versus the server-bound hyphenated name); no
+alternate scope was used. The verified lesson remains in this incident.
+No push, deployment, host change, or competing full image build occurred.
