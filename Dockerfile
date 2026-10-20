@@ -182,6 +182,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/heartbeat-route-liveness-recovery.test.ts \
     src/__tests__/heartbeat-stop-owner-liveness-recovery.test.ts \
     src/__tests__/heartbeat-superseded-liveness-recovery.test.ts \
+    src/__tests__/heartbeat-stale-liveness-recovery.test.ts \
     src/services/heartbeat/run-completion.test.ts \
     src/services/heartbeat/run-lifecycle.test.ts \
     src/services/legacy-controller-lease.test.ts \

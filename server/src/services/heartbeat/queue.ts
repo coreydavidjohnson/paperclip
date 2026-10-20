@@ -3303,9 +3303,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               (isInteractionResolutionWakePayload(payload) && Array.isArray(wait.pendingInteractionIds) &&
                 wait.pendingInteractionIds.includes(enrichedContextSnapshot.interactionId));
           };
-          const livenessReceipt = livenessReceipts.find(wake =>
-            (!wake.runId && ["deferred_issue_execution", "skipped", "coalesced"].includes(wake.status)) ||
-              (wake.runId && resolvesLivenessGate(wake)));
+          const incomingPredecessor = readNonEmptyString(parseObject(enrichedContextSnapshot.recovery).predecessorRunId);
+          const livenessReceipt = livenessReceipts.find(wake => {
+            const saved = parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
+            const predecessor = readNonEmptyString(parseObject(saved.recovery).predecessorRunId);
+            // Current skips are not necessarily recoverable work. Legacy receipts
+            // remain adoptable when they carry the actual saved safety contract,
+            // but one predecessor must never replace another recovery wake.
+            return predecessor && (!incomingPredecessor || predecessor === incomingPredecessor) &&
+              ((!wake.runId && ["deferred_issue_execution", "skipped", "coalesced"].includes(wake.status)) ||
+                (wake.runId && resolvesLivenessGate(wake)));
+          });
           if (livenessReceipt) {
             const saved = parseObject(livenessReceipt.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
             Object.assign(enrichedContextSnapshot, {
@@ -3347,10 +3355,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   eq(issueComments.authorUserId, opts.requestedByActorId), isNull(issueComments.createdByRunId),
                   isNull(issueComments.deletedAt), gt(issueComments.createdAt, latest.finishedAt),
                 )) : [];
-            if ((latest?.status === "cancelled" && !newUserComment) ||
-                (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
-              return { kind: "deferred" as const };
-            }
+            // Saving a resolved decision does not authorize restarting stopped work.
             await tx.update(agentWakeupRequests).set({
               payload: { ...livenessReceipt.payload, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot },
               // Adoption must be visible to periodic admission even if another
@@ -3361,6 +3366,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
               isNull(agentWakeupRequests.runId),
               inArray(agentWakeupRequests.status, ["deferred_issue_execution", "skipped", "coalesced"])));
+            if ((latest?.status === "cancelled" && !newUserComment) ||
+                (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
+              return { kind: "deferred" as const };
+            }
           }
           // Provider-stop evidence cannot answer a question or approve work.
           // Keep one durable receipt under the issue lock; normal stranded-wake
