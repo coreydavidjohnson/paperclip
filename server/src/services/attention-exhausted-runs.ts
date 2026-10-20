@@ -19,6 +19,16 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
     .orderBy(asc(heartbeatRunEvents.runId), desc(heartbeatRunEvents.id))
     .as("latest_exhaustion");
 
+  // Match the legacy raw-JSON candidate fallback, not newer-run text coercion.
+  const issueKey = sql`(case when jsonb_typeof(case
+    when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
+      or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
+    then ${heartbeatRuns.contextSnapshot} -> 'taskId'
+    else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
+    then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
+        ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
+    else '' end)`;
+
   return db
     .select({
       id: heartbeatRuns.id,
@@ -47,35 +57,25 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
       // Feed retention only: keep historical runs and recovery evidence intact.
       sql`${heartbeatRuns.createdAt} >= now() - interval '7 days'`,
       eq(agents.companyId, companyId),
-      // Probe newer runs for this issue/agent, not every historical snapshot.
+      // Independent anti-probes let each fallback use its expression index.
       sql`not exists (select 1 from heartbeat_runs newer
         where newer.company_id = ${heartbeatRuns.companyId}
           and newer.agent_id = ${heartbeatRuns.agentId}
           and newer.created_at >= date_trunc('milliseconds', ${heartbeatRuns.createdAt}) + interval '1 millisecond'
-          and (newer.context_snapshot ->> 'issueId' = (case when jsonb_typeof(case
-              when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
-                or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
-              then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
-              then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
-                            ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
-              else '' end)
-            or (newer.context_snapshot ->> 'issueId' is null and newer.context_snapshot ->> 'taskId' = (case when jsonb_typeof(case
-              when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
-                or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
-              then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
-              then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
-                            ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
-              else '' end))
-            or (newer.context_snapshot ->> 'issueId' is null and newer.context_snapshot ->> 'taskId' is null and (case when jsonb_typeof(case
-              when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
-                or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
-              then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
-              then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
-                            ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
-              else '' end) = '')))`,
+          and newer.context_snapshot ->> 'issueId' = ${issueKey})`,
+      sql`not exists (select 1 from heartbeat_runs newer
+        where newer.company_id = ${heartbeatRuns.companyId}
+          and newer.agent_id = ${heartbeatRuns.agentId}
+          and newer.created_at >= date_trunc('milliseconds', ${heartbeatRuns.createdAt}) + interval '1 millisecond'
+          and newer.context_snapshot ->> 'issueId' is null
+          and newer.context_snapshot ->> 'taskId' = ${issueKey})`,
+      sql`not exists (select 1 from heartbeat_runs newer
+        where newer.company_id = ${heartbeatRuns.companyId}
+          and newer.agent_id = ${heartbeatRuns.agentId}
+          and newer.created_at >= date_trunc('milliseconds', ${heartbeatRuns.createdAt}) + interval '1 millisecond'
+          and newer.context_snapshot ->> 'issueId' is null
+          and newer.context_snapshot ->> 'taskId' is null
+          and ${issueKey} = '')`,
       notInArray(agents.status, ["terminated"]),
       inArray(heartbeatRuns.status, ["failed", "timed_out"]),
     ))
