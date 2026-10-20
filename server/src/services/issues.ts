@@ -6646,6 +6646,18 @@ export async function readIssueCommentRunLogText(run: {
   return content;
 }
 
+async function agentDefaultIssueProject(db: Db, companyId: string, agentId: string | null | undefined) {
+  if (!agentId) return null;
+  const [agent] = await db.select({ runtimeConfig: agents.runtimeConfig }).from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+  const configured = (agent?.runtimeConfig as Record<string, unknown> | null)?.defaultIssueProjectId;
+  if (typeof configured !== "string" || !isUuidLike(configured)) return null;
+  const [project] = await db.select({ id: projects.id }).from(projects).where(and(
+    eq(projects.id, configured), eq(projects.companyId, companyId), isNull(projects.archivedAt),
+  ));
+  return project?.id ?? null;
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -9980,6 +9992,11 @@ export function issueService(db: Db) {
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as
             Record<string, unknown> | null | undefined) ?? null;
+        // Explicit project/workspace choices win; otherwise use the assignee's default
+        // before parent inheritance so cross-agent children get their own project.
+        if (issueData.projectId === undefined && !projectWorkspaceId && !executionWorkspaceId) {
+          issueData.projectId = await agentDefaultIssueProject(tx as unknown as Db, companyId, issueData.assigneeAgentId);
+        }
         const workspaceInheritanceIssueId = skipExecutionWorkspaceInheritance
           ? null
           : (inheritExecutionWorkspaceFromIssueId ??
@@ -10863,6 +10880,16 @@ export function issueService(db: Db) {
           existing.companyId,
           issueData.assigneeUserId,
         );
+      }
+      if (issueData.projectId === undefined && !existing.projectId &&
+          issueData.assigneeAgentId && issueData.assigneeAgentId !== existing.assigneeAgentId &&
+          !existing.projectWorkspaceId && !existing.executionWorkspaceId &&
+          !issueData.projectWorkspaceId && !issueData.executionWorkspaceId) {
+        const defaultProject = await agentDefaultIssueProject(dbOrTx as Db, existing.companyId, issueData.assigneeAgentId);
+        if (defaultProject) {
+          issueData.projectId = defaultProject;
+          patch.projectId = defaultProject;
+        }
       }
       let nextProjectId =
         issueData.projectId !== undefined

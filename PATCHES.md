@@ -784,3 +784,119 @@ into the current fork image or supplied by a fork migration.
   negative regression; no unnecessary guard was added.
 - Retire when a released upstream equivalent admits current bounded owner
   repairs and passes these regression/safety/replay contracts.
+## Bounded exhausted-run suppression (PER-218)
+
+- Requested by Corey in df0fe808-0ca4-46ea-a836-0e457a49e609. Private fork only.
+- Replace Inbox's all-later-agent-history fetch with a same-company/agent
+  anti-lookup on each exhausted failed run. Preserve event deduplication,
+  strict JavaScript millisecond Date ordering, original raw candidate JSON
+  vs newer ->> text fallback semantics, and all feed fields/authorization.
+- Expand newer issue/task fallback into separate predicates so existing
+  company/context-issue and company/context-task indexes can serve it.
+  No migration, snapshot deletion, retention change or new index is required.
+- Read-only live diagnostic: unconstrained coalesce anti-lookup 13.56 s;
+  equivalent split predicate using existing indexes 251 ms on current data.
+  This is a query diagnostic, not a deployed or phone-speed claim.
+- Regression: attention-failure-history-db.test.ts, baseline-failing first
+  case, 12 fallback/type/isolation fixtures, duplicate events, timestamp ties
+  and a baseline-failing microsecond precision case. All three tests pass
+  against embedded PostgreSQL on the approved cluster builder.
+- Upstream released v2026.1012.0 retains the history scan. Drop this patch
+  when a released equivalent passes these regressions and live measurements.
+- Production gate: exact fork typecheck/image tests, homelab CI, isolated
+  staging, main and full Argo reconciliation, then comparable API/SQL windows.
+
+## Stored lookup keys and observer no-op filtering (PER-218)
+
+- Requested by Corey in df0fe808 and 1003b8d4; parent owns the company/agent/created index.
+- Migration 0294 stores exact PostgreSQL text projections of issueId/taskId.
+  Generated columns preserve null/empty/non-string JSON extraction and stay
+  correct for every writer. Full snapshots, recovery and ownership data stay intact.
+- Summary projection reads the stored key. Predicates retain existing JSON
+  expressions so current expression indexes remain usable. New keys are internal
+  and deliberately absent from the Drizzle row model and wire projections.
+- Admission suspension prefilters the same receipt, issue, stage and age checks
+  before attempting UPDATE. All authoritative write-time predicates remain.
+  The expensive merge is an eligibility attempt, not an ever-growing append log.
+- Database regressions cover generated keys on insert/update with large context
+  and zero attempted writes for an ineligible observer. Exact semantic typecheck,
+  CI, isolated staging and reconciler verification are release gates.
+- Retire when released upstream provides equivalent behavior with these tests.
+
+- Review resolution: readRunIssueId returns null for all nonstrings/empty keys,
+  and the old map explicitly used ?? empty; no sentinel regression. createdAt
+  is NOT NULL. Old map kept maximum Date, not last iteration. Finishing issues
+  remain eligible without negative probe, exactly as the original UPDATE.
+- Generated stored columns rewrite the table. Bound acquisition to 2s and
+  the entire ALTER to 10s inside the existing transactional migration runner.
+  Production gate additionally requires a representative synthetic large-blob
+  migration timing and rollback-on-timeout check; no unbounded live rewrite.
+
+- Fixed identity-test fixture: the first UUID segment must contain a letter
+  before testing a partial-uppercase variant. All-digit random first segments
+  made that variant identical to the valid canonical ID and caused false red.
+  No production identity logic or acceptance assertion was weakened.
+
+- Authenticated parent request d28ab627/09:27 follow-up: integrate PER-628
+  fork 278f9c9 before shipment; do not touch production manifests until that
+  release is live. Exhausted failures older than seven days are omitted from
+  Attention only. Historical rows/events and recovery semantics are retained.
+  Regression first fails without the cutoff (two results instead of one), then
+  checks a recent result and continued existence of the old run.
+## Per-agent task project defaults (PER-1106)
+
+- Requested own-fork feature: project defaults from agent runtimeConfig.defaultIssueProjectId, validated by company and non-archived project. Explicit project/workspace choices win; parent workspace inheritance already checks project identity. Chat creation returns before this path.
+- New assigned tasks and previously unassigned projectless tasks use their agent project. Saving an unchanged assignee does not refill an explicitly cleared project.
+- Upstream master b448710986d0e79d73341c07470459fa11956965 inspected: no equivalent default. Retire when a released upstream equivalent supports the same contracts.
+- Regression: issue-agent-project.test.ts exercises root, cross-agent child, explicit choice, assignment, no configuration and cleared project behavior against disposable PostgreSQL.
+
+## Bounded recovered-run chart traversal (PER-218)
+
+- Corey requested repair of recovered_runs in 8cc00e8e. Materialize the narrow company/chart-window run projection once, then traverse only that finite set with UNION deduplication. No arbitrary depth cap or persisted recovery backfill.
+- Preserves long retry chains, branching, cyclic-link termination, dates/status/error-code totals and all response fields. Cross-company malformed retry links cannot confer recovery.
+- Regression first failed cross-company isolation; all five dashboard tests then pass, including a 130-link chain and cycle. Live repeatable-read comparison returned 197 identical buckets; diagnostic old/new execution 1290/142 ms, not a release effect.
+- Checked upstream master dashboard source on 2026-10-20; it retains the recursive wide-table joins. Retire when a released equivalent passes the same contracts.
+
+### PER-218 / PER-827 reconciliation repair
+
+- Base: deployed fork `23a6cd6ab06160615911c554b6eae245f836383b`.
+  Rechecked upstream master `813e808af` on 2026-10-20: its batcher still
+  lacks company-list isolation. Prior fork merge
+  `71fa92ccbb6a88d93d9da0d4f25c72e5d171b77d` is not an ancestor of this
+  base. Source comparison found the 15-second issue/browser polling,
+  ten-second issue/attention batching and filter-safe prefix merging already
+  present; preserve them rather than reimplementing.
+- Restore only the two client protections present in that prior merge:
+  route first-open/reconnect, visibility restore and disconnected fallback
+  reconciliation through the shared company-list budget; keep in-flight
+  issue/attention reads instead of aborting and restarting them each window.
+  Other active queries still reconcile immediately. Inactive matching lists
+  are marked stale. Direct user mutations remain outside the live batcher.
+- Targeted TDD: existing 14 tests passed; new regressions failed for the
+  missing recovery helper/provider wiring and aborted slow request before
+  source restoration. A real QueryClient/QueryObserver six-minute simulation
+  counts 37 issue and 37 attention reads including the initial fetch, versus
+  157 each with broad invalidation restored; detail/other-company reads stay
+  121 in both. Slow issue and attention reads finish without cancellation.
+  The count is an offline regression budget, not observed Safari traffic.
+- Verification: focused Vitest batcher and issue-refresh suites, standalone
+  batcher/page-visibility TypeScript check, token gates and diff whitespace.
+  No API, auth, response, ETag, redaction, infrastructure or dependency
+  changes. Build/deploy and full integration/browser checks are intentionally
+  delegated to the parent release gate; historical build failure is not
+  claimed resolved. Retire with an equivalent released upstream implementation
+  passing these same request-count and in-flight-read regressions.
+
+### PER-218 / PER-827 trailing list refresh repair
+
+- Non-cancelling company-list invalidations carry dirty filters to the next
+  ten-second window while a matching request is fetching. Its stale response
+  no longer consumes a later live event without a trailing refresh.
+- Real QueryClient tests require one stale response followed by one fresh read,
+  no request aborts, no extra idle reads, and no queued refresh after disposal.
+  Sustained six-minute traffic retains 37 issue and attention reads each
+  including initial loads; detail and other-company reads remain 121 each.
+
+### PER-218 migration release correction
+
+The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.

@@ -13,3 +13,10 @@ describe("issue page reconciliation budget", () => {
     expect(source).toContain("refetchInterval: 15_000");
   });
 });
+
+
+it("routes hide/restore, disconnected polls and socket opens through the shared list budget", () => {
+  const source = readFileSync(new URL("../context/LiveUpdatesProvider.tsx", import.meta.url), "utf8");
+  expect(source.match(/reconcileActiveQueries\(queryClient, invalidationBatcher, liveCompanyId\)/g) ?? []).toHaveLength(3);
+  expect(source).not.toContain('queryClient.invalidateQueries({ type: "active" }');
+});

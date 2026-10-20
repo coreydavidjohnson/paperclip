@@ -40,7 +40,24 @@ export async function suspendOmnigentAdmissions(db: Db,
   const candidates = await db.select().from(heartbeatRuns).where(and(
     eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"),
     sql`${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'omnigent'`,
-    sql`${heartbeatRuns.runnerProfileJson}->'omnigentAdmissionSuspension' is null`));
+    sql`${heartbeatRuns.runnerProfileJson}->'omnigentAdmissionSuspension' is null`,
+    // Filter before issuing one UPDATE per observer. Keep the write predicates
+    // below as the authoritative race check; this read grants no new authority.
+    sql`${heartbeatRuns.executionStage} in ('dispatching', 'external_attached', 'awaiting_external_evidence')`,
+    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'version' = '1'`,
+    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'runId' = ${heartbeatRuns.id}::text`,
+    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'companyId' = ${heartbeatRuns.companyId}::text`,
+    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'agentId' = ${heartbeatRuns.agentId}::text`,
+    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'state' in ('intent', 'accepted', 'observed')`,
+    sql`length(${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'omnigentSessionId') > 0`,
+    sql`exists (select 1 from ${issues} where ${issues.id}::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
+      and ${issues.companyId} = ${heartbeatRuns.companyId} and ${issues.assigneeAgentId} = ${heartbeatRuns.agentId}
+      and ${issues.status} != 'cancelled'
+      and (greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) <= clock_timestamp() - interval '2 hours'
+        or (${issues.status} in ('blocked', 'in_review', 'done')
+          and ${issues.updatedAt} < clock_timestamp() - interval '30 seconds'
+          and ${heartbeatRuns.startedAt} < clock_timestamp() - interval '30 seconds')))`,
+  ));
   const suspended: Array<typeof heartbeatRuns.$inferSelect> = [];
   for (const candidate of candidates) {
     const quiet = Math.max(candidate.startedAt?.getTime() ?? Date.now(), candidate.lastOutputAt?.getTime() ?? 0) <= Date.now() - 7200000;
