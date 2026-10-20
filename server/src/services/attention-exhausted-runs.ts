@@ -45,6 +45,21 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
     .where(and(
       eq(heartbeatRuns.companyId, companyId),
       eq(agents.companyId, companyId),
+      // Probe newer runs for this issue/agent, not every historical snapshot.
+      sql`not exists (select 1 from heartbeat_runs newer
+        where newer.company_id = ${heartbeatRuns.companyId}
+          and newer.agent_id = ${heartbeatRuns.agentId}
+          and newer.created_at > ${heartbeatRuns.createdAt}
+          and coalesce(newer.context_snapshot ->> 'issueId',
+                       newer.context_snapshot ->> 'taskId', '') =
+            case when jsonb_typeof(case
+              when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
+                or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
+              then ${heartbeatRuns.contextSnapshot} -> 'taskId'
+              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
+              then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
+                            ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
+              else '' end)`,
       notInArray(agents.status, ["terminated"]),
       inArray(heartbeatRuns.status, ["failed", "timed_out"]),
     ))
