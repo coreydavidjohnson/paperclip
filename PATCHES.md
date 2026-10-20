@@ -771,3 +771,12 @@ into the current fork image or supplied by a fork migration.
   and zero attempted writes for an ineligible observer. Exact semantic typecheck,
   CI, isolated staging and reconciler verification are release gates.
 - Retire when released upstream provides equivalent behavior with these tests.
+
+- Review resolution: readRunIssueId returns null for all nonstrings/empty keys,
+  and the old map explicitly used ?? empty; no sentinel regression. createdAt
+  is NOT NULL. Old map kept maximum Date, not last iteration. Finishing issues
+  remain eligible without negative probe, exactly as the original UPDATE.
+- Generated stored columns rewrite the table. Bound acquisition to 2s and
+  the entire ALTER to 10s inside the existing transactional migration runner.
+  Production gate additionally requires a representative synthetic large-blob
+  migration timing and rollback-on-timeout check; no unbounded live rewrite.
