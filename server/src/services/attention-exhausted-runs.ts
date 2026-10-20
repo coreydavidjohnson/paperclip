@@ -49,7 +49,7 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
       sql`not exists (select 1 from heartbeat_runs newer
         where newer.company_id = ${heartbeatRuns.companyId}
           and newer.agent_id = ${heartbeatRuns.agentId}
-          and newer.created_at > ${heartbeatRuns.createdAt}
+          and newer.created_at >= date_trunc('milliseconds', ${heartbeatRuns.createdAt}) + interval '1 millisecond'
           and coalesce(newer.context_snapshot ->> 'issueId',
                        newer.context_snapshot ->> 'taskId', '') =
             case when jsonb_typeof(case
