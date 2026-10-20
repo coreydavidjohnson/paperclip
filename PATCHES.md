@@ -754,3 +754,20 @@ into the current fork image or supplied by a fork migration.
   when a released equivalent passes these regressions and live measurements.
 - Production gate: exact fork typecheck/image tests, homelab CI, isolated
   staging, main and full Argo reconciliation, then comparable API/SQL windows.
+
+## Stored lookup keys and observer no-op filtering (PER-218)
+
+- Requested by Corey in df0fe808 and 1003b8d4; parent owns the company/agent/created index.
+- Migration 0294 stores exact PostgreSQL text projections of issueId/taskId.
+  Generated columns preserve null/empty/non-string JSON extraction and stay
+  correct for every writer. Full snapshots, recovery and ownership data stay intact.
+- Summary projection reads the stored key. Predicates retain existing JSON
+  expressions so current expression indexes remain usable. New keys are internal
+  and excluded from explicit safe run-list projections.
+- Admission suspension prefilters the same receipt, issue, stage and age checks
+  before attempting UPDATE. All authoritative write-time predicates remain.
+  The expensive merge is an eligibility attempt, not an ever-growing append log.
+- Database regressions cover generated keys on insert/update with large context
+  and zero attempted writes for an ineligible observer. Exact semantic typecheck,
+  CI, isolated staging and reconciler verification are release gates.
+- Retire when released upstream provides equivalent behavior with these tests.
