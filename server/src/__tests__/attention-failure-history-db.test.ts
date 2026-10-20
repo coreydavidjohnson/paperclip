@@ -15,4 +15,33 @@ describe("bounded failure history", () => {
   await db.insert(heartbeatRunEvents).values({companyId,agentId,runId:id,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted test"});
   expect((await listAttentionExhaustedRuns(db,companyId)).some(row=>row.id===id)).toBe(false);
  });
+ it("matches legacy suppression for fallbacks, JSON types, ties and companies", async () => {
+  const companyId=randomUUID(),otherCompany=randomUUID(),otherAgent=randomUUID();
+  await db.insert(companies).values([{id:companyId,name:"Types",issuePrefix:"T"+companyId.slice(0,7)},{id:otherCompany,name:"Other",issuePrefix:"O"+otherCompany.slice(0,7)}]);
+  await db.insert(agents).values({id:otherAgent,companyId:otherCompany,name:"Other",role:"engineer"});
+  const pairs: Array<[Record<string, unknown>,Record<string, unknown>,number,boolean]> = [
+   [{issueId:"a"},{issueId:"a"},1,true], [{issueId:"b"},{issueId:"other"},1,false],
+   [{taskId:"c"},{issueId:"c"},1,true], [{issueId:null,taskId:"d"},{taskId:"d"},1,true],
+   [{issueId:"",taskId:"e"},{taskId:"e"},1,false], [{issueId:"f"},{issueId:"f"},0,false],
+   [{issueId:"g"},{issueId:"g"},-1,false], [{issueId:42},{},1,true],
+   [{issueId:"42"},{issueId:42},1,true], [{issueId:{x:1}},{issueId:{x:1}},1,false],
+   [{},{issueId:""},1,true], [{issueId:"isolation"},{issueId:"isolation"},1,false],
+  ];
+  const expected:string[]=[];
+  for (let n=0;n<pairs.length;n++) {
+   const [oldContext,newContext,delta,suppressed]=pairs[n],id=randomUUID(),worker=randomUUID();
+   await db.insert(agents).values({id:worker,companyId,name:"Case"+n,role:"engineer"});
+   const at=1700100000000+n*10000;
+   await db.insert(heartbeatRuns).values([{id,companyId,agentId:worker,status:"failed",contextSnapshot:oldContext,createdAt:new Date(at)},
+    {companyId:n===11?otherCompany:companyId,agentId:n===11?otherAgent:worker,status:"succeeded",contextSnapshot:newContext,createdAt:new Date(at+delta*1000)}]);
+   await db.insert(heartbeatRunEvents).values([{companyId,agentId:worker,runId:id,seq:1,eventType:"lifecycle",message:"Bounded retry exhausted fixture"},
+    {companyId,agentId:worker,runId:id,seq:2,eventType:"lifecycle",message:"Bounded retry exhausted duplicate"}]);
+   if(!suppressed) expected.push(id);
+  }
+  const rows=await listAttentionExhaustedRuns(db,companyId);
+  expect(rows.map(r=>r.id).sort()).toEqual(expected.sort());
+  expect(rows.every(r=>r.companyId===companyId)).toBe(true);
+  expect(new Set(rows.map(r=>r.id)).size).toBe(rows.length);
+ });
+
 });
