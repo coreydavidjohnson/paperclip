@@ -150,3 +150,26 @@ paths through narrow dockerignore exceptions and run check-maps in the image
 gate before the expensive workspace check. Upstream master inspected at
 cde944ed7 still had the same missing-manifest and context-slimming omissions.
 Do not bypass structural checks or mark the earlier failed images accepted.
+
+## Resumed build context regression (2026-10-20, PER-1010)
+
+Candidate 88120fc029d5ed6f7607803553d58743a3c83cd4 was canceled at
+11:39:12Z when the VM103 build client disconnected during the planned restart.
+BuildKit history recorded Canceled, and there was no live client or exit receipt;
+this was not another OOM. After verifying that outcome, the retained disposable
+8-CPU/20-GiB builder resumed the same source. It passed server compilation
+and then failed UI typecheck because Docker excluded the shared
+test-support/local-integrity-boundary-golden.ts module. The module exists
+in Git and loads protocol/fixtures/provider-boundary/local-integrity.json.
+
+A narrow dockerignore exception retains the one TypeScript fixture; unrelated
+test-support files stay excluded. The existing exact-context probe now checks
+both required files. That probe failed before the exception and passed after
+it (exit 0, including capability inventory and 44 traceability paths).
+The fix is c9135c411f077dee1c2b978d43ceee495d069f5d; its full image gate
+is separate and was still running when this entry was written. No gate or
+deployment success is inferred from the context probe.
+
+Rule: workspace typechecking in an image requires shared test imports as well
+as production imports. Guard narrowly retained fixtures and their data inputs
+in the real Docker context; do not disable typechecks to hide missing inputs.
