@@ -49,6 +49,7 @@ import {
   isRetiredOmnigentObserver,
   settleInterruptedNativeBootstrap,
   terminalizeLegacyExecution,
+  suppressedLegacyRepairPatch,
 } from "./legacy-execution-recovery.js";
 import {
   adapterExecutionControls,
@@ -22808,8 +22809,8 @@ export function heartbeatService(
         const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
-            error: `Disposition repair suppressed: ${repairBlock}`,
+            ...suppressedLegacyRepairPatch(repairBlock),
+            resultJson: { ...parseObject(run.resultJson), ...suppressedLegacyRepairPatch(repairBlock).resultJson },
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
