@@ -147,21 +147,42 @@ export function healthRoutes(
     }
     res.json({ draining: true, deadline: beginControllerDrain() });
   });
+  // Fixed codes only: database errors may contain connection strings or SQL.
+  function readinessStateReasons() {
+    const reasons: string[] = [];
+    if (!isLiveEventTransportReady()) reasons.push("transport_not_ready");
+    if (isControllerDraining()) reasons.push("controller_draining");
+    if (getStartupRecoveryState().phase !== "ready") reasons.push("startup_not_ready");
+    return reasons;
+  }
+  function logReadinessFailure(reasons: string[], stage: "preflight" | "database_probe" | "post_probe") {
+    logger.warn({ event: "readiness_failed", reasons, stage }, "Readiness check failed");
+  }
   router.get("/ready", async (_req, res) => {
-    if (!isLiveEventTransportReady() || isControllerDraining() || getStartupRecoveryState().phase !== "ready" || !opts.authReady || !db) {
+    const reasons = readinessStateReasons();
+    if (!opts.authReady) reasons.push("auth_not_ready");
+    if (!db) reasons.push("database_missing");
+    if (reasons.length || !db) {
+      logReadinessFailure(reasons, "preflight");
       res.status(503).json({ ready: false });
       return;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Compare identity, not a driver-controlled error message, to classify timeout.
+    const timeoutError = new Error("readiness_database_timeout");
     try {
       readinessProbe ??= Promise.resolve(db.execute(sql`select 1`)).finally(() => { readinessProbe = null; });
       await Promise.race([readinessProbe, new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error("readiness_database_timeout")), 2000);
+        timer = setTimeout(() => reject(timeoutError), 2000);
       })]);
-      const ready = isLiveEventTransportReady() && !isControllerDraining() && getStartupRecoveryState().phase === "ready";
+      const postProbeReasons = readinessStateReasons();
+      const ready = postProbeReasons.length === 0;
+      if (!ready) logReadinessFailure(postProbeReasons, "post_probe");
       res.status(ready ? 200 : 503).json({ ready });
-    } catch { res.status(503).json({ ready: false }); }
-    finally { if (timer) clearTimeout(timer); }
+    } catch (error) {
+      logReadinessFailure([error === timeoutError ? "database_probe_timeout" : "database_probe_error"], "database_probe");
+      res.status(503).json({ ready: false });
+    } finally { if (timer) clearTimeout(timer); }
   });
 
   router.post("/dev-server/restart", async (req, res) => {
