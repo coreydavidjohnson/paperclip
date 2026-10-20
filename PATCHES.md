@@ -780,3 +780,8 @@ into the current fork image or supplied by a fork migration.
   the entire ALTER to 10s inside the existing transactional migration runner.
   Production gate additionally requires a representative synthetic large-blob
   migration timing and rollback-on-timeout check; no unbounded live rewrite.
+
+- Fixed identity-test fixture: the first UUID segment must contain a letter
+  before testing a partial-uppercase variant. All-digit random first segments
+  made that variant identical to the valid canonical ID and caused false red.
+  No production identity logic or acceptance assertion was weakened.
