@@ -49,3 +49,27 @@ Fresh retry on the unchanged implementation passed all 71 tests in three
 files (270.30 seconds, exit 0); server TypeScript also exited 0. Both new
 regression files are registered in the existing image gate. Full release and
 real-provider staging remain the parent task's gates; nothing deployed.
+
+## Stale receipt identity and post-Stop decisions (PER-1049)
+
+Real PostgreSQL with assembled queue/routes reproduced two distinct defects.
+An actual worktree-cutoff skipped receipt retains its saved recovery contract;
+adopting it replaced the incoming newer predecessor with the old one. A
+budget-deferred receipt produced the same wrong-predecessor substitution. These are context corruption, not just conservative outcomes-unknown
+instructions. Match the incoming predecessor and require a saved predecessor
+before adoption; retain mixed-version skipped/coalesced adoption when that
+contract exists. No age cutoff is introduced.
+
+A real Stop followed by approval resolution retained the approval in the
+database but omitted approvalId/approvalStatus from the later fresh user run.
+Save the merged receipt context before the cancelled/cleanup admission guard;
+keep that guard unchanged so recording a decision does not restart work.
+Answered question content is independently rebuilt in executionContinuation
+from durable thread history; missing transient interaction fields alone did
+not prove answer loss. Former-assignee mention did not resurrect old-owner
+execution; the new owner's queued comment remained delivered.
+
+Regression: heartbeat-stale-liveness-recovery.test.ts, registered in the
+existing Dockerfile image gate. Routes, delivery service and PostgreSQL are
+real; provider probe/execute are simulated. Parent owns the separate legacy
+adoption status correction, final image gate and real-provider acceptance.
