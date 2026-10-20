@@ -154,7 +154,7 @@ RUN rm -rf packages/paperclip-runner/runner/target
 # Luma fork gate (PATCHES.md): every carried patch's regression suite and the
 # full workspace typecheck must pass before the production image is assembled.
 FROM build AS luma-patch-tests
-RUN node scripts/check-docker-deps-stage.mjs && node --test scripts/pnpm-resource-budget.test.mjs
+RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && node --test scripts/pnpm-resource-budget.test.mjs
 # BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
 RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
 RUN pnpm check:token-gates

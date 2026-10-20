@@ -67,3 +67,9 @@ packages/paperclip-runner/test-fixtures/pi-acp/**
 !packages/paperclip-runner/src/**/*.test.tsx
 
 packages/grok-acp/bin
+
+# UI typecheck validates feature-map links inside the real image context.
+!packages/paperclip-runner/README.md
+!packages/paperclip-runner/runner/crates/runner-core/tests
+packages/paperclip-runner/runner/crates/runner-core/tests/**
+!packages/paperclip-runner/runner/crates/runner-core/tests/stdio_mcp.rs

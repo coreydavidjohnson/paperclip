@@ -140,3 +140,13 @@ Rule: every package included by recursive workspace typecheck must have its
 manifest present before image dependency installation. Workspace exclusions,
 not category names, define exceptions. Full image/regression acceptance is
 still pending; this entry does not claim a release or deployment.
+
+The next exact committed candidate `ccf31575175dfda83cdeabc8f4129803c4a8381f`
+passed generator/example/server typechecks but then failed UI typecheck:
+Docker context slimming removed the Runner README and stdio MCP Rust test
+referenced by feature maps. Both exist in Git; the actual image reported
+four broken references to these two absent paths. Keep only those required
+paths through narrow dockerignore exceptions and run check-maps in the image
+gate before the expensive workspace check. Upstream master inspected at
+cde944ed7 still had the same missing-manifest and context-slimming omissions.
+Do not bypass structural checks or mark the earlier failed images accepted.
