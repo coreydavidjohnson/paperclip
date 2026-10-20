@@ -54,17 +54,26 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
               when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
                 or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
               then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end)
+              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
+              then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
+                            ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
+              else '' end)
             or (newer.context_snapshot ->> 'issueId' is null and newer.context_snapshot ->> 'taskId' = (case when jsonb_typeof(case
               when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
                 or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
               then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end))
+              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
+              then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
+                            ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
+              else '' end))
             or (newer.context_snapshot ->> 'issueId' is null and newer.context_snapshot ->> 'taskId' is null and (case when jsonb_typeof(case
               when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
                 or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
               then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = '')))`,
+              else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
+              then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
+                            ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
+              else '' end) = '')))`,
       notInArray(agents.status, ["terminated"]),
       inArray(heartbeatRuns.status, ["failed", "timed_out"]),
     ))
