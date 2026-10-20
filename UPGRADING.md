@@ -108,3 +108,14 @@ approval/objective provenance are unchanged. Retire the carry only with a
 released equivalent passing the exactly-once and edited/distinct-ID checks.
 The OmniGenT external adapter must use this same adapter-utils revision, not
 its older npm dependency copy; test the assembled image's buildPrompt too.
+
+## Readiness diagnostics (PER-628)
+
+Carry the reason-coded `/api/health/ready` warning and run
+`node --experimental-vm-modules --test scripts/health-readiness.test.mjs`.
+Keep fixed low-sensitivity codes, one warning per 503, post-probe state checks,
+2000ms fail-closed timeout and the single pending database query. This check
+uses Node's experimental native TypeScript stripping/VM modules, not installed
+application dependencies. Include it in the parent image regression gate and
+ensure the assembled image includes the changed health route; source tests do
+not prove deployment or explain earlier production 503s.

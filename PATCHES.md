@@ -723,6 +723,31 @@ into the current fork image or supplied by a fork migration.
 - Preserve PER-894 no-continuation delivery and dependency locks plus combined admission/UI/payload/cache history.
 - Regression uses real disposable PostgreSQL with malformed/noncanonical/missing/foreign bindings, native precedence, existing status-delivery/recovery suites and 192KiB contexts with 1000 same-company issues. The benchmark disables hash/merge joins transaction-locally to reproduce the observed live nested-loop shape; its timings are not production/API/browser latency claims.
 - Retire the backport when the next complete upstream upgrade includes this commit and passes the private contracts.
+## Reason-coded readiness failures (PER-628)
+
+- Requested private fork repair on production base
+  `683f53c09e17fe3addbc3390a49ae8662086bdf8`: `/api/health/ready` returned
+  unexplained 503s, including swallowed database probe errors. Timing alone
+  does not establish the cause of the observed production failures.
+- Every readiness 503 now emits one warning with `event: readiness_failed`,
+  ordered `reasons` and `stage` (`preflight`, `database_probe`, `post_probe`).
+  Codes: `transport_not_ready`, `controller_draining`, `startup_not_ready`,
+  `auth_not_ready`, `database_missing`, `database_probe_timeout`,
+  `database_probe_error`. Post-probe state flips report the current blockers.
+  No error object/message, query details, headers, credentials or tenant data
+  are logged. Ready responses emit no failure warning.
+- Response status/body, fail-closed 2000ms deadline, one in-flight query and
+  reset/LISTEN transport semantics are unchanged. A timeout is identified by
+  a per-request error identity, never by a driver-controlled message.
+- Dependency-free focused check (Node 24):
+  `node --experimental-vm-modules --test scripts/health-readiness.test.mjs`.
+  Executes the complete real health module with mocked imports; covers each
+  503 path, simultaneous blockers, synchronous/rejected/late database errors,
+  deterministic and real-time deadlines, shared queries and ready recovery.
+- Retire when a released equivalent logs all readiness failure paths and
+  passes these regressions. No new upstream-equivalence claim is made here;
+  this is a narrow diagnostic extension to the existing downstream readiness
+  carry. Production rollout and live reason-log acceptance remain separate.
 
 ## Client-blocking next-slot dispatch (PER-689)
 
