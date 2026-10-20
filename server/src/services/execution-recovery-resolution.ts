@@ -1,3 +1,4 @@
+import { retainedBoardSession, validBoardRetainedSession } from "./board-recovery-policy.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
 import { canonicalExecutionUuid } from "./execution-identity.js";
@@ -178,12 +179,22 @@ export async function markExecutionReconciliation(
         eq(nativeRunFinalizations.runId, decision.runId),
       ),
     );
+  const [sourceRun] = await db.select().from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.companyId,action.companyId),eq(heartbeatRuns.id,decision.runId),
+  )).limit(1);
+  const retainedSessionId = sourceRun?.runtimeMode==='legacy' &&
+    (sourceRun.runnerProfileJson?.adapterDispatch as Record<string,unknown>|undefined)?.adapterType==='omnigent'
+    ? retainedBoardSession(sourceRun.resultJson) : null;
   await db
     .update(issueRecoveryActions)
     .set({
       evidence: {
         ...action.evidence,
         automaticRecovery: undefined,
+        boardRecoveryRetainedSession: retainedSessionId && sourceRun ? {
+          version:1,runId:sourceRun.id,companyId:sourceRun.companyId,agentId:sourceRun.agentId,
+          issueId:action.sourceIssueId,sessionId:retainedSessionId,
+        } : undefined,
         executionReconciliation: {
           ...decision,
           actorId,
@@ -263,7 +274,12 @@ export async function deliverReconciledExecutions(
           recoveryActionId: action.id,
           previousRunId: decision.runId,
           retryOfRunId: decision.runId,
-          forceFreshSession: true,
+          forceFreshSession: !validBoardRetainedSession(action.evidence.boardRecoveryRetainedSession, {
+            runId:decision.runId,companyId:action.companyId,agentId:action.returnOwnerAgentId,issueId:task.id,
+          }),
+          preserveOmnigentIssueSession: validBoardRetainedSession(action.evidence.boardRecoveryRetainedSession, {
+            runId:decision.runId,companyId:action.companyId,agentId:action.returnOwnerAgentId,issueId:task.id,
+          }),
           wakeReason: "issue_recovery_action_restored",
           source: "execution.reconciled",
         },

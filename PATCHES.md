@@ -874,3 +874,31 @@ into the current fork image or supplied by a fork migration.
 ### PER-218 migration release correction
 
 The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
+
+## PER-1120: cluster board recovery using current issue-session evidence
+
+- Upstream checked: pinned v2026.1005.0, v2026.1012.0 and upstream
+  `b11010b0d`. Output-silence watchdogs and saved-dispatch admission probes
+  do not establish current ticket-session liveness or replace board sweeps.
+- A board-only bounded per-issue check finds the newest owned
+  `paperclip.issue_key` session, checks provider status and transcript tail,
+  and persists repeated elapsed idle observations. Busy orphan sessions remain
+  untouched until they finish. Missing/incomplete/foreign evidence fails closed.
+- The scheduler uses native reconciliation for stopped failures and native
+  disposition recovery for successful parked issues. Retiring a stuck observer
+  revokes only its controller lease, never the external provider. Its receipt
+  and unknown-action warning survive. Retained-session continuation is a
+  server-recorded exception to the existing fresh-session default.
+- Three automatic source attempts per ticket in 24 hours, exponential backoff,
+  existing native retry budgets and all Stop/pause/budget/approval/dependency/
+  workspace/goal/review/lifecycle gates remain enforced. Exhaustion leaves a
+  native board-owned recovery notice with a plain-language action.
+- The existing cluster CronJob is the sole scheduled driver. It discovers
+  bounded candidate IDs with read-only indexed SQL, uses native APIs for writes,
+  and logs UTC daily counts. No agent HTTP credentials are embedded.
+- Tests: `server/src/services/board-recovery-policy.test.ts`,
+  `omnigent-issue-session.test.ts`, `board-recovery.test.ts`, plus existing
+  execution reconciliation, observer-retirement and admission regressions.
+- Remove when upstream supplies equivalent label-based session reconciliation,
+  provider-preserving observer retirement, bounded orphan/failure/disposition
+  recovery and durable daily reporting. No vendor or OmniGenT carry is required.
