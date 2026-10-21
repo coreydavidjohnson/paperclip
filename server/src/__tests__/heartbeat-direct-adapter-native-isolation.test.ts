@@ -175,7 +175,9 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
 
       const queued = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
       expect(queued).not.toBeNull();
-      const finished = await waitForRunToFinish(heartbeat, queued!.id);
+      await waitForRunToFinish(heartbeat, queued!.id);
+      await heartbeat.drainActiveRunExecutions();
+      const finished = await heartbeat.getRun(queued!.id);
 
       expect(execute).toHaveBeenCalledOnce();
       expect(finished).toMatchObject({

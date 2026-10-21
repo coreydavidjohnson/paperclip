@@ -25641,6 +25641,7 @@ export function heartbeatService(
               .update(heartbeatRuns)
               .set({
                 ...finalRunPatch,
+                resultJson: preserveQueuedSteeringAcknowledgements(finalRunPatch.resultJson ?? null),
                 finishedAt:
                   persistedRunWrite.run.finishedAt ?? finalRunPatch.finishedAt,
                 updatedAt: new Date(),
@@ -25838,10 +25839,10 @@ export function heartbeatService(
             await db
               .update(heartbeatRuns)
               .set({
-                resultJson: {
+                resultJson: preserveQueuedSteeringAcknowledgements({
                   ...persistedResultJson,
                   presentationDecision,
-                },
+                }),
                 updatedAt: new Date(),
               })
               .where(eq(heartbeatRuns.id, livenessRun.id));
