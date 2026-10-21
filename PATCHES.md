@@ -997,3 +997,9 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - Native verified reconciliation retires only historical same-run/same-owner legacy duplicates. One action owns continuation; other causes, workspaces and runs stay held. Duplicate evidence and activity remain inspectable.
 - A wake deferred by the exact execution hold no longer prevents read-only newest-label inspection. Busy provider work stays held. Existing execution-blocker projection continues to show resolved no-replay holds.
 - Checks: `board-recovery.test.ts` and `issue-recovery-actions.test.ts` cover repeated passes, effective hold projection, duplicate delivery ownership, busy providers and unrelated hold preservation.
+
+### PER-1120 — Review recovery respects the live issue fence
+
+- Exact-source single-test comparison reproduced the old reviewer-retry failure on both the candidate and production-pinned e3410f6a baseline. Diagnostics showed the first reviewer run stayed queued, with no execution or recovery hold: the other agent's running issue run correctly blocked admission.
+- The fixture now checks that no reviewer dispatch occurs while that other run is active, then finishes the competing fixture run and verifies the pending review receives its recovery successor. The issue-wide admission fence is unchanged; the old expectation of overlapping dispatch is not restored.
+- Check: `heartbeat-process-recovery.test.ts`, pending execution-review participant recovery after the active issue run finishes. No production state or provider work is changed by this test repair.

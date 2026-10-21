@@ -9276,7 +9276,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     ).toBe(true);
   });
 
-  it("retries a pending execution-review participant when another agent has an active issue run", async () => {
+  it("waits for the active issue run before retrying a pending execution-review participant", async () => {
     const { companyId, agentId, issueId, runId } =
       await seedInReviewParticipantRunFixture();
     const otherAgentId = randomUUID();
@@ -9309,6 +9309,23 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
 
     const heartbeat = heartbeatService(db);
+    const dispatchCount = mockAdapterExecute.mock.calls.length;
+    await heartbeat.resumeQueuedRuns();
+    // The issue-wide admission fence applies to reviewers too. A queued
+    // reviewer is not a stranded execution while another run owns live work.
+    const waitingRun = await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, runId)).then((rows) => rows[0]);
+    expect(waitingRun?.status).toBe("queued");
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(dispatchCount);
+    const activeOwner = await db.select().from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, otherRunId)).then((rows) => rows[0]);
+    expect(activeOwner?.status).toBe("running");
+
+    // Once the competing fixture run has finished, normal admission can
+    // execute the reviewer and recover its still-pending review stage.
+    const finishedAt = new Date();
+    await db.update(heartbeatRuns).set({status: "succeeded", finishedAt, updatedAt: finishedAt})
+      .where(eq(heartbeatRuns.id, otherRunId));
     await heartbeat.resumeQueuedRuns();
     const reviewRecoveryRun = await waitForValue(async () => {
       const runs = await db
