@@ -1104,3 +1104,14 @@ This reduces hot reads, not retained disk size. See doc/plans/2026-10-22-run-con
 for upstream findings, the nested-envelope mismatch and the no-pruning boundary.
 Merged exact-image, scale and release checks are pending; older image success
 is not qualification of this integration. Recovery full-context hash cost stays open.
+
+### PER-218 build qualification: reuse the embedded-Postgres budget
+
+The image gate reported 48 passed files and two beforeAll failures: dashboard
+and company-skill detail still overrode setup with 20 seconds. A same-image
+focused diagnostic completed both suites (7 tests); company-skill database
+startup took 22.03 seconds, dashboard startup 12.78 seconds. These two hooks
+now use the existing upstream EMBEDDED_POSTGRES_TEST_TIMEOUT_MS (90 seconds),
+as the dependency-scheduling and redaction suites already do. Assertions,
+production timeouts and the required full image gate are unchanged. Remove
+this test-only carry when the tracked upstream suites use their native budget.
