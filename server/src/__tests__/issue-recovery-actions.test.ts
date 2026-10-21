@@ -2543,9 +2543,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const annotated = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
     const source = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
     const annotatedLogs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
-    expect(annotated[0].resolutionNote).toBe(body.resolutionNote + "
-
-Board observation after hand-back.");
+    expect(annotated[0].resolutionNote).toBe(body.resolutionNote + String.fromCharCode(10, 10) + "Board observation after hand-back.");
     expect(annotatedLogs.filter(entry => entry.action === "issue.recovery_action_note_added")).toHaveLength(1);
     const readable = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: action.id }).expect(200);
     expect(readable.body.actions[0].resolutionNote).toBe(annotated[0].resolutionNote);
