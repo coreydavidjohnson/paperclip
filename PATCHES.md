@@ -1073,8 +1073,8 @@ compiler pin, timeout relaxation or semantic gate removal.
   At 04:53–04:55 UTC on 2026-10-21, 30 sequential app-local calls measured PER-99
   history p50/p95 664/2058ms, company history 489/1145ms and Attention 890/1429ms.
   These are an ambient baseline, not browser/phone acceptance.
-- **Upstream choice:** Inspected `upstream/master` 65f59e339a9fb6e0635bcbd8c36791bd610326a6
-  and the deployed release base v2026.1005.0. No equivalent compact context table
+- **Upstream choice:** Rechecked `upstream/master` 341b622604b639b056fc58b10e2dd3312d40385c
+  and latest tag v2026.1012.0 on 2026-10-22. No equivalent compact context table
   exists there. This is a private minimal carry, not a large release rebase or an
   upstream proposal. Keep the indexed context/activity membership predicates.
 - **Change:** Migration 0294 creates a rebuildable, company-tagged sidecar and a
@@ -1097,3 +1097,10 @@ compiler pin, timeout relaxation or semantic gate removal.
 - **Retire:** Remove the trigger, sidecar and homelab backfill together after a
   released upstream equivalent preserves these contracts and passes comparable
   API/query evidence. Keep retained snapshots and recovery/wake carries intact.
+
+PER-218 22 October renewal: integrated the compact read projection on the current
+12e3abaf recovery/read-receipt base; retained full wake and continuation snapshots.
+This reduces hot reads, not retained disk size. See doc/plans/2026-10-22-run-context-read-path.md
+for upstream findings, the nested-envelope mismatch and the no-pruning boundary.
+Merged exact-image, scale and release checks are pending; older image success
+is not qualification of this integration. Recovery full-context hash cost stays open.
