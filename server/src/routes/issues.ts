@@ -15287,7 +15287,7 @@ export function issueRoutes(
   // External runtimes cannot use native-session steering. Deliver a comment
   // snapshot and its queue receipt together; a plain GET remains read-only.
   router.post("/issues/:id/comments/delivery", validate(z.object({}).strict()), async (req, res) => {
-    if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.runId) {
+    if (req.actor.type !== "agent" || !req.actor.agentId || !z.string().uuid().safeParse(req.actor.runId).success) {
       throw forbidden("Comment delivery requires an authenticated agent run");
     }
     const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found");
@@ -15317,36 +15317,43 @@ export function issueRoutes(
       // and username/secret redaction; never expose raw comment rows here.
       const comments = await svc.listComments(current.id);
       const deliveredCommentIds: string[] = [];
-      const queueState = await findQueuedCommentWake(tx, current);
-      if (queueState?.state === "deferred" && !queuedInteractionId(queueState.wake.payload)) {
+      const acknowledgements = { ...readObject(runResult.queuedSteeringAcknowledgements) };
+      const wakes = await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, current.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        sql`${agentWakeupRequests.payload}->>'issueId' = ${current.id}`,
+      )).for("update");
+      for (const wake of wakes) {
+        if (queuedInteractionId(wake.payload) || !queuedCommentIdsFromWakePayload(wake.payload).length) continue;
         const locked = await lockQueuedCommentState({ tx, issue: current, actor,
-          queueId: queueState.wake.id, targetRunId: run.id });
+          queueId: wake.id, targetRunId: run.id });
+        const queueDeliveredIds: string[] = [];
         const returned = new Map(comments.map(comment => [comment.id, comment]));
         for (const entry of locked.queue.entries) {
           const comment = returned.get(entry.comment.id);
           if (comment && !comment.deletedAt &&
               new Date(comment.updatedAt).getTime() === new Date(entry.comment.updatedAt).getTime()) {
-            deliveredCommentIds.push(comment.id);
+            queueDeliveredIds.push(comment.id);
           }
         }
-        if (deliveredCommentIds.length) {
-          const delivered = new Set(deliveredCommentIds);
+        if (queueDeliveredIds.length) {
+          deliveredCommentIds.push(...queueDeliveredIds);
+          const delivered = new Set(queueDeliveredIds);
           const remaining = locked.queue.entries.map(entry => entry.comment.id).filter(id => !delivered.has(id));
           const now = new Date();
           await tx.update(agentWakeupRequests).set(remaining.length
             ? { payload: withQueuedCommentIdsInWakePayload(locked.wake.payload, remaining), updatedAt: now }
             : { status: "cancelled", finishedAt: now, updatedAt: now }
           ).where(eq(agentWakeupRequests.id, locked.wake.id));
-          const acknowledgements = { ...readObject(runResult.queuedSteeringAcknowledgements) };
-          for (const id of deliveredCommentIds) acknowledgements[id] = {
+          for (const id of queueDeliveredIds) acknowledgements[id] = {
             status: "acknowledged", queueId: locked.wake.id, turnId: null,
             delivery: "issue_comments_read", acknowledgedAt: now.toISOString(),
           };
-          await tx.update(heartbeatRuns).set({ resultJson: {
-            ...runResult, queuedSteeringAcknowledgements: acknowledgements,
-          }, updatedAt: now }).where(eq(heartbeatRuns.id, run.id));
         }
       }
+      if (deliveredCommentIds.length) await tx.update(heartbeatRuns).set({ resultJson: {
+        ...runResult, queuedSteeringAcknowledgements: acknowledgements,
+      }, updatedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
       return { comments, deliveredCommentIds };
     });
     if (result.deliveredCommentIds.length) await logActivity(db, {
