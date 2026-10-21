@@ -14,11 +14,20 @@ export function issueRunIdsCondition(companyId: string, issueId: string) {
   )`;
 }
 
-// One detoast/extraction pass instead of eight independent ->> projections.
+// The trigger-maintained sidecar avoids reading retained prompt/transcript blobs.
+// During the bounded historical backfill, absent rows retain exact old behavior.
+export const compactRunContext = sql`coalesce(
+  (select c.context from heartbeat_run_list_context c
+    where c.run_id = ${heartbeatRuns.id} and c.company_id = ${heartbeatRuns.companyId}),
+  case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+    then ${heartbeatRuns.contextSnapshot} else '{}'::jsonb end
+)`;
+
+// Keep the text coercion and null behavior of the original list projection.
+
 // Non-object JSON previously produced null fields; retain that behavior.
 export const runListContextJoin = sql`lateral jsonb_to_record(
-  case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
-    then ${heartbeatRuns.contextSnapshot} end
+  ${compactRunContext}
 ) as run_list_context(
   "issueId" text, "taskId" text, "taskKey" text, "commentId" text,
   "wakeCommentId" text, "wakeReason" text, "wakeSource" text, "wakeTriggerDetail" text

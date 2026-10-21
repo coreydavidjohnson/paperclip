@@ -1,5 +1,5 @@
 import { createCompletionTiming } from "./completion-timing.js";
-import { runListContextColumns, runListContextJoin } from "./run-history-query.js";
+import { compactRunContext, runListContextColumns, runListContextJoin } from "./run-history-query.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
 import { CHAT_COMPLETION_WAKE_REASON, prepareChatCompletionTurn, chatCompletionInstruction, isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
@@ -3548,10 +3548,10 @@ const heartbeatRunIssueSummaryColumns = {
   triggerDetail: heartbeatRuns.triggerDetail,
   contextCommentId: sql<
     string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'commentId'`.as("contextCommentId"),
+  >`${compactRunContext} ->> 'commentId'`.as("contextCommentId"),
   contextWakeCommentId: sql<
     string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`.as(
+  >`${compactRunContext} ->> 'wakeCommentId'`.as(
     "contextWakeCommentId",
   ),
   startedAt: heartbeatRuns.startedAt,
@@ -3571,7 +3571,7 @@ const heartbeatRunIssueSummaryColumns = {
   lastOutputBytes: heartbeatRuns.lastOutputBytes,
   issueId: sql<
     string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'issueId'`.as("issueId"),
+  >`${compactRunContext} ->> 'issueId'`.as("issueId"),
 } as const;
 
 function appendExcerpt(prev: string, chunk: string) {

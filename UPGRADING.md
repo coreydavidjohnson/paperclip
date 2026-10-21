@@ -119,3 +119,21 @@ uses Node's experimental native TypeScript stripping/VM modules, not installed
 application dependencies. Include it in the parent image regression gate and
 ensure the assembled image includes the changed health route; source tests do
 not prove deployment or explain earlier production 503s.
+
+## Compact run-list context delivery boundary (PER-218)
+
+The current homelab Fork.Dockerfile now rebuilds the full server and DB source,
+not just the historical three-file overlay described above. Migration 0294 must
+ship in **both** `packages/db/src/migrations` and `packages/db/dist/migrations`,
+with the matching journal. The build explicitly copies SQL/journal after DB
+compilation; `tsc` alone does not copy migrations. Its mandatory synthetic scale
+gate applies the exact DDL under 10s statement/2s lock limits, then separately
+backfills 100-row transactions. The source heap and TOAST filenodes must remain
+unchanged; there is no generated stored column or startup backfill.
+
+The sidecar is derived read data, not authorization, execution or ownership
+state. Keep snapshot fallbacks during rolling/partial backfill, all existing
+redaction/tenant rules and stored-expression index searches. The PostSync job
+uses 100ms lock timeout (below normal deadlock detection), bounded retries on the
+same PK cursor, and verifies no missing projections. Backfill never overwrites
+trigger data. Preserve the source snapshots and allowlisted JSON types.

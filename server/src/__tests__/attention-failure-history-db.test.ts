@@ -53,6 +53,13 @@ describe("bounded failure history", () => {
   expect(rows.map(r=>r.id).sort()).toEqual(expected.sort());
   expect(rows.every(r=>r.companyId===companyId)).toBe(true);
   expect(new Set(rows.map(r=>r.id)).size).toBe(rows.length);
+  // Mid-backfill and wholly unbackfilled states must retain every full row.
+  await db.execute(sql`delete from heartbeat_run_list_context where run_id in
+    (select id from heartbeat_runs where company_id=${companyId} order by id limit 7)`);
+  expect(await listAttentionExhaustedRuns(db,companyId)).toEqual(rows);
+  await db.execute(sql`delete from heartbeat_run_list_context where company_id=${companyId}`);
+  expect(await listAttentionExhaustedRuns(db,companyId)).toEqual(rows);
+
  });
 
  it("preserves millisecond Date ties for microsecond-newer rows",async()=>{

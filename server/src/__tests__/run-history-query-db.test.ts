@@ -13,7 +13,7 @@ describe("run history database contracts", () => {
   it("matches the old full text projection for unusual JSON and excludes non-allowlisted data", async () => {
     const values = [null, [], "text", 42, true, {}, { issueId: "i", taskId: 123, taskKey: false, commentId: { z: 2, a: 1 }, wakeCommentId: [1, "x"], wakeReason: null, wakeSource: "コメント", wakeTriggerDetail: "x", secret: "never-return" }];
     for (const value of values) {
-      const result = await db.execute(sql`with heartbeat_runs as (select ${JSON.stringify(value)}::jsonb as context_snapshot)
+      const result = await db.execute(sql`with heartbeat_runs as (select ${randomUUID()}::uuid as id, ${randomUUID()}::uuid as company_id, ${JSON.stringify(value)}::jsonb as context_snapshot)
         select context_snapshot ->> 'issueId' as old_issue,
           context_snapshot ->> 'taskId' as old_task,
           context_snapshot ->> 'taskKey' as old_key,

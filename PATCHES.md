@@ -1066,3 +1066,34 @@ CLI because TypeScript 7 does not expose the old in-process compiler API.
 It compiles the actual two callback blocks and also requires the original
 mutable nullable-handle variant to fail with TS2345. No product behavior,
 compiler pin, timeout relaxation or semantic gate removal.
+## PER-218: compact run-list context (pending release)
+
+- **Why:** Company/task history, execution summaries and failed-run Attention
+  projections repeatedly de-TOAST retained context snapshots to read a few keys.
+  At 04:53–04:55 UTC on 2026-10-21, 30 sequential app-local calls measured PER-99
+  history p50/p95 664/2058ms, company history 489/1145ms and Attention 890/1429ms.
+  These are an ambient baseline, not browser/phone acceptance.
+- **Upstream choice:** Inspected `upstream/master` 65f59e339a9fb6e0635bcbd8c36791bd610326a6
+  and the deployed release base v2026.1005.0. No equivalent compact context table
+  exists there. This is a private minimal carry, not a large release rebase or an
+  upstream proposal. Keep the indexed context/activity membership predicates.
+- **Change:** Migration 0294 creates a rebuildable, company-tagged sidecar and a
+  transactional source trigger. It copies only eleven JSON keys, preserving raw
+  types, missing values and JSON null. History/Attention/execution projections
+  prefer it and fall back to the authoritative snapshot until a sidecar exists.
+  The source run table and retained snapshots are not rewritten or deleted.
+  Admission/ownership writes never consult this projection.
+- **Backfill:** `scripts/backfill-run-list-context.sql` inserts 100 rows per PK
+  keyset range, `ON CONFLICT DO NOTHING`; a concurrent trigger always wins.
+  Homelab's PostSync job executes separate transactions with 100ms lock timeout,
+  bounded same-cursor retries/backoff and a zero-missing readback. The only
+  sidecar FK is its cascading run reference; no new company-row lock edge.
+- **Checks:** Baseline-failing table and query-shape checks, native PostgreSQL
+  JSON/coercion/tenant/rollback/partial-backfill/cascade/lock-wait regressions.
+  All changed context consumers are SELECT-only, not RETURNING/writable CTEs.
+  Full packaged image tests and the >424MiB synthetic migration/backfill and
+  emitted-query buffer comparison are mandatory before release. Local activity
+  tests cannot load the cached Photon dependency; do not label that gate green.
+- **Retire:** Remove the trigger, sidecar and homelab backfill together after a
+  released upstream equivalent preserves these contracts and passes comparable
+  API/query evidence. Keep retained snapshots and recovery/wake carries intact.

@@ -15,6 +15,10 @@ describe("run history query work", () => {
   it("extracts the allowlisted context fields once and handles non-object context", () => {
     const q = dialect.sqlToQuery(runListContextJoin);
     expect(q.sql).toContain("lateral jsonb_to_record");
+    expect(q.sql).toContain("heartbeat_run_list_context");
+    expect(q.sql).toContain('c.run_id = "heartbeat_runs"."id"');
+    expect(q.sql).toContain('c.company_id = "heartbeat_runs"."company_id"');
+    expect(q.sql.indexOf("select c.context")).toBeLessThan(q.sql.indexOf("context_snapshot"));
     expect(q.sql).toContain("jsonb_typeof");
     expect(q.sql).toContain("'object'");
     expect(Object.keys(runListContextColumns)).toEqual(["contextIssueId", "contextTaskId", "contextTaskKey", "contextCommentId", "contextWakeCommentId", "contextWakeReason", "contextWakeSource", "contextWakeTriggerDetail"]);

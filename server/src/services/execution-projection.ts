@@ -1,3 +1,4 @@
+import { compactRunContext } from "./run-history-query.js";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   heartbeatRuns,
@@ -28,9 +29,9 @@ const executionRunColumns = {
   startedAt: heartbeatRuns.startedAt,
   status: heartbeatRuns.status,
   contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
-    'issueId', ${heartbeatRuns.contextSnapshot}->'issueId',
-    'failureRetriesBeforeAiConnectionWait', ${heartbeatRuns.contextSnapshot}->'failureRetriesBeforeAiConnectionWait',
-    'failureRetriesBeforeWorkspaceWait', ${heartbeatRuns.contextSnapshot}->'failureRetriesBeforeWorkspaceWait')`,
+    'issueId', ${compactRunContext}->'issueId',
+    'failureRetriesBeforeAiConnectionWait', ${compactRunContext}->'failureRetriesBeforeAiConnectionWait',
+    'failureRetriesBeforeWorkspaceWait', ${compactRunContext}->'failureRetriesBeforeWorkspaceWait')`,
 };
 type Run = Pick<typeof heartbeatRuns.$inferSelect, keyof typeof executionRunColumns>;
 type Coordinator = typeof nativeRunFinalizations.$inferSelect;
