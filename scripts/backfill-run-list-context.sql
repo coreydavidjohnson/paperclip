@@ -1,13 +1,17 @@
--- Execute one transaction per call. The primary-key cursor never rescans rows
--- already visited. Concurrent source updates win through the trigger; a stale
--- backfill INSERT must not overwrite an existing projection.
+-- Execute one transaction per call. Advance on id-only PK batches, and read
+-- snapshots only for missing projections. Concurrent trigger writes win;
+-- a stale backfill INSERT must never overwrite an existing projection.
 WITH batch AS MATERIALIZED (
-  SELECT id, company_id, context_snapshot FROM heartbeat_runs
+  SELECT id FROM heartbeat_runs
   WHERE nullif(:'cursor', '')::uuid IS NULL OR id > nullif(:'cursor', '')::uuid
   ORDER BY id LIMIT 100
+), missing AS MATERIALIZED (
+  SELECT h.id, h.company_id, h.context_snapshot
+  FROM batch b JOIN heartbeat_runs h ON h.id = b.id
+  WHERE NOT EXISTS (SELECT 1 FROM heartbeat_run_list_context c WHERE c.run_id = h.id)
 ), copied AS (
   INSERT INTO heartbeat_run_list_context (run_id, company_id, context)
-  SELECT id, company_id, public.project_heartbeat_run_list_context(context_snapshot) FROM batch
+  SELECT id, company_id, public.project_heartbeat_run_list_context(context_snapshot) FROM missing
   ON CONFLICT (run_id) DO NOTHING
   RETURNING run_id
 )

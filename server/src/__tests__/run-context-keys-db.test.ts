@@ -84,6 +84,28 @@ it("backfills with the PK cursor, without overwriting a newer trigger result", a
  expect((await db.execute(sql`select context->>'issueId' as issue from heartbeat_run_list_context where run_id=${ids[0]}`))[0].issue).toBe("newer");
  expect((await db.execute(sql`select count(*)::int as n from heartbeat_run_list_context where context ? 'prompt'`))[0].n).toBe(0);
 });
+it("does not reproject retained snapshots on a repeated backfill", async () => {
+ const companyId=randomUUID(),agentId=randomUUID();
+ await db.insert(companies).values({id:companyId,name:"Repeat",issuePrefix:"R"+companyId.slice(0,7)});
+ await db.insert(agents).values({id:agentId,companyId,name:"Worker",role:"engineer"});
+ await db.insert(heartbeatRuns).values({companyId,agentId,contextSnapshot:{issueId:"already-copied",prompt:"x".repeat(100000)}});
+ const batch=fs.readFileSync(new URL("../../../scripts/backfill-run-list-context.sql",import.meta.url),"utf8");
+ // A repeat pass must not invoke the projection (and detoast a retained blob)
+ // for rows already copied. Roll back the deliberately rejecting test function.
+ await expect(db.$client.begin(async tx=>{
+  await tx.unsafe(`create or replace function public.project_heartbeat_run_list_context(snapshot jsonb)
+    returns jsonb language plpgsql immutable parallel safe as $$
+    begin raise exception 'existing snapshot reprojected'; end; $$`);
+  let cursor="";
+  while(true) {
+   const rows=await tx.unsafe(batch.replaceAll(":'cursor'", `'${cursor}'`));
+   const next=String(Object.values(rows[0])[0]);
+   if(!next)break;
+   expect(next>cursor).toBe(true);cursor=next;
+  }
+  throw new Error("rollback repeat-pass test");
+ })).rejects.toThrow("rollback repeat-pass test");
+});
 it.skipIf(process.env.PAPERCLIP_PROJECTION_SCALE !== "1")("installs without a production-sized heap/TOAST rewrite and compares complete context projections", async () => {
  const companyId=randomUUID(),agentId=randomUUID();
  await db.insert(companies).values({id:companyId,name:"Synthetic scale",issuePrefix:"S"+companyId.slice(0,7)});
