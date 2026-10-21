@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, agentWakeupRequests, activityLog, companies, createDb, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { agents, agentWakeupRequests, activityLog, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
 import { createChildIssueSchema } from "@paperclipai/shared";
 import { issueService } from "../services/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -11,7 +11,7 @@ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.j
 describe("legacy continuation persisted authority", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
-  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, 20_000);
+  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await db?.$client.end({ timeout: 0 }); await temporary?.cleanup(); });
   async function fixture(context: Record<string, unknown> = {}, continuationAttempt = 0) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
