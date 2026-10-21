@@ -4,7 +4,7 @@ import { beforeAll,afterAll,describe,it,expect } from 'vitest';
 import { createDb, companies,agents,issues,heartbeatRuns,agentWakeupRequests,issueThreadInteractions,issueRelations,issueRecoveryActions } from '@paperclipai/db';
 import { startEmbeddedPostgresTestDatabase,getEmbeddedPostgresTestSupport } from '../__tests__/helpers/embedded-postgres.js';
 import { checkBoardRecovery, type BoardRecoveryDeps } from './board-recovery.js';
-import { isRetiredOmnigentObserver } from './legacy-execution-recovery.js';
+import { terminalizeLegacyExecution, isRetiredOmnigentObserver } from './legacy-execution-recovery.js';
 const support=await getEmbeddedPostgresTestSupport();
 (support.supported?describe:describe.skip)('native board recovery fences',()=>{
  let temporary:Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>,db:ReturnType<typeof createDb>;
@@ -33,6 +33,18 @@ const support=await getEmbeddedPostgresTestSupport();
   for(const elapsed of [0,300000,600000]) results.push(await checkBoardRecovery(db,s.issueId,{...s.deps,now:s.now+elapsed}));
   return results;
  }
+ it.each(['active','resolved'])('keeps one no-replay hold per run across repeated watchdog passes (%s)',async status=>{
+  const s=await seed('failed');
+  const [action]=await db.insert(issueRecoveryActions).values({companyId:s.companyId,sourceIssueId:s.issueId,
+   kind:'active_run_watchdog',status,ownerType:'board',returnOwnerAgentId:s.agentId,
+   cause:'legacy_execution_requires_reconciliation',fingerprint:`legacy-execution:${s.id}`,attemptCount:1,
+   evidence:{runId:s.id,...(status==='resolved'?{automaticRecovery:{replay:'blocked',actionOutcome:'unknown'}}:{})},
+   nextAction:'Verify the stopped provider and outcomes before continuing.'}).returning();
+  const [run]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,s.id));
+  for(let i=0;i<3;i++) await terminalizeLegacyExecution({db,run,status:'failed'});
+  const actions=await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId,s.issueId));
+  expect(actions).toHaveLength(1);expect(actions[0]).toEqual(action);
+ });
  it('never retires a silent run while its newest ticket session is busy',async()=>{
   const s=await seed();s.busy(true);await idleForTenMinutes(s);
   expect(s.counts()).toEqual({wakes:0,releases:0});

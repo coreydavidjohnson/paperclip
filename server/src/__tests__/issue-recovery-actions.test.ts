@@ -1809,6 +1809,38 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });
 
+  it("projects a resolved no-replay hold and reconciles same-run duplicates with one delivery owner", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId=randomUUID();
+    await seedHeartbeatRun({companyId,agentId:coderId,runId,issueId:sourceIssueId,status:'failed'});
+    await db.update(issues).set({status:'todo'}).where(eq(issues.id,sourceIssueId));
+    const actions=[];
+    for(let i=0;i<3;i++) {
+      const [action]=await db.insert(issueRecoveryActions).values({companyId,sourceIssueId,kind:'active_run_watchdog',
+        status:'resolved',outcome:'blocked',ownerType:'board',returnOwnerAgentId:coderId,
+        cause:'legacy_execution_requires_reconciliation',fingerprint:`old-watchdog-pass:${i}`,
+        evidence:{runId,automaticRecovery:{replay:'blocked',actionOutcome:'unknown'}},
+        nextAction:'Verify the stopped provider and outcomes before continuing.'}).returning();
+      actions.push(action!);
+    }
+    const app=createApp();
+    const before=await request(app).get(`/api/issues/${sourceIssueId}`).expect(200);
+    expect(before.body.activeRecoveryAction).toBeNull();
+    expect(before.body.executionBlocker).toMatchObject({runId,cause:'legacy_execution_requires_reconciliation'});
+    const body={actionId:actions[0].id,outcome:'restored',sourceIssueStatus:'todo',
+      executionReconciliation:{runId,providerStopped:true,actionOutcome:'mixed',
+        outcomeEvidence:'The provider is stopped. Retained work must be checked before any earlier mutation is repeated.'}};
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect((await request(app).get(`/api/issues/${sourceIssueId}`).expect(200)).body.executionBlocker).toBeNull();
+    const saved=await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId,sourceIssueId));
+    expect(saved).toHaveLength(3);
+    expect(saved.filter(a=>a.evidence.continuationDelivery==='pending')).toHaveLength(1);
+    for(const action of saved) {
+      expect(action.evidence.automaticRecovery?.replay).not.toBe('blocked');
+      expect(action.evidence.executionReconciliation).toMatchObject({runId,actionOutcome:'mixed'});
+    }
+  });
+
   it("reconciles a settled execution hold while preserving dependencies and approvals without replay", async () => {
     const { companyId, coderId, managerId, sourceIssueId, prefix } = await seedCompany();
     const runId = randomUUID();
