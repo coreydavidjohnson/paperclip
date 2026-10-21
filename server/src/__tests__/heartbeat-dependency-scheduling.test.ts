@@ -9,6 +9,7 @@ import {
   companySkills,
   companies,
   createDb,
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   documentRevisions,
   documents,
   environmentLeases,
@@ -98,28 +99,12 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     db = createDb(tempDb.connectionString);
     heartbeat = heartbeatService(db);
     await ensureIssueRelationsTable(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
-    let idlePolls = 0;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const runs = await db
-        .select({ status: heartbeatRuns.status })
-        .from(heartbeatRuns);
-      const hasActiveRun = runs.some((run) => run.status === "queued" || run.status === "running");
-      if (!hasActiveRun) {
-        idlePolls += 1;
-        if (idlePolls >= 3) break;
-      } else {
-        idlePolls = 0;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    const runIds = await db
-      .select({ id: heartbeatRuns.id })
-      .from(heartbeatRuns)
-      .then((runs) => runs.map((run) => run.id));
-    await Promise.all(runIds.map((runId) => heartbeat.waitForRunExecutionDrain(runId)));
+    // Terminal status and the per-run live marker precede trailing event writes.
+    // Await wake prologues and complete executor promises before deleting fixtures.
+    await heartbeat.drainActiveRunExecutions();
     mockAdapterExecute.mockReset();
     mockAdapterExecute.mockImplementation(async () => ({
       exitCode: 0,
@@ -167,6 +152,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
   });
 
   afterAll(async () => {
+    await heartbeat?.drainActiveRunExecutions();
     await tempDb?.cleanup();
   });
 

@@ -874,6 +874,13 @@ into the current fork image or supplied by a fork migration.
 ### PER-218 migration release correction
 
 The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
+
+
+## Restored-wake and routing-parent delivery on current production fork (PER-436)
+
+Reapply only the missing settled recovery history/exact actionId lookup, idempotent late disposition annotation, and typed routing/coordination child contracts from retained c9aab87c0 onto 5e83e5491. Preserve newer execution-hold reconciliation, dependency locking, admission fencing, list query and observer changes. Late annotations apply only to settled disposition actions; other kinds retain their existing idempotent resolution behavior. Original resolution outcome and timestamps remain unchanged. Ordinary blocked tasks remain terminal to the legacy continuation classifier; only an explicitly typed routing-child hand-back is evaluated as productive continuation, with every real wait, approval, budget and owner gate retained.
+
+Regression evidence: current baseline failed both settled history tests and five typed routing-child checks. Helper action_id failed validation before restoration. Full recovery/legacy and helper suites must pass before image publication. Homelab build/typecheck contexts include shared validator source so childPurpose is not silently stripped by a stale dependency-image validator. Retire this carry when equivalent upstream contracts are available.
 ## Assignment wake comment carrier (PER-1092)
 
 - Why: assignment-only markdown printed comment headings while omitting their
@@ -974,3 +981,13 @@ Native service coverage added during delivery: real schema/comments/log-store te
   acknowledgement/steering API that passes these contracts.
 
 PER-1124 delivery receipts are retained atomically across legacy run finalization; only the server-owned acknowledgement key is preserved, not arbitrary stale adapter metadata. The direct-adapter isolation regression injects a receipt while execution is live and checks it after success.
+## PER-436: await fixture lifetime before teardown
+
+- Test-only repair after exact combined-image qualification exposed trailing event
+  writes racing dependency fixture deletion and contended embedded DB startup.
+- Reuse the existing complete executor/wakeup drain before teardown, not the
+  earlier terminal status or per-run live marker. Reuse the existing bounded
+  embedded-Postgres startup/migration cost-class budget for both fixtures.
+- Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
+- No production behavior changes. Exact native full-image gate remains required.
+- Removal: upstream fixtures use the same complete lifetime and startup budget.

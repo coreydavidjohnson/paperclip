@@ -8997,10 +8997,23 @@ export function issueRoutes(
       trigger: "read_projection",
       actor: getActorInfo(req),
     });
-    res.json({
-      active,
-      actions: active ? [active] : [],
-    });
+    const actionId = req.query.actionId;
+    if (actionId !== undefined && (typeof actionId !== "string" || !isUuidLike(actionId))) {
+      throw badRequest("actionId must be a UUID");
+    }
+    // A restored wake refers to an already settled action. Keep active semantics
+    // unchanged, but expose bounded history or the exact source-scoped record.
+    const rows = await db.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.companyId, issue.companyId),
+      eq(issueRecoveryActions.sourceIssueId, issue.id),
+      ...(actionId ? [eq(issueRecoveryActions.id, actionId)] : []),
+    )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(actionId ? 1 : 51);
+    if (actionId && rows.length === 0) throw notFound("Recovery action not found");
+    const history = rows.map(issueRecoveryActionReadModel);
+    const actions = !actionId && active
+      ? [active, ...history.filter(action => action.id !== active.id)].slice(0, 50)
+      : history.slice(0, 50);
+    res.json({ active, actions, hasMore: rows.length > 50 });
   });
 
   router.post("/issues/:id/recovery-actions/retry-workspace-export", validate(retryWorkspaceExportSchema), async (req, res) => {
@@ -9077,6 +9090,10 @@ export function issueRoutes(
 
       const actor = getActorInfo(req);
       const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
+      // Identity is over the exact whole note, never its redacted audit presentation.
+      const resolutionNoteDigest = resolutionNote
+        ? createHash("sha256").update(resolutionNote).digest("hex")
+        : null;
       const postCommitActivityPublications: ActivityPublication[] = [];
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const result = await db.transaction(async (tx) => {
@@ -9142,6 +9159,44 @@ export function issueRoutes(
                 .returning();
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
+              if (settled.kind === "deliberate_wait_without_target" && resolutionNote) {
+                // Whole-note audit identity survives later annotations and paragraph
+                // boundaries. The issue lock serializes this lookup with the append.
+                assertBoard(req);
+                const [recordedNote] = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
+                  eq(activityLog.companyId, lockedIssue.companyId),
+                  eq(activityLog.entityType, "issue"),
+                  eq(activityLog.entityId, lockedIssue.id),
+                  inArray(activityLog.action, ["issue.recovery_action_resolved", "issue.recovery_action_note_added"]),
+                  eq(sql`${activityLog.details}->>'recoveryActionId'`, settled.id),
+                  eq(sql`${activityLog.details}->>'resolutionNoteDigest'`, resolutionNoteDigest),
+                )).limit(1);
+                if (settled.resolutionNote === resolutionNote || recordedNote) {
+                  return { issue: lockedIssue, recoveryAction: settled, replayed: true };
+                }
+                // Late disposition evidence is annotation, not another resolution:
+                // retain the original outcome, timestamps and note; never replay.
+                if (activeRecoveryAction || sourceIssueStatus !== lockedIssue.status ||
+                    settled.status !== "resolved" || settled.kind !== "deliberate_wait_without_target") {
+                  throw conflict("Late recovery notes require the current source disposition, a settled disposition action and no newer active recovery.");
+                }
+                const note = settled.resolutionNote
+                  ? settled.resolutionNote + String.fromCharCode(10, 10) + resolutionNote
+                  : resolutionNote;
+                if (note.length > 12000) throw unprocessable("Recovery resolution notes exceed the retained note limit");
+                const [annotated] = await tx.update(issueRecoveryActions).set({ resolutionNote: note })
+                  .where(and(eq(issueRecoveryActions.id, settled.id), eq(issueRecoveryActions.companyId, lockedIssue.companyId),
+                    eq(issueRecoveryActions.sourceIssueId, lockedIssue.id), eq(issueRecoveryActions.status, "resolved")))
+                  .returning();
+                if (!annotated) throw conflict("Recovery action changed before annotation");
+                await logActivity(tx as unknown as Db, {
+                  companyId: lockedIssue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+                  agentId: actor.agentId, runId: actor.runId, action: "issue.recovery_action_note_added",
+                  entityType: "issue", entityId: lockedIssue.id,
+                  details: { recoveryActionId: settled.id, sourceIssueStatus, outcome, resolutionNote, resolutionNoteDigest },
+                }, postCommitActivityPublications);
+                return { issue: lockedIssue, recoveryAction: annotated, replayed: true };
+              }
               return {
                 issue: lockedIssue,
                 recoveryAction: settled,
@@ -9497,8 +9552,32 @@ export function issueRoutes(
         );
         if (!recoveryAction) throw notFound("Active recovery action not found");
 
+        // Persist whole-note identity with the disposition, before fallible post-commit work.
+        await logActivity(tx as unknown as Db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action: "issue.recovery_action_resolved",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            recoveryActionId: recoveryAction.id,
+            recoveryActionStatus: recoveryAction.status,
+            outcome: recoveryAction.outcome,
+            sourceIssueStatus: sourceIssueStatus ?? null,
+            resolutionNote: recoveryAction.resolutionNote,
+            resolutionNoteDigest,
+          },
+        }, postCommitActivityPublications);
+
         return { issue, recoveryAction, chatRetry };
       });
+      for (const publication of postCommitActivityPublications)
+        publishActivity(publication);
       if (result.replayed) {
         res.json({
           issue: result.issue,
@@ -9506,8 +9585,6 @@ export function issueRoutes(
         });
         return;
       }
-      for (const publication of postCommitActivityPublications)
-        publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
 
       await routinesSvc.syncRunStatusForIssue(result.issue.id);
@@ -9535,25 +9612,7 @@ export function issueRoutes(
         });
       }
 
-      await logActivity(db, {
-        companyId: result.issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "issue.recovery_action_resolved",
-        entityType: "issue",
-        entityId: result.issue.id,
-        details: {
-          identifier: result.issue.identifier,
-          recoveryActionId: result.recoveryAction.id,
-          recoveryActionStatus: result.recoveryAction.status,
-          outcome: result.recoveryAction.outcome,
-          sourceIssueStatus: sourceIssueStatus ?? null,
-          resolutionNote: result.recoveryAction.resolutionNote,
-        },
-      });
+
 
       if (result.chatRetry) {
         // The intent is committed with recovery resolution. A lost immediate
