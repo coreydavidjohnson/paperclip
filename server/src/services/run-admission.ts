@@ -23,6 +23,14 @@ function suspendedAdmission() {
     false)`;
 }
 
+/** Issue id from a run context as uuid, or null. Comparing issues.id::text
+ * defeats the primary-key index and detoasts the run context once per issue
+ * of the agent (7 s live, PER-963); a guarded cast keeps the index lookup. */
+function contextIssueUuid() {
+  return sql`(case when ${heartbeatRuns.contextSnapshot}->>'issueId' ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+    then (${heartbeatRuns.contextSnapshot}->>'issueId')::uuid end)`;
+}
+
 export async function countAdmittedRunsForAgent(db: Db, agentId: string) {
   const [row] = await db.select({ count: sql<number>`count(*)` }).from(heartbeatRuns)
     .where(and(eq(heartbeatRuns.agentId, agentId), eq(heartbeatRuns.status, "running"),
@@ -50,7 +58,7 @@ export async function suspendOmnigentAdmissions(db: Db,
     sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'agentId' = ${heartbeatRuns.agentId}::text`,
     sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'state' in ('intent', 'accepted', 'observed')`,
     sql`length(${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'omnigentSessionId') > 0`,
-    sql`exists (select 1 from ${issues} where ${issues.id}::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
+    sql`exists (select 1 from ${issues} where ${issues.id} = ${contextIssueUuid()}
       and ${issues.companyId} = ${heartbeatRuns.companyId} and ${issues.assigneeAgentId} = ${heartbeatRuns.agentId}
       and ${issues.status} != 'cancelled'
       and (greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) <= clock_timestamp() - interval '2 hours'
@@ -93,7 +101,7 @@ export async function suspendOmnigentAdmissions(db: Db,
     sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'agentId' = ${heartbeatRuns.agentId}::text`,
     sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'state' in ('intent', 'accepted', 'observed')`,
     sql`length(${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'omnigentSessionId') > 0`,
-    sql`exists (select 1 from ${issues} where ${issues.id}::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
+    sql`exists (select 1 from ${issues} where ${issues.id} = ${contextIssueUuid()}
       and ${issues.companyId} = ${heartbeatRuns.companyId} and ${issues.assigneeAgentId} = ${heartbeatRuns.agentId}
       and ${issues.status} != 'cancelled'
       and ((${Boolean(reason)} and greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) <= clock_timestamp() - interval '2 hours')
