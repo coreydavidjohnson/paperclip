@@ -92,16 +92,23 @@ it.skipIf(process.env.PAPERCLIP_PROJECTION_SCALE !== "1")("installs without a pr
  await db.execute(sql`drop table heartbeat_run_list_context`);
  await db.execute(sql`drop function sync_heartbeat_run_list_context()`);
  await db.execute(sql`drop function project_heartbeat_run_list_context(jsonb)`);
+ const workers=Array.from({length:24},()=>randomUUID());
+ await db.insert(agents).values(workers.map(id=>({id,companyId,name:"Scale background",role:"engineer"})));
  await db.execute(sql`insert into heartbeat_runs(id,company_id,agent_id,context_snapshot)
-   select gen_random_uuid(),${companyId},${agentId},jsonb_build_object('issueId',i::text,'wakeReason','test','prompt',
+   select gen_random_uuid(),${companyId},(${"{"+workers.join(",")+"}"}::uuid[])[(i%24)+1],jsonb_build_object('issueId',i::text,'wakeReason','test','prompt',
      (select string_agg(md5((i*650+j)::text),'') from generate_series(1,650) j)) from generate_series(1,29000) i`);
  // Non-empty attention result and suppression workload, with deployed probe indexes.
- const samples=await db.execute(sql`select id,context_snapshot->>'issueId' as issue from heartbeat_runs where company_id=${companyId} order by id limit 24`);
+ const samples=await db.execute(sql`select distinct on(agent_id) id,agent_id,context_snapshot->>'issueId' as issue from heartbeat_runs where company_id=${companyId} order by agent_id,id limit 24`);
  for(let i=0;i<samples.length;i++) {
-  const sample=samples[i];
-  await db.execute(sql`update heartbeat_runs set status='failed',created_at=now()-interval '1 day' where id=${sample.id}`);
-  await db.insert(heartbeatRunEvents).values({companyId,agentId,runId:String(sample.id),seq:1,eventType:"lifecycle",message:"Bounded retry exhausted scale"});
-  if(i%2===0) await db.insert(heartbeatRuns).values({companyId,agentId,status:"succeeded",contextSnapshot:{issueId:sample.issue}});
+  const sample=samples[i],key="scale-"+i;
+  const context=i%4===0?{issueId:key}:i%4===1?{issueId:null,taskId:key}:i%4===2?{taskId:key}:{};
+  await db.execute(sql`update heartbeat_runs set status='failed',created_at=now()-interval '1 day',context_snapshot=context_snapshot || ${JSON.stringify(context)}::jsonb where id=${sample.id}`);
+  if(i%4>=2) await db.execute(sql`update heartbeat_runs set context_snapshot=context_snapshot-'issueId' where id=${sample.id}`);
+  // Each candidate uses its own agent, so empty-key suppression cannot leak between cases.
+  const worker=String(sample.agent_id);
+  await db.insert(heartbeatRunEvents).values({companyId,agentId:worker,runId:String(sample.id),seq:1,eventType:"lifecycle",message:"Bounded retry exhausted scale"});
+  const newer=i<12?(i%4===1?{taskId:key}:context):{issueId:"different"};
+  await db.insert(heartbeatRuns).values({companyId,agentId:worker,status:"succeeded",contextSnapshot:newer});
  }
  await db.execute(sql`create index scale_issue_probe on heartbeat_runs(company_id,agent_id,(context_snapshot->>'issueId'),created_at desc)`);
  await db.execute(sql`create index scale_task_probe on heartbeat_runs(company_id,agent_id,(context_snapshot->>'taskId'),created_at desc)`);
@@ -111,13 +118,33 @@ it.skipIf(process.env.PAPERCLIP_PROJECTION_SCALE !== "1")("installs without a pr
  const before=(await physical())[0];
  expect(Number(before.bytes)).toBeGreaterThan(424*1024*1024);
  const migration=fs.readFileSync(new URL("../../../packages/db/src/migrations/0294_run_list_context.sql",import.meta.url),"utf8");
- const started=performance.now();
- await db.$client.begin(async tx=>{
+ const writer=await db.$client.reserve(), reader=await db.$client.reserve();
+ try {
+  await writer.unsafe("begin");
+  await writer.unsafe("update heartbeat_runs set status=status where id='"+samples[0].id+"'");
+  await expect(db.$client.begin(async tx=>{
+   await tx.unsafe("set local lock_timeout='100ms'");
+   // exact DDL itself sets a 2s local lock budget
+   await tx.unsafe(migration);
+  })).rejects.toHaveProperty("code","55P03");
+  expect((await writer.unsafe("select 1 as ok"))[0].ok).toBe(1);
+  expect((await db.execute(sql`select to_regclass('heartbeat_run_list_context')::text as name`))[0].name).toBe(null);
+  await writer.unsafe("commit");
+  await reader.unsafe("begin");
+  await reader.unsafe("select id from heartbeat_runs limit 1");
+  const started=performance.now();
+  await db.$client.begin(async tx=>{
    await tx.unsafe("set local statement_timeout='10s';set local lock_timeout='2s'");
    await tx.unsafe(migration);
- });
- const migrationMs=performance.now()-started;
- expect(await physical()).toEqual([before]);
+  });
+  var migrationMs=performance.now()-started;
+  expect(migrationMs).toBeLessThan(10000);
+  expect(await physical()).toEqual([before]);
+ } finally {
+  await writer.unsafe("rollback");writer.release();
+  await reader.unsafe("rollback");reader.release();
+ }
+ const walBefore=(await db.execute(sql`select pg_current_wal_insert_lsn()::text as lsn`))[0].lsn;
  const batch=fs.readFileSync(new URL("../../../scripts/backfill-run-list-context.sql",import.meta.url),"utf8");
  let cursor="",batches=0,maxBatchMs=0;
  const backfillAt=performance.now();
@@ -133,14 +160,17 @@ it.skipIf(process.env.PAPERCLIP_PROJECTION_SCALE !== "1")("installs without a pr
    if(++batches>400)throw new Error("unbounded synthetic backfill");
  }
  const backfillMs=performance.now()-backfillAt;
+ expect(maxBatchMs).toBeLessThan(5000);
+ const walBytes=Number((await db.execute(sql`select pg_wal_lsn_diff(pg_current_wal_insert_lsn(),${walBefore}::pg_lsn)::text as bytes`))[0].bytes);
+ expect(walBytes).toBeLessThan(128*1024*1024);
+ await db.execute(sql`analyze heartbeat_run_list_context`);
  expect(await physical()).toEqual([before]);
  expect((await db.execute(sql`select count(*)::int as n from heartbeat_runs h left join heartbeat_run_list_context c on c.run_id=h.id and c.company_id=h.company_id where c.run_id is null`))[0].n).toBe(0);
  const {runListContextColumns,runListContextJoin}=await import("../services/run-history-query.js");
- const keyMap={contextIssueId:"issueId",contextTaskId:"taskId",contextTaskKey:"taskKey",contextCommentId:"commentId",contextWakeCommentId:"wakeCommentId",contextWakeReason:"wakeReason",contextWakeSource:"wakeSource",contextWakeTriggerDetail:"wakeTriggerDetail"};
- const oldColumns=Object.fromEntries(Object.entries(keyMap).map(([name,key])=>[name,sql`${heartbeatRuns.contextSnapshot}->>${key}`.as(name)]));
+ const legacy=await import("./helpers/legacy-run-history-query.js");
  const order=sql`${heartbeatRuns.createdAt} desc,${heartbeatRuns.id} desc`;
  const condition=sql`${heartbeatRuns.companyId}=${companyId}`;
- const oldQuery=db.select({id:heartbeatRuns.id,...oldColumns}).from(heartbeatRuns).where(condition).orderBy(order).limit(200);
+ const oldQuery=db.select({id:heartbeatRuns.id,...legacy.runListContextColumns}).from(heartbeatRuns).leftJoin(legacy.runListContextJoin,sql`true`).where(condition).orderBy(order).limit(200);
  const newQuery=db.select({id:heartbeatRuns.id,...runListContextColumns}).from(heartbeatRuns).leftJoin(runListContextJoin,sql`true`).where(condition).orderBy(order).limit(200);
  const original=await oldQuery;
  expect(original).toHaveLength(200);
@@ -165,11 +195,22 @@ it.skipIf(process.env.PAPERCLIP_PROJECTION_SCALE !== "1")("installs without a pr
  for(let i=0;i<3;i++) {
   const oldPlan=await db.execute(sql`explain(analyze,buffers,format json) ${oldAttention.getSQL()}`);
   const newPlan=await db.execute(sql`explain(analyze,buffers,format json) ${newAttention.getSQL()}`);
+  const oldRoot=(oldPlan[0]["QUERY PLAN"] as Array<{Plan:Record<string,number>}>)[0].Plan;
+  const newRoot=(newPlan[0]["QUERY PLAN"] as Array<{Plan:Record<string,number>}>)[0].Plan;
+  const blocks=(p:Record<string,number>)=>(p["Shared Hit Blocks"]??0)+(p["Shared Read Blocks"]??0);
+  expect(blocks(newRoot)).toBeLessThanOrEqual(blocks(oldRoot));
+  const nodes:Array<Record<string,any>>=[];
+  const visit=(node:Record<string,any>)=>{nodes.push(node);for(const child of node.Plans??[])visit(child);};
+  visit(newRoot);
+  const probes=nodes.filter(n=>String(n.Alias??"").startsWith("newer"));
+  expect(probes.length).toBeGreaterThanOrEqual(3);
+  expect(probes.every(n=>n["Node Type"]!=="Seq Scan")).toBe(true);
+  expect(probes.every(n=>String(n["Index Cond"]??"").includes("context_snapshot"))).toBe(true);
   attentionPlans.push({old:oldPlan[0]["QUERY PLAN"],candidate:newPlan[0]["QUERY PLAN"]});
  }
  const result={old_rows:original.length,candidate_rows:(await newQuery).length,differences:0};
 
- console.log("PROJECTION_SCALE_RECEIPT",JSON.stringify({before,after:(await physical())[0],rows:29000,migrationMs,backfillMs,batches,maxBatchMs,comparison:result,query:newQuery.toSQL(),plans,attentionRows:attentionRows.length,attentionQuery:newAttention.toSQL(),attentionPlans}));
+ console.log("PROJECTION_SCALE_RECEIPT",JSON.stringify({before,after:(await physical())[0],rows:29000,migrationMs,backfillMs,batches,maxBatchMs,walBytes,comparison:result,query:newQuery.toSQL(),plans,attentionRows:attentionRows.length,attentionQuery:newAttention.toSQL(),attentionPlans}));
 },180000);
 it("yields a backfill lock wait before deadlock detection and leaves the run writer usable",async()=>{
  const companyId=randomUUID(),agentId=randomUUID(),id="00000000-0000-0000-0000-000000000001";

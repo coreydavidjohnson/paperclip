@@ -137,3 +137,18 @@ redaction/tenant rules and stored-expression index searches. The PostSync job
 uses 100ms lock timeout (below normal deadlock detection), bounded retries on the
 same PK cursor, and verifies no missing projections. Backfill never overwrites
 trigger data. Preserve the source snapshots and allowlisted JSON types.
+
+Migration installation is transactional (`applyPendingMigrationsManually` uses
+`runInTransaction`; bootstrap Drizzle also uses a transaction). A 55P03 lock
+timeout rolls back 0294 and startup retries normally; never remove its timeout
+or mark its journal entry by hand. The scale fixture holds a run writer to
+verify rollback and then permits installation beside a long reader.
+
+The run FK can dirty source heap lock metadata and generate WAL during backfill,
+even though no source data or heap/TOAST file is rewritten. The synthetic gate
+records this WAL separately. The PostSync hook ANALYZEs the sidecar on completion.
+A company-mismatched sidecar is an integrity failure (not trigger-produced); the
+zero-missing check fails closed rather than overwriting it. Retire read paths
+first, or remove the read paths, trigger and sidecar together; never leave reads
+using a stale sidecar. An allowlist-function change requires rebuilding derived
+rows. The app migration role owns the sidecar; exporter queries do not use it.
