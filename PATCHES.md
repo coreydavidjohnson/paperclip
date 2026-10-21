@@ -896,3 +896,56 @@ Regression evidence: current baseline failed both settled history tests and five
 - Test: heartbeat-context-summary.test.ts combines real assignment markdown
   with five ordered wake comments on fresh and resumed paths, asserting each
   body exactly once and no bodyless headings; also covers a single comment.
+
+
+## Split exhausted-run anti-probes (PER-218)
+
+- Authorized isolated repair on released fork `7d1f98205876cc46dfdec9798b42750dc05030a8`.
+- Replace the single newer-run `NOT EXISTS` containing three OR branches with
+  three conjunctive `NOT EXISTS` probes. Reuse the unchanged candidate issue-key
+  SQL expression; preserve raw JSON type/fallback behavior, blank/null handling,
+  company and agent scope, and the JavaScript-millisecond newer boundary.
+  Selection, ordering, retention and event deduplication are unchanged.
+- Upstream checked: fetched `upstream/master` at
+  `cb2d6e80d3f7ccb6cb6fb1ebbca528a608a9dd0e`; its service still has no newer-run
+  suppression anti-probe. Latest locally listed upstream release tag is
+  `v2026.1012.0`; no equivalent split repair found in service history.
+- TDD: added database-backed generated-SQL shape regression. Released source
+  fails with one probe instead of three (4 existing database tests pass);
+  repaired source passes all 5 tests using disposable embedded PostgreSQL.
+  Existing fallback/type/isolation, microsecond ties, duplicate-event and
+  seven-day-retention cases remain intact.
+- No migration, index, deployment, build, main-branch or production-data change.
+  This commit carries no endpoint latency/p95 claim. Retire when upstream
+  supplies equivalent bounded suppression and passes these contracts.
+
+## Comment attribution run lookup (PER-218)
+
+- Why: seven app-local comment GETs still took 3038–3246 ms for 25 rows.
+  In that comments-only pg_stat_statements window, the attribution run lookup
+  executed seven times for 20940.586 ms total database execution. Ambient
+  traffic remains possible; this is not a browser or phone measurement.
+- Minimal repair: reuse existing issueRunIdsCondition in issues.ts instead
+  of context OR correlated activity EXISTS. The union retains context-only,
+  activity-only and duplicate membership. Outer company, timestamp bounds,
+  own-createdByRunId bypass, complete run projection/order, log evidence,
+  persisted attribution, comment fields, pagination, authorization and secret
+  redaction are unchanged. Applies to listComments and getComment.
+- Upstream: fetched master cb2d6e80d and inspected released v2026.1012.0;
+  attribution still uses OR/EXISTS. This reuses our existing approved
+  run-history helper, not unrelated new upstream body/auth policy changes.
+- Read-only production comparison: full eight-column projection returned 13
+  rows on both sides with zero EXCEPT ALL differences. Initial EXPLAIN ANALYZE
+  was 3582.486 ms old / 36.344 ms new. This establishes query improvement,
+  not a deployed API latency claim. No index or migration required.
+- Regression: issue-comment-attribution-query.test.ts failed on baseline for
+  the missing helper call, then passed. Extended run-history-query-db.test.ts
+  covers window boundaries/null fallback, activity duplicates, own-run outside
+  window and cross-company exclusions. Offline PostgreSQL fixture and helper
+  shape checks pass; parent owns full pinned-dependency CI and API verification.
+- Retirement: remove when a released upstream lookup provides equivalent
+  indexed membership and passes these contracts/comparable measurements.
+- Packaging: compile/copy server/dist/services/issues.js with the existing
+  run-history-query.js dependency; no build or deployment performed here.
+
+Native service coverage added during delivery: real schema/comments/log-store tests cover membership, tenant isolation, own-run bypass, pagination, stored attribution and redaction. Equal created_at values retain the existing unspecified SQL tie order and first-in-input marker winner; no deterministic tie-equivalence claim. No migration or snapshot rewrite.

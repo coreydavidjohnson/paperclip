@@ -8,6 +8,16 @@ describe("bounded failure history", () => {
  let fixture: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>;
  beforeAll(async()=>{fixture=await startEmbeddedPostgresTestDatabase("attention-history-");db=createDb(fixture.connectionString);},90000);
  afterAll(async()=>{await db?.$client.end({timeout:0});await fixture?.cleanup();});
+ it("uses three independent newer-run anti-probes instead of one OR probe", async () => {
+  const query = listAttentionExhaustedRuns(db, randomUUID());
+  const statement = query.toSQL().sql;
+  expect(statement.match(/not exists \(select 1 from heartbeat_runs newer/g)).toHaveLength(3);
+  expect(statement.match(/newer\.company_id =/g)).toHaveLength(3);
+  expect(statement.match(/newer\.agent_id =/g)).toHaveLength(3);
+  expect(statement.match(/newer\.created_at >= date_trunc/g)).toHaveLength(3);
+  expect(statement).not.toMatch(/or\s+\(?newer\.context_snapshot/);
+  expect(await query).toEqual([]);
+ });
  it("does not return an exhausted failure superseded by a newer same-company issue-agent run",async()=>{
   const companyId=randomUUID(),agentId=randomUUID(),id=randomUUID(),issueId=randomUUID();
   await db.insert(companies).values({id:companyId,name:"A",issuePrefix:"A"+companyId.slice(0,7)});
