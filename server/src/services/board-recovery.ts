@@ -57,7 +57,10 @@ export async function checkBoardRecovery(db:Db, issueId:string, deps:BoardRecove
   // Existing native timers/recoveries own the continuation; do not compete.
   const [queued]=await db.select({id:agentWakeupRequests.id}).from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId,issue.companyId),eq(agentWakeupRequests.agentId,agent.id),
     sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,inArray(agentWakeupRequests.status,['queued','deferred_issue_execution']),
-    sql`coalesce(${agentWakeupRequests.reason},'') != ${BOARD_RECOVERY_REASON}`)).limit(1);
+    sql`coalesce(${agentWakeupRequests.reason},'') != ${BOARD_RECOVERY_REASON}`,
+    // A wake deferred by this exact execution hold is not a live continuation.
+    // Inspect the provider before reconciling; leave real queued work alone.
+    blocker ? sql`not (${agentWakeupRequests.status} = 'deferred_issue_execution' and coalesce(${agentWakeupRequests.reason},'') = 'execution_reconciliation_required')` : undefined)).limit(1);
   if(queued) return {status:'held'};
   const config=await deps.resolveConfig(issue.companyId,agent.adapterConfig);
   const session=await probeNewestIssueSession({companyId:issue.companyId,agentId:agent.id,issueId},config,deps.request);

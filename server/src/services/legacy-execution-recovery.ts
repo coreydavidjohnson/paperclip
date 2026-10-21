@@ -159,18 +159,20 @@ export async function terminalizeLegacyExecution(input: {
     ) {
       // Periodic stranded-work checks may revisit this terminal run before its
       // reconciled continuation is dispatched. Preserve the recorded decision
-      // and an existing unsafe-workspace hold instead of creating another one.
+      // or any effective hold for this run instead of counting another sweep as
+      // a recovery attempt. The issue lock serializes concurrent watchdog passes.
       const [reconciled] = await tx.select({ id: issueRecoveryActions.id })
         .from(issueRecoveryActions).where(and(
           eq(issueRecoveryActions.companyId, run.companyId),
           eq(issueRecoveryActions.sourceIssueId, task.id),
-          eq(issueRecoveryActions.status, "resolved"),
           or(
-            sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`,
+            and(eq(issueRecoveryActions.status, "resolved"),
+              sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`),
             and(
+              eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE),
               sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
-              sql`${issueRecoveryActions.evidence}->>'workspaceRestoreFailure' = 'restore_unsafe_archive'`,
-              sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+              or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
+                sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
             ),
           ),
         )).limit(1);

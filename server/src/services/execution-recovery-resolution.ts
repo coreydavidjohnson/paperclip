@@ -139,7 +139,7 @@ export async function markExecutionReconciliation(
   db: Db,
   action: Pick<
     typeof issueRecoveryActions.$inferSelect,
-    "companyId" | "id" | "evidence" | "sourceIssueId"
+    "companyId" | "id" | "evidence" | "sourceIssueId" | "cause" | "returnOwnerAgentId"
   >,
   decision: ExecutionReconciliation,
   actorId: string,
@@ -210,6 +210,36 @@ export async function markExecutionReconciliation(
         eq(issueRecoveryActions.id, action.id),
       ),
     );
+  // Historical watchdog passes could leave several resolved no-replay rows
+  // for one legacy run. The verified run-wide decision applies to those exact
+  // duplicates too, but only this source action owns continuation delivery.
+  // Keep other runs, owners, causes and workspace-repair evidence untouched.
+  if (sourceRun?.runtimeMode === "legacy" &&
+      action.cause === "legacy_execution_requires_reconciliation" && action.returnOwnerAgentId) {
+    const duplicates = await db.update(issueRecoveryActions).set({
+      evidence: sql`jsonb_set(${issueRecoveryActions.evidence}, '{automaticRecovery,replay}', '"conversation_continuation"'::jsonb) || ${JSON.stringify({
+        executionReconciliation: { ...decision, actorId, recordedAt: new Date().toISOString() },
+        continuationDelivery: "not_requested", duplicateReconciliationOf: action.id,
+      })}::jsonb`,
+      updatedAt: new Date(),
+    }).where(and(
+      eq(issueRecoveryActions.companyId, action.companyId),
+      eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+      eq(issueRecoveryActions.cause, action.cause),
+      eq(issueRecoveryActions.returnOwnerAgentId, action.returnOwnerAgentId),
+      inArray(issueRecoveryActions.status, ["resolved", "cancelled"]),
+      sql`${issueRecoveryActions.id} <> ${action.id}::uuid`,
+      sql`${issueRecoveryActions.evidence}->>'runId' = ${decision.runId}`,
+      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
+      sql`coalesce(${issueRecoveryActions.evidence}->>'workspaceRestoreFailure', '') = ''`,
+      sql`not (${issueRecoveryActions.evidence} ? 'executionReconciliation')`,
+    )).returning({ id: issueRecoveryActions.id });
+    if (duplicates.length) await persistActivity(db, {
+      companyId: action.companyId, actorType: "system", actorId,
+      action: "issue.execution_recovery_duplicates_reconciled", entityType: "issue", entityId: action.sourceIssueId,
+      details: { runId: decision.runId, recoveryActionId: action.id, duplicateActionIds: duplicates.map(row => row.id), replay: "not_authorized" },
+    });
+  }
 }
 
 export async function deliverReconciledExecutions(

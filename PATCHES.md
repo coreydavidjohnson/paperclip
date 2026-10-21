@@ -990,3 +990,10 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - Remove when upstream supplies equivalent label-based session reconciliation,
   provider-preserving observer retirement, bounded orphan/failure/disposition
   recovery and durable daily reporting. No vendor or OmniGenT carry is required.
+
+### PER-1120 — Effective no-replay hold identity
+
+- Repeated legacy terminalization preserves an existing same-run active or resolved no-replay hold without consuming attempts or creating another hold.
+- Native verified reconciliation retires only historical same-run/same-owner legacy duplicates. One action owns continuation; other causes, workspaces and runs stay held. Duplicate evidence and activity remain inspectable.
+- A wake deferred by the exact execution hold no longer prevents read-only newest-label inspection. Busy provider work stays held. Existing execution-blocker projection continues to show resolved no-replay holds.
+- Checks: `board-recovery.test.ts` and `issue-recovery-actions.test.ts` cover repeated passes, effective hold projection, duplicate delivery ownership, busy providers and unrelated hold preservation.

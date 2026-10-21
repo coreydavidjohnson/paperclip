@@ -1836,9 +1836,30 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(saved).toHaveLength(3);
     expect(saved.filter(a=>a.evidence.continuationDelivery==='pending')).toHaveLength(1);
     for(const action of saved) {
-      expect(action.evidence.automaticRecovery?.replay).not.toBe('blocked');
+      expect((action.evidence.automaticRecovery as {replay?:string}|undefined)?.replay).not.toBe('blocked');
       expect(action.evidence.executionReconciliation).toMatchObject({runId,actionOutcome:'mixed'});
     }
+  });
+
+  it.each(['workspace','owner','cause','run'])('does not reconcile a distinct %s hold with a duplicate legacy decision', async variant => {
+    const {companyId,coderId,managerId,sourceIssueId}=await seedCompany();
+    const runId=randomUUID(),otherRunId=randomUUID();
+    for(const id of [otherRunId,runId]) await seedHeartbeatRun({companyId,agentId:coderId,runId:id,issueId:sourceIssueId,status:'failed'});
+    const values={companyId,sourceIssueId,kind:'active_run_watchdog',status:'resolved',outcome:'blocked',ownerType:'board',
+      returnOwnerAgentId:coderId,cause:'legacy_execution_requires_reconciliation',fingerprint:runId,
+      evidence:{runId,automaticRecovery:{replay:'blocked',actionOutcome:'unknown'}},nextAction:'Verify retained outcomes.'};
+    const [source]=await db.insert(issueRecoveryActions).values(values).returning();
+    const [other]=await db.insert(issueRecoveryActions).values({...values,fingerprint:'separate-hold',
+      returnOwnerAgentId:variant==='owner'?managerId:coderId,
+      cause:variant==='cause'?'uncertain_external_action':values.cause,
+      evidence:{...values.evidence,runId:variant==='run'?otherRunId:runId,
+        ...(variant==='workspace'?{workspaceRestoreFailure:'restore_unsafe_archive'}:{})}}).returning();
+    const app=createApp();
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({actionId:source!.id,
+      outcome:'restored',sourceIssueStatus:'todo',executionReconciliation:{runId,providerStopped:true,actionOutcome:'mixed',
+        outcomeEvidence:'The provider is stopped. Retained work must be checked before any earlier mutation is repeated.'}}).expect(200);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id,other!.id)))[0]).toEqual(other);
+    expect((await request(app).get(`/api/issues/${sourceIssueId}`).expect(200)).body.executionBlocker).not.toBeNull();
   });
 
   it("reconciles a settled execution hold while preserving dependencies and approvals without replay", async () => {

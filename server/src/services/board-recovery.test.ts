@@ -45,6 +45,20 @@ const support=await getEmbeddedPostgresTestSupport();
   const actions=await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId,s.issueId));
   expect(actions).toHaveLength(1);expect(actions[0]).toEqual(action);
  });
+ it.each([false,true])('inspects a resolved hold behind a deferred wake without clearing busy work (busy: %s)',async busy=>{
+  const s=await seed('failed');s.busy(busy);
+  await db.update(heartbeatRuns).set({errorCode:'omnigent_session_failed'}).where(eq(heartbeatRuns.id,s.id));
+  const [action]=await db.insert(issueRecoveryActions).values({companyId:s.companyId,sourceIssueId:s.issueId,
+   kind:'active_run_watchdog',status:'resolved',ownerType:'board',returnOwnerAgentId:s.agentId,
+   cause:'legacy_execution_requires_reconciliation',fingerprint:`legacy-execution:${s.id}`,
+   evidence:{runId:s.id,automaticRecovery:{replay:'blocked',actionOutcome:'unknown'}},
+   nextAction:'Verify the stopped provider and outcomes before continuing.'}).returning();
+  await db.insert(agentWakeupRequests).values({companyId:s.companyId,agentId:s.agentId,source:'automation',
+   reason:'execution_reconciliation_required',status:'deferred_issue_execution',payload:{issueId:s.issueId}});
+  expect((await idleForTenMinutes(s)).at(-1)?.status).toBe(busy?'observe':'retry_failed');
+  expect(s.methods.length).toBeGreaterThan(0);expect(s.counts()).toEqual({wakes:0,releases:0});
+  expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id,action.id)))[0]).toEqual(action);
+ });
  it('never retires a silent run while its newest ticket session is busy',async()=>{
   const s=await seed();s.busy(true);await idleForTenMinutes(s);
   expect(s.counts()).toEqual({wakes:0,releases:0});
