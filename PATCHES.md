@@ -882,7 +882,10 @@ The startup generated-column migration timed out and rolled back on production. 
   do not establish current ticket-session liveness or replace board sweeps.
 - A board-only bounded per-issue check finds the newest owned
   `paperclip.issue_key` session, checks provider status and transcript tail,
-  and persists repeated elapsed idle observations. Busy orphan sessions remain
+  and persists repeated elapsed idle observations. A running observer also needs
+  over 20 minutes without a run update; final row-level compare-and-set rejects
+  updates arriving during admission and records the source timestamp. Session
+  status, never run age alone, proves idleness. Busy orphan sessions remain
   untouched until they finish. Missing/incomplete/foreign evidence fails closed.
 - The scheduler uses native reconciliation for stopped failures and native
   disposition recovery for successful parked issues. Retiring a stuck observer

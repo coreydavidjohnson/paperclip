@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { boardRecoveryDecision, observeIdle, retainedBoardSession, validBoardRetainedSession, type SweepInput } from './board-recovery-policy.js';
 const now = Date.parse('2026-10-20T22:00:00Z');
 const base: SweepInput = { now, issueStatus:'in_progress', runStatus:'succeeded', errorCode:null, error:null,
-  finishedAt:now-3600000, idleConfirmed:true, sessionBusy:false, hold:null, attempts:0, lastAttemptAt:null };
+  finishedAt:now-3600000, runUpdatedAt:now-3600000, idleConfirmed:true, sessionBusy:false, hold:null, attempts:0, lastAttemptAt:null };
 describe('board recovery policy (PER-1120)', () => {
  it.each(['omnigent_dispatch_evidence_timeout','setup_failed','omnigent_session_not_recovered','omnigent_session_failed','omnigent_empty_turn','omnigent_rotation_not_ready'])('recovers the missing %s class only after actual session idle', code => {
   expect(boardRecoveryDecision({...base,runStatus:'failed',errorCode:code})).toBe('retry_failed');
@@ -11,6 +11,15 @@ describe('board recovery policy (PER-1120)', () => {
  it('never uses silent run events as a liveness signal',()=> {
   expect(boardRecoveryDecision({...base,runStatus:'running',sessionBusy:true})).toBe('observe');
   expect(boardRecoveryDecision({...base,runStatus:'running',idleConfirmed:true})).toBe('retire_observer');
+ });
+ it('requires an idle provider AND more than twenty minutes without run updates',()=> {
+  const running = {...base, runStatus:'running'};
+  expect(boardRecoveryDecision({...running,runUpdatedAt:now-20*60000-1})).toBe('retire_observer');
+  for (const runUpdatedAt of [now-20*60000,now-60000,now+1,null,Number.NaN]) {
+   expect(boardRecoveryDecision({...running,runUpdatedAt})).toBe('observe');
+  }
+  expect(boardRecoveryDecision({...running,runUpdatedAt:now-15*60*60000,sessionBusy:true})).toBe('observe');
+  expect(boardRecoveryDecision({...running,runUpdatedAt:now-15*60*60000,idleConfirmed:false})).toBe('observe');
  });
  it('observes orphan work and then repairs missing continuation',()=> {
   expect(boardRecoveryDecision({...base,sessionBusy:true})).toBe('observe');

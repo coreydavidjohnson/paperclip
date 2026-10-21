@@ -4,6 +4,7 @@
 export const BOARD_RECOVERY_LIMIT = 3;
 export const BOARD_RECOVERY_REASON = 'paperclip_board_reconcile';
 export const IDLE_LIMIT_MS = 10 * 60_000;
+export const STALE_RUN_MS = 20 * 60_000;
 const MAX_OBSERVATION_GAP_MS = 6 * 60_000;
 const RETRY_CODES = new Set([
   'omnigent_dispatch_evidence_timeout', 'dispatch_evidence_timeout',
@@ -26,10 +27,15 @@ export function observeIdle(previous:IdleObservation|null, session:SessionEviden
   return { observation, confirmed:now-observation.firstSeenAt >= IDLE_LIMIT_MS };
 }
 export type SweepInput = { now:number; issueStatus:string; runStatus:string; errorCode:string|null; error:string|null;
-  finishedAt:number|null; idleConfirmed:boolean; sessionBusy:boolean; hold:string|null; attempts:number; lastAttemptAt:number|null };
+  finishedAt:number|null; runUpdatedAt:number|null; idleConfirmed:boolean; sessionBusy:boolean; hold:string|null; attempts:number; lastAttemptAt:number|null };
 export function boardRecoveryDecision(input:SweepInput) {
   if (input.hold || !['todo','in_progress'].includes(input.issueStatus)) return 'held';
   if (input.sessionBusy || !input.idleConfirmed) return 'observe';
+  // Run age is an additional admission gate, NOT proof of provider idleness.
+  // Busy/newest-session evidence above always wins, including for Codex runs
+  // that emit no Paperclip events. Unknown/future timestamps fail closed.
+  if (input.runStatus === 'running' && (input.runUpdatedAt === null ||
+      !Number.isFinite(input.runUpdatedAt) || input.now - input.runUpdatedAt <= STALE_RUN_MS)) return 'observe';
   if (input.runStatus === 'queued') return 'held';
   if (input.error && NEEDS_PERSON.test(input.error)) return 'manual';
   if (input.attempts >= BOARD_RECOVERY_LIMIT) return 'exhausted';

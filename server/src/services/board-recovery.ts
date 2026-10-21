@@ -4,7 +4,7 @@ import { readChatControlRecoveryStop } from './chat-control-recovery-stop.js';
 import { isPluginManagedIssueLifecycle } from './recovery/successful-run-handoff.js';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import { agents, heartbeatRuns, issues, agentWakeupRequests, issueThreadInteractions, agentTaskSessions, routines, type Db } from '@paperclipai/db';
-import { boardRecoveryDecision, observeIdle, BOARD_RECOVERY_REASON, BOARD_RECOVERY_LIMIT, type IdleObservation } from './board-recovery-policy.js';
+import { boardRecoveryDecision, observeIdle, BOARD_RECOVERY_REASON, BOARD_RECOVERY_LIMIT, STALE_RUN_MS, type IdleObservation } from './board-recovery-policy.js';
 import { probeNewestIssueSession } from './omnigent-issue-session.js';
 import { validOmnigentReceipt } from './omnigent-attachment.js';
 import { getExecutionBlocker } from './execution-blocker.js';
@@ -69,7 +69,7 @@ export async function checkBoardRecovery(db:Db, issueId:string, deps:BoardRecove
     sql`coalesce(${heartbeatRuns.contextSnapshot}->>'issueId',${heartbeatRuns.contextSnapshot}->>'taskId') = ${issueId}`,
     sql`(${heartbeatRuns.resultJson}->'boardRecovery'->>'attemptAt')::bigint > ${now-86400000}`));
   let decision=boardRecoveryDecision({now,issueStatus:blocker?'todo':issue.status,runStatus:run.status,errorCode:run.errorCode,error:run.error,
-    finishedAt:run.finishedAt?.getTime() ?? null,idleConfirmed:observed.confirmed,sessionBusy:!!session && !session.idle,hold:null,
+    finishedAt:run.finishedAt?.getTime() ?? null,runUpdatedAt:run.updatedAt.getTime(),idleConfirmed:observed.confirmed,sessionBusy:!!session && !session.idle,hold:null,
     attempts:Math.max(Number(budget.attempts),run.scheduledRetryAttempt)-(previous?.attemptAt && previous.attemptAt>now-86400000?1:0),lastAttemptAt:previous?.attemptAt && previous.attemptAt>now-86400000 ? null : budget.last===null ? null : Number(budget.last)});
   const bootstrap=run.resultJson?.executionRecovery as Record<string,unknown>|undefined;
   if(session?.absent && observed.confirmed && !(run.errorCode==='setup_failed' && bootstrap?.kind==='bootstrap' && bootstrap.providerWorkStarted===false)) decision='manual';
@@ -133,8 +133,9 @@ export async function checkBoardRecovery(db:Db, issueId:string, deps:BoardRecove
     [retired]=await tx.update(heartbeatRuns).set({status:'interrupted',errorCode:'omnigent_observer_retired',error:'Idle observer retired for same-session continuation; prior action outcomes remain unknown.',finishedAt:new Date(now),controllerLeaseExpiresAt:new Date(now),controllerBootId:sql`gen_random_uuid()`,updatedAt:new Date(now),
       resultJson:sql`coalesce(${heartbeatRuns.resultJson},'{}'::jsonb) || ${JSON.stringify({omnigentObserverRetirement:{version:1,runId:run.id,companyId:run.companyId,agentId:run.agentId,issueId,
         omnigentSessionId:(run.resultJson?.omnigentDispatchReceipt as Record<string,unknown>).omnigentSessionId,retiredAt:new Date(now).toISOString(),reason:'stable_issue_session_idle',currentSessionId:session.id,
-        firstIdleObservedAt:observed.observation?.firstSeenAt,lastIdleObservedAt:now,sessionFingerprint:session.fingerprint,actionOutcomes:'unknown',providerStopped:false},summary:'An idle observer was retired for a same-session continuation. Prior action outcomes are unknown. Inspect retained evidence and actual targets before repeating any mutation.'})}::jsonb`})
+        sourceRunUpdatedAt:run.updatedAt.toISOString(),runStaleLimitMs:STALE_RUN_MS,firstIdleObservedAt:observed.observation?.firstSeenAt,lastIdleObservedAt:now,sessionFingerprint:session.fingerprint,actionOutcomes:'unknown',providerStopped:false},summary:'An idle observer was retired for a same-session continuation. Prior action outcomes are unknown. Inspect retained evidence and actual targets before repeating any mutation.'})}::jsonb`})
       .where(and(eq(heartbeatRuns.id,run.id),eq(heartbeatRuns.status,'running'),eq(heartbeatRuns.controllerBootId,run.controllerBootId!),
+        eq(heartbeatRuns.updatedAt,run.updatedAt),sql`${heartbeatRuns.updatedAt} < ${new Date(now-STALE_RUN_MS)}`,
         sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt' = ${JSON.stringify(run.resultJson?.omnigentDispatchReceipt)}::jsonb`)).returning();
     if(retired?.wakeupRequestId) await tx.update(agentWakeupRequests).set({status:'failed',finishedAt:new Date(now),error:'Idle observer retired; provider preserved, prior action outcomes unknown.',updatedAt:new Date(now)})
       .where(and(eq(agentWakeupRequests.id,retired.wakeupRequestId),eq(agentWakeupRequests.companyId,issue.companyId)));

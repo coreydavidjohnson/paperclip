@@ -17,7 +17,7 @@ const support=await getEmbeddedPostgresTestSupport();
   await db.insert(agents).values({id:agentId,companyId,name:'Worker',adapterType:'omnigent',adapterConfig:{baseUrl:'http://provider',agentId:'provider'}});
   await db.insert(issues).values({id:issueId,companyId,title:'Task',status:'in_progress',assigneeAgentId:agentId});
   const receipt={version:1,runId:id,companyId,agentId,omnigentSessionId:'old',state:'observed'};
-  await db.insert(heartbeatRuns).values({id,companyId,agentId,status,runtimeMode:'legacy',startedAt:old,finishedAt:status==='running'?null:old,controllerBootId:randomUUID(),controllerLeaseExpiresAt:sql`clock_timestamp()+interval '60 seconds'`,contextSnapshot:{issueId},runnerProfileJson:{adapterDispatch:{adapterType:'omnigent'}},resultJson:{omnigentDispatchReceipt:receipt}});
+  await db.insert(heartbeatRuns).values({id,companyId,agentId,status,runtimeMode:'legacy',updatedAt:old,startedAt:old,finishedAt:status==='running'?null:old,controllerBootId:randomUUID(),controllerLeaseExpiresAt:sql`clock_timestamp()+interval '60 seconds'`,contextSnapshot:{issueId},runnerProfileJson:{adapterDispatch:{adapterType:'omnigent'}},resultJson:{omnigentDispatchReceipt:receipt}});
   if(status==='running') await db.update(issues).set({executionRunId:id,checkoutRunId:id}).where(eq(issues.id,issueId));
   const labels={'paperclip.company_id':companyId,'paperclip.agent_id':agentId,'paperclip.issue_key':`${companyId}:${agentId}:issue:${issueId}`};
   let busy=false,wakes=0,releases=0;
@@ -46,6 +46,33 @@ const support=await getEmbeddedPostgresTestSupport();
   expect(isRetiredOmnigentObserver(saved)).toBe(true);
   expect(saved.resultJson?.omnigentObserverRetirement).toMatchObject({currentSessionId:'new',providerStopped:false,actionOutcomes:'unknown'});
   expect(s.counts()).toEqual({wakes:1,releases:1});expect(new Set(s.methods)).toEqual(new Set(['GET']));
+ });
+ it('preserves a recent running observer despite a stable idle newest session',async()=>{
+  const s=await seed();
+  await db.update(heartbeatRuns).set({updatedAt:new Date(s.now)}).where(eq(heartbeatRuns.id,s.id));
+  expect((await idleForTenMinutes(s)).map(r=>r.status)).toEqual(['observe','observe','observe']);
+  expect(s.counts()).toEqual({wakes:0,releases:0});
+  expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,s.id)))[0].status).toBe('running');
+ });
+ it('releases the slot for a fifteen-hour idle observer, not just the saved session pointer',async()=>{
+  const s=await seed();
+  await db.update(heartbeatRuns).set({updatedAt:new Date(s.now-15*3600000)}).where(eq(heartbeatRuns.id,s.id));
+  expect((await idleForTenMinutes(s)).at(-1)?.status).toBe('observer_retired');
+  const [run]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,s.id));
+  expect(run.resultJson?.omnigentObserverRetirement).toMatchObject({currentSessionId:'new',runStaleLimitMs:1200000,providerStopped:false});
+  expect(s.counts()).toEqual({wakes:1,releases:1});
+ });
+ it('does not retire a run refreshed during native wake admission',async()=>{
+  const s=await seed(); const wake=s.deps.wake;
+  s.deps.wake=async(...args)=>{
+   const result=await wake(...args);
+   await db.update(heartbeatRuns).set({updatedAt:new Date(s.now+600000)}).where(eq(heartbeatRuns.id,s.id));
+   return result;
+  };
+  expect((await idleForTenMinutes(s)).at(-1)?.status).toBe('held');
+  const [run]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,s.id));
+  expect(run.status).toBe('running');expect(run.resultJson?.omnigentObserverRetirement).toBeUndefined();
+  expect(s.counts()).toEqual({wakes:1,releases:0});
  });
  it('holds a live orphan until it finishes, then asks for a native monitor',async()=>{
   const s=await seed('succeeded');s.busy(true);expect((await idleForTenMinutes(s)).at(-1)?.status).toBe('observe');
