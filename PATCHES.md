@@ -942,3 +942,17 @@ The startup generated-column migration timed out and rolled back on production. 
   run-history-query.js dependency; no build or deployment performed here.
 
 Native service coverage added during delivery: real schema/comments/log-store tests cover membership, tenant isolation, own-run bypass, pagination, stored attribution and redaction. Equal created_at values retain the existing unspecified SQL tie order and first-in-input marker winner; no deterministic tie-equivalence claim. No migration or snapshot rewrite.
+
+### PER-218 — bounded admission candidate JSON extraction
+
+The observer-suspension read materializes only running legacy dispatch-stage
+IDs and the receipt/profile properties its existing predicate needs. This
+prevents PostgreSQL from repeatedly detoasting large historical JSON blobs
+while evaluating that predicate. Full returned run rows and every authoritative
+write-time receipt, company, agent, issue and output race check are unchanged.
+No schema migration or index is added. This extends our private admission carry;
+there is no corresponding upstream run-admission service to upgrade in place.
+Remove this projection boundary when the upstream replacement or separate compact
+receipt storage supplies equivalent behavior and tests. Tests cover the compiled
+materialization boundary, existing native PostgreSQL admission races, malformed
+JSON and ineligible bindings/states. No upstream proposal is made.

@@ -1,3 +1,6 @@
+import { PgDialect } from 'drizzle-orm/pg-core';
+import type { SQL } from 'drizzle-orm';
+import type { Db } from '@paperclipai/db';
 import { randomUUID } from 'node:crypto';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -115,6 +118,18 @@ const support = await getEmbeddedPostgresTestSupport();
   else await db.update(heartbeatRuns).set({resultJson:{omnigentDispatchReceipt:kind==='missing'?null:{...receipt,...(kind==='wrong-session'?{omnigentSessionId:''}:kind==='wrong-run'?{runId:randomUUID()}:kind==='wrong-company'?{companyId:randomUUID()}:{agentId:randomUUID()})}}}).where(eq(heartbeatRuns.id,run.id));
   expect((await suspendOmnigentAdmissions(db)).some(row=>row.id===run.id)).toBe(false);
  });
+ it.each(['scalar-profile','scalar-result','json-null-profile','json-null-context','wrong-version','wrong-state','wrong-adapter','wrong-stage','cancelled-issue'])('keeps malformed or ineligible %s admitted',async kind=>{
+  const {run,issueId,receipt}=await seed();
+  if(kind==='cancelled-issue') await db.update(issues).set({status:'cancelled'}).where(eq(issues.id,issueId));
+  else if(kind==='wrong-stage') await db.update(heartbeatRuns).set({executionStage:'queued'}).where(eq(heartbeatRuns.id,run.id));
+  else if(kind==='wrong-adapter') await db.update(heartbeatRuns).set({runnerProfileJson:{adapterDispatch:{adapterType:'other'}}}).where(eq(heartbeatRuns.id,run.id));
+  else if(kind==='wrong-version'||kind==='wrong-state') await db.update(heartbeatRuns).set({resultJson:{omnigentDispatchReceipt:{...receipt,...(kind==='wrong-version'?{version:2}:{state:'unknown'})}}}).where(eq(heartbeatRuns.id,run.id));
+  else if(kind==='scalar-profile') await db.execute(sql`update heartbeat_runs set runner_profile_json = 'true'::jsonb where id = ${run.id}`);
+  else if(kind==='scalar-result') await db.execute(sql`update heartbeat_runs set result_json = '42'::jsonb where id = ${run.id}`);
+  else if(kind==='json-null-profile') await db.execute(sql`update heartbeat_runs set runner_profile_json = 'null'::jsonb where id = ${run.id}`);
+  else await db.execute(sql`update heartbeat_runs set context_snapshot = 'null'::jsonb where id = ${run.id}`);
+  expect((await suspendOmnigentAdmissions(db)).some(row=>row.id===run.id)).toBe(false);
+ });
  it.each(['not_found','runner_offline'])('releases two-hour silent %s with exact fence',async reason=>{
   const {run,receipt,issueId}=await seed(7500,'in_progress');
   const probe=async()=>reason as 'not_found'|'runner_offline';
@@ -184,4 +199,23 @@ const support = await getEmbeddedPostgresTestSupport();
   await release({companyId:run.companyId,runId:run.id,now:new Date(),suppressImmediateRecovery:true});
   expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId,run.companyId))).toHaveLength(2);
 }, 60000);
+});
+
+it('materializes bounded observer properties before evaluating repeated receipt predicates', async () => {
+  let query = '';
+  const db = { select: () => ({ from: () => ({ where: (condition: SQL) => {
+    query = new PgDialect().sqlToQuery(condition).sql;
+    return Promise.resolve([]);
+  } }) }) } as unknown as Db;
+  expect(await suspendOmnigentAdmissions(db)).toEqual([]);
+  expect(query).toContain('as materialized');
+  const materialized = query.split('as materialized')[1].split('select id from')[0];
+  expect(materialized).toContain("status = 'running'");
+  expect(materialized).toContain("runtime_mode = 'legacy'");
+  expect(materialized).toContain("execution_stage in ('dispatching', 'external_attached', 'awaiting_external_evidence')");
+  expect(query.match(/result_json\s*->\s*'omnigentDispatchReceipt'/g)).toHaveLength(1);
+  expect(query.match(/context_snapshot\s*->>\s*'issueId'/g)).toHaveLength(1);
+  for (const key of ['version', 'runId', 'companyId', 'agentId', 'state', 'omnigentSessionId']) {
+    expect(query).toContain(`receipt->>'${key}'`);
+  }
 });

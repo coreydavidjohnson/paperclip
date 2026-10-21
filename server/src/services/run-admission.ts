@@ -37,27 +37,36 @@ export async function countAdmittedRunsForAgent(db: Db, agentId: string) {
  */
 export async function suspendOmnigentAdmissions(db: Db,
   probe: (run: typeof heartbeatRuns.$inferSelect) => Promise<"not_found" | "runner_offline" | null> = async () => null) {
-  const candidates = await db.select().from(heartbeatRuns).where(and(
-    eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"),
-    sql`${heartbeatRuns.runnerProfileJson}->'adapterDispatch'->>'adapterType' = 'omnigent'`,
-    sql`${heartbeatRuns.runnerProfileJson}->'omnigentAdmissionSuspension' is null`,
-    // Filter before issuing one UPDATE per observer. Keep the write predicates
-    // below as the authoritative race check; this read grants no new authority.
-    sql`${heartbeatRuns.executionStage} in ('dispatching', 'external_attached', 'awaiting_external_evidence')`,
-    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'version' = '1'`,
-    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'runId' = ${heartbeatRuns.id}::text`,
-    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'companyId' = ${heartbeatRuns.companyId}::text`,
-    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'agentId' = ${heartbeatRuns.agentId}::text`,
-    sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'state' in ('intent', 'accepted', 'observed')`,
-    sql`length(${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'omnigentSessionId') > 0`,
-    sql`exists (select 1 from ${issues} where ${issues.id}::text = ${heartbeatRuns.contextSnapshot}->>'issueId'
-      and ${issues.companyId} = ${heartbeatRuns.companyId} and ${issues.assigneeAgentId} = ${heartbeatRuns.agentId}
-      and ${issues.status} != 'cancelled'
-      and (greatest(${heartbeatRuns.startedAt}, ${heartbeatRuns.lastOutputAt}) <= clock_timestamp() - interval '2 hours'
-        or (${issues.status} in ('blocked', 'in_review', 'done')
-          and ${issues.updatedAt} < clock_timestamp() - interval '30 seconds'
-          and ${heartbeatRuns.startedAt} < clock_timestamp() - interval '30 seconds')))`,
-  ));
+  // Keep the read-only candidate projection behind a materialization boundary:
+  // receipt predicates must not repeatedly detoast profiles for all history.
+  // The authoritative write-time receipt/issue/output race checks stay below.
+  const candidates = await db.select().from(heartbeatRuns).where(sql`${heartbeatRuns.id} in (
+    with projected as materialized (
+      select id, company_id, agent_id, started_at, last_output_at,
+        runner_profile_json->'adapterDispatch' as dispatch,
+        runner_profile_json->'omnigentAdmissionSuspension' as suspension,
+        result_json->'omnigentDispatchReceipt' as receipt,
+        context_snapshot->>'issueId' as issue_id
+      from heartbeat_runs
+      where status = 'running' and runtime_mode = 'legacy'
+        and execution_stage in ('dispatching', 'external_attached', 'awaiting_external_evidence')
+    )
+    select id from projected h
+    where dispatch->>'adapterType' = 'omnigent' and suspension is null
+      and receipt->>'version' = '1'
+      and receipt->>'runId' = h.id::text
+      and receipt->>'companyId' = h.company_id::text
+      and receipt->>'agentId' = h.agent_id::text
+      and receipt->>'state' in ('intent', 'accepted', 'observed')
+      and length(receipt->>'omnigentSessionId') > 0
+      and exists (select 1 from issues where issues.id::text = h.issue_id
+        and issues.company_id = h.company_id and issues.assignee_agent_id = h.agent_id
+        and issues.status != 'cancelled'
+        and (greatest(h.started_at, h.last_output_at) <= clock_timestamp() - interval '2 hours'
+          or (issues.status in ('blocked', 'in_review', 'done')
+            and issues.updated_at < clock_timestamp() - interval '30 seconds'
+            and h.started_at < clock_timestamp() - interval '30 seconds')))
+  )`);
   const suspended: Array<typeof heartbeatRuns.$inferSelect> = [];
   for (const candidate of candidates) {
     const quiet = Math.max(candidate.startedAt?.getTime() ?? Date.now(), candidate.lastOutputAt?.getTime() ?? 0) <= Date.now() - 7200000;
