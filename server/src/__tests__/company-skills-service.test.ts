@@ -1558,7 +1558,9 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     ]);
   });
 
-  it("forks external source types and deduplicates fork slugs", async () => {
+  // Keep each source pair inside the normal 15s budget: all eight forks took
+  // 21.5s on the packaged builder, although each source pair took under 6s.
+  it.each(["github", "skills_sh", "url", "catalog"] as const)("forks %s external sources and deduplicates fork slugs", async (sourceType) => {
     const companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -1566,7 +1568,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
-    const sourceTypes = ["github", "skills_sh", "url", "catalog"] as const;
+    const sourceTypes = [sourceType];
     await db.insert(companySkills).values(sourceTypes.map((sourceType) => ({
       id: randomUUID(),
       companyId,
@@ -1612,10 +1614,13 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     } finally {
       vi.unstubAllGlobals();
     }
-    expect(remoteReads).toEqual(expect.arrayContaining([
-      "https://raw.githubusercontent.com/acme/github-skill/main/SKILL.md",
-      "https://raw.githubusercontent.com/acme/skills_sh-skill/main/SKILL.md",
-    ]));
+    if (sourceType === "github" || sourceType === "skills_sh") {
+      expect(remoteReads).toEqual(expect.arrayContaining([
+        `https://raw.githubusercontent.com/acme/${sourceType}-skill/main/SKILL.md`,
+      ]));
+    } else {
+      expect(remoteReads).toEqual([]);
+    }
   });
 
   it("validates version-aware desired skill selections", async () => {
