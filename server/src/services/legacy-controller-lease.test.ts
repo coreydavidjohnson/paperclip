@@ -5,7 +5,8 @@ import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { heartbeatService } from "./heartbeat.js";
 import { hasLiveLegacyController, legacyControllerBootId, legacyControllerClaim,
-  renewLegacyControllerLease, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
+  renewLegacyControllerLease, revokeExpiredLegacyController, watchLegacyControllerLease,
+  startClaimedLegacyControllerLease, hasClaimedLegacyControllerRenewal, LEGACY_CONTROLLER_RENEW_MS } from "./legacy-controller-lease.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("durable legacy controller ownership", () => {
@@ -155,6 +156,45 @@ const support = await getEmbeddedPostgresTestSupport();
       await pooled.$client.end({ timeout: 1 });
     }
   }, 20_000);
+
+  it("keeps a claimed lease alive until the watcher starts, then hands over", async () => {
+    const run = await seed();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
+    try {
+      startClaimedLegacyControllerLease(db, run);
+      expect(hasClaimedLegacyControllerRenewal(run.id)).toBe(true);
+      // Executor setup is starved for longer than the original 60 s claim lease:
+      // shift the row's clock forward each tick so expiry is real, not faked.
+      for (let i = 0; i < 9; i += 1) {
+        await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: sql`clock_timestamp() + interval '5 seconds'` })
+          .where(eq(heartbeatRuns.id, run.id));
+        const [before] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+        await vi.advanceTimersByTimeAsync(LEGACY_CONTROLLER_RENEW_MS);
+        await vi.waitFor(async () => {
+          const [row] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+          expect(row.controllerLeaseExpiresAt!.getTime()).toBeGreaterThan(before.controllerLeaseExpiresAt!.getTime() + 30_000);
+        });
+      }
+      // The watcher is created from the stale claim-time row; it must adopt, not abort.
+      const controller = new AbortController();
+      const watch = watchLegacyControllerLease(db, { ...run, controllerLeaseExpiresAt: new Date(Date.now() - 1) }, controller);
+      expect(hasClaimedLegacyControllerRenewal(run.id)).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(controller.signal.aborted).toBe(false);
+      watch.stop();
+    } finally { vi.useRealTimers(); }
+  }, 30_000);
+
+  it("stops claim-time renewal once the run is no longer owned", async () => {
+    const run = await seed();
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      startClaimedLegacyControllerLease(db, run);
+      await db.update(heartbeatRuns).set({ status: "queued" }).where(eq(heartbeatRuns.id, run.id));
+      await vi.advanceTimersByTimeAsync(LEGACY_CONTROLLER_RENEW_MS);
+      await vi.waitFor(() => expect(hasClaimedLegacyControllerRenewal(run.id)).toBe(false));
+    } finally { vi.useRealTimers(); }
+  });
 
   it("leaves native controller ownership to the native coordinator", () => {
     expect(legacyControllerClaim("native")).toEqual({});
