@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { heartbeatRuns, persistentDedicatedDb, type Db } from "@paperclipai/db";
 
 // A boot UUID has meaning across containers; a numeric PID does not.
 export const legacyControllerBootId = randomUUID();
@@ -64,10 +64,14 @@ export async function revokeExpiredLegacyController(db: Db, run: Run): Promise<b
 
 /** Abort the adapter if the controller cannot renew. Bound each check by the
  * lease duration even when the database connection never settles. */
-export function watchLegacyControllerLease(db: Db, run: Run, controller: AbortController, onCancellationRequested?: () => Promise<unknown>) {
+export function watchLegacyControllerLease(sharedDb: Db, run: Run, controller: AbortController, onCancellationRequested?: () => Promise<unknown>) {
   if (run.runtimeMode === "native" || !run.controllerBootId) {
     return { stop() {}, async assertOwned(_stage?: "dispatching") {} };
   }
+  // Renewal is a sub-millisecond single-row UPDATE. On the shared pool it can
+  // still wait the full lease behind connections blocked on issue-row locks,
+  // which turned queueing into "lease lost". Renew on a dedicated connection.
+  const db = persistentDedicatedDb(sharedDb, "paperclip-legacy-controller-lease") ?? sharedDb;
   let stopped = false;
   let pending = false;
   let cancelling = false;

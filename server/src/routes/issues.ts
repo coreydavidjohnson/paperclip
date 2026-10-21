@@ -9162,7 +9162,6 @@ export function issueRoutes(
               if (settled.kind === "deliberate_wait_without_target" && resolutionNote) {
                 // Whole-note audit identity survives later annotations and paragraph
                 // boundaries. The issue lock serializes this lookup with the append.
-                assertBoard(req);
                 const [recordedNote] = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
                   eq(activityLog.companyId, lockedIssue.companyId),
                   eq(activityLog.entityType, "issue"),
@@ -9174,6 +9173,9 @@ export function issueRoutes(
                 if (settled.resolutionNote === resolutionNote || recordedNote) {
                   return { issue: lockedIssue, recoveryAction: settled, replayed: true };
                 }
+                // An authorized replay is read-only; only the board may append
+                // new evidence to a settled disposition action.
+                assertBoard(req);
                 // Late disposition evidence is annotation, not another resolution:
                 // retain the original outcome, timestamps and note; never replay.
                 if (activeRecoveryAction || sourceIssueStatus !== lockedIssue.status ||
@@ -9235,10 +9237,20 @@ export function issueRoutes(
           sourceIssueStatus === "todo" &&
           activeRecoveryAction.kind === "deliberate_wait_without_target"
         ) {
+          // A bounded owner repair is the recorded owner's own lane: the owner
+          // (or board) may hand the parked task back while that same owner is
+          // still assigned. Any other owner, policy or source state is stale.
+          const currentOwnerRepair =
+            activeRecoveryAction.ownerType === "agent" &&
+            activeRecoveryAction.wakePolicy?.type === "bounded_owner_disposition_repair" &&
+            (lockedIssue.status === "blocked" || lockedIssue.status === "in_progress") &&
+            activeRecoveryAction.ownerAgentId === activeRecoveryAction.returnOwnerAgentId;
+          const currentBoardEscalation =
+            lockedIssue.status === "blocked" &&
+            activeRecoveryAction.ownerType === "board" &&
+            activeRecoveryAction.wakePolicy?.type === "board_escalation";
           if (
-            lockedIssue.status !== "blocked" ||
-            activeRecoveryAction.ownerType !== "board" ||
-            activeRecoveryAction.wakePolicy?.type !== "board_escalation" ||
+            !(currentOwnerRepair || currentBoardEscalation) ||
             !activeRecoveryAction.returnOwnerAgentId ||
             lockedIssue.assigneeAgentId !== activeRecoveryAction.returnOwnerAgentId
           ) {

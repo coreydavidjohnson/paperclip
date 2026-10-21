@@ -947,7 +947,7 @@ export function createPostgresRunDispatchAdapter(
       };
   }
 
-  async function decideCurrentRunStaleness(tx: Db, run: HeartbeatRun, now: Date) {
+  async function decideCurrentRunStaleness(tx: Db, run: HeartbeatRun, now: Date, locked = true) {
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) return { issueId: null, facts: null, decision: { stale: false as const } };
@@ -966,9 +966,20 @@ export function createPostgresRunDispatchAdapter(
         scheduledRetryReason: run.scheduledRetryReason,
       },
       now,
-      tx,
+      locked ? tx : undefined,
     );
     return { issueId, facts, decision: decideQueuedRunStaleness(facts, now) };
+  }
+
+  /** Lock-free preview for the hot promotion path. Only a stale preview, or an
+   * interaction wake whose authority must be recorded under the locks, needs
+   * cancelStaleQueuedRun; that call re-decides under issue -> run locks. */
+  async function queuedRunNeedsLockedStalenessCheck(input: { runId: string; companyId: string; now: Date }) {
+    const [run] = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)));
+    if (!run || run.status !== "queued") return true;
+    const { facts, decision } = await decideCurrentRunStaleness(db, run, input.now, false);
+    return decision.stale || Boolean(facts?.isInteractionWake);
   }
 
   async function cancelStaleQueuedRun(
@@ -1081,6 +1092,7 @@ export function createPostgresRunDispatchAdapter(
     evaluateScheduledRetryGate,
     listDueRetries,
     cancelStaleQueuedRun,
+    queuedRunNeedsLockedStalenessCheck,
     dispatchResolvedInteractionIfCurrent,
     promoteOrCancelDueRetry,
   };
