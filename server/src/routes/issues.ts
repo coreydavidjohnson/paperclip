@@ -15284,6 +15284,80 @@ export function issueRoutes(
     );
   });
 
+  // External runtimes cannot use native-session steering. Deliver a comment
+  // snapshot and its queue receipt together; a plain GET remains read-only.
+  router.post("/issues/:id/comments/delivery", validate(z.object({}).strict()), async (req, res) => {
+    if (req.actor.type !== "agent" || !req.actor.agentId || !req.actor.runId) {
+      throw forbidden("Comment delivery requires an authenticated agent run");
+    }
+    const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const actor = getActorInfo(req);
+    const result = await db.transaction(async tx => {
+      const [current] = await tx.select().from(issueRows).where(and(
+        eq(issueRows.id, issue.id), eq(issueRows.companyId, issue.companyId),
+      )).for("update");
+      const [run] = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, req.actor.runId!), eq(heartbeatRuns.companyId, issue.companyId),
+        eq(heartbeatRuns.agentId, req.actor.agentId!),
+      )).for("update");
+      const context = readObject(run?.contextSnapshot);
+      const runResult = readObject(run?.resultJson);
+      if (!current || !run || current.assigneeAgentId !== req.actor.agentId ||
+          current.executionRunId !== run.id || run.status !== "running" || run.finishedAt ||
+          (context.issueId !== current.id && context.taskId !== current.id) ||
+          readObject(runResult.executionCancellation).state ||
+          (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt <= new Date())) {
+        throw forbidden("Comment delivery must target this issue's active, uncancelled run");
+      }
+      if (run.runtimeMode !== "legacy" || current.conversationAgentId) {
+        throw conflict("This runtime must deliver messages through its ordered steering path");
+      }
+      // Reuse the ordinary reader's historical projection, author attribution
+      // and username/secret redaction; never expose raw comment rows here.
+      const comments = await svc.listComments(current.id);
+      const deliveredCommentIds: string[] = [];
+      const queueState = await findQueuedCommentWake(tx, current);
+      if (queueState?.state === "deferred" && !queuedInteractionId(queueState.wake.payload)) {
+        const locked = await lockQueuedCommentState({ tx, issue: current, actor,
+          queueId: queueState.wake.id, targetRunId: run.id });
+        const returned = new Map(comments.map(comment => [comment.id, comment]));
+        for (const entry of locked.queue.entries) {
+          const comment = returned.get(entry.comment.id);
+          if (comment && !comment.deletedAt &&
+              new Date(comment.updatedAt).getTime() === new Date(entry.comment.updatedAt).getTime()) {
+            deliveredCommentIds.push(comment.id);
+          }
+        }
+        if (deliveredCommentIds.length) {
+          const delivered = new Set(deliveredCommentIds);
+          const remaining = locked.queue.entries.map(entry => entry.comment.id).filter(id => !delivered.has(id));
+          const now = new Date();
+          await tx.update(agentWakeupRequests).set(remaining.length
+            ? { payload: withQueuedCommentIdsInWakePayload(locked.wake.payload, remaining), updatedAt: now }
+            : { status: "cancelled", finishedAt: now, updatedAt: now }
+          ).where(eq(agentWakeupRequests.id, locked.wake.id));
+          const acknowledgements = { ...readObject(runResult.queuedSteeringAcknowledgements) };
+          for (const id of deliveredCommentIds) acknowledgements[id] = {
+            status: "acknowledged", queueId: locked.wake.id, turnId: null,
+            delivery: "issue_comments_read", acknowledgedAt: now.toISOString(),
+          };
+          await tx.update(heartbeatRuns).set({ resultJson: {
+            ...runResult, queuedSteeringAcknowledgements: acknowledgements,
+          }, updatedAt: now }).where(eq(heartbeatRuns.id, run.id));
+        }
+      }
+      return { comments, deliveredCommentIds };
+    });
+    if (result.deliveredCommentIds.length) await logActivity(db, {
+      companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+      agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
+      action: "issue.queued_comments_delivered", entityType: "issue", entityId: issue.id,
+      details: { commentIds: result.deliveredCommentIds, delivery: "issue_comments_read" },
+    });
+    res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, result));
+  });
+
   /** Maps a wake-queue queued-comment mutation error onto the same HTTP error the route threw before this mutation moved into the module. */
   function throwForQueuedCommentMutationError(error: unknown): never {
     if (error instanceof QueuedCommentMutationError) {
