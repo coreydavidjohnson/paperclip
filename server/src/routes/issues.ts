@@ -1,3 +1,4 @@
+import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
 import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
@@ -15366,12 +15367,14 @@ export function issueRoutes(
       if (!current || !run || current.assigneeAgentId !== req.actor.agentId ||
           current.executionRunId !== run.id || run.status !== "running" || run.finishedAt ||
           (context.issueId !== current.id && context.taskId !== current.id) ||
-          readObject(runResult.executionCancellation).state ||
-          (run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt <= new Date())) {
+          readObject(runResult.executionCancellation).state) {
         throw forbidden("Comment delivery must target this issue's active, uncancelled run");
       }
       if (run.runtimeMode !== "legacy" || current.conversationAgentId) {
         throw conflict("This runtime must deliver messages through its ordered steering path");
+      }
+      if (!(await hasLiveLegacyController(tx as unknown as Db, run))) {
+        throw forbidden("Comment delivery requires a live external controller");
       }
       // Reuse the ordinary reader's historical projection, author attribution
       // and username/secret redaction; never expose raw comment rows here.

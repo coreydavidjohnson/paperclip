@@ -991,3 +991,5 @@ PER-1124 delivery receipts are retained atomically across legacy run finalizatio
 - Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
 - No production behavior changes. Exact native full-image gate remains required.
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
+
+PER-1124 review hardening: reuse hasLiveLegacyController under the run lock, including database-clock lease expiry and non-null controller identity. Missing-controller and missing-lease tests fail on the earlier candidate; queue receipts fail closed until the controller owns execution.
