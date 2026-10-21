@@ -135,7 +135,8 @@ export async function checkBoardRecovery(db:Db, issueId:string, deps:BoardRecove
         omnigentSessionId:(run.resultJson?.omnigentDispatchReceipt as Record<string,unknown>).omnigentSessionId,retiredAt:new Date(now).toISOString(),reason:'stable_issue_session_idle',currentSessionId:session.id,
         sourceRunUpdatedAt:run.updatedAt.toISOString(),runStaleLimitMs:STALE_RUN_MS,firstIdleObservedAt:observed.observation?.firstSeenAt,lastIdleObservedAt:now,sessionFingerprint:session.fingerprint,actionOutcomes:'unknown',providerStopped:false},summary:'An idle observer was retired for a same-session continuation. Prior action outcomes are unknown. Inspect retained evidence and actual targets before repeating any mutation.'})}::jsonb`})
       .where(and(eq(heartbeatRuns.id,run.id),eq(heartbeatRuns.status,'running'),eq(heartbeatRuns.controllerBootId,run.controllerBootId!),
-        eq(heartbeatRuns.updatedAt,run.updatedAt),sql`${heartbeatRuns.updatedAt} < ${new Date(now-STALE_RUN_MS)}`,
+        sql`date_trunc('milliseconds', ${heartbeatRuns.updatedAt}) = ${run.updatedAt.toISOString()}::timestamptz`,
+        sql`${heartbeatRuns.updatedAt} < ${new Date(now-STALE_RUN_MS).toISOString()}::timestamptz`,
         sql`${heartbeatRuns.resultJson}->'omnigentDispatchReceipt' = ${JSON.stringify(run.resultJson?.omnigentDispatchReceipt)}::jsonb`)).returning();
     if(retired?.wakeupRequestId) await tx.update(agentWakeupRequests).set({status:'failed',finishedAt:new Date(now),error:'Idle observer retired; provider preserved, prior action outcomes unknown.',updatedAt:new Date(now)})
       .where(and(eq(agentWakeupRequests.id,retired.wakeupRequestId),eq(agentWakeupRequests.companyId,issue.companyId)));

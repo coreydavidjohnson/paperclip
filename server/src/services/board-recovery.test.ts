@@ -62,6 +62,12 @@ const support=await getEmbeddedPostgresTestSupport();
   expect(run.resultJson?.omnigentObserverRetirement).toMatchObject({currentSessionId:'new',runStaleLimitMs:1200000,providerStopped:false});
   expect(s.counts()).toEqual({wakes:1,releases:1});
  });
+ it('handles PostgreSQL sub-millisecond source timestamps without a false CAS mismatch',async()=>{
+  const s=await seed();
+  await db.update(heartbeatRuns).set({updatedAt:sql`date_trunc('milliseconds', clock_timestamp()) - interval '2 hours' + interval '123 microseconds'`}).where(eq(heartbeatRuns.id,s.id));
+  expect((await idleForTenMinutes(s)).at(-1)?.status).toBe('observer_retired');
+  expect(s.counts()).toEqual({wakes:1,releases:1});
+ });
  it('does not retire a run refreshed during native wake admission',async()=>{
   const s=await seed(); const wake=s.deps.wake;
   s.deps.wake=async(...args)=>{
