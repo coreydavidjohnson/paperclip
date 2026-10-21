@@ -168,7 +168,20 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await ensureIssueRelationsTable(db);
   }, 20_000);
 
+  // Release deliberate test gates before draining, including after a timed-out test.
+  const fixtureReleases = new Set<() => void>();
+  const fixtureHolds = new Set<Promise<unknown>>();
+  async function drainFixtureExecutions() {
+    for (const release of fixtureReleases) release();
+    fixtureReleases.clear();
+    await Promise.all(fixtureHolds);
+    fixtureHolds.clear();
+    // The existing 30s hook budget remains fail-closed; status alone is too early.
+    await heartbeat.drainActiveRunExecutions();
+  }
+
   afterEach(async () => {
+    await drainFixtureExecutions();
     beforeContinuationDispatchCheck = null;
     afterContinuationDispatchCheck = null;
     mockAdapterExecute.mockReset();
@@ -201,6 +214,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
   });
 
   afterAll(async () => {
+    if (heartbeat) await drainFixtureExecutions();
     await tempDb?.cleanup();
   });
 
@@ -344,7 +358,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await queue(firstIssueId, first);
     await queue(secondIssueId, second);
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; fixtureReleases.add(resolve); });
     mockAdapterExecute.mockImplementation(async () => {
       await gate;
       return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Assignment finished.", provider: "test", model: "test-model" };
@@ -412,6 +426,77 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
     },
   );
+
+  it("defers a queued run behind a live issue owner without waiting on the issue row lock", async () => {
+    // A free slot is required, otherwise promotion stops before any claim.
+    const { companyId, agentId } = await seedCompanyAndAgent({ maxConcurrentRuns: 2 });
+    const issueId = randomUUID(), ownerId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Long observer", status: "todo", assigneeAgentId: agentId });
+    // A durable owner from another controller: running, not in this process.
+    await db.insert(heartbeatRuns).values({ id: ownerId, companyId, agentId, status: "running",
+      invocationSource: "automation", contextSnapshot: { issueId }, startedAt: new Date() });
+    await db.update(issues).set({ executionRunId: ownerId }).where(eq(issues.id, issueId));
+    const next = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_assigned" });
+    const holder = createDb(tempDb!.connectionString);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; fixtureReleases.add(resolve); });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const holding = holder.transaction(async (tx) => {
+      await tx.execute(sql`select id from issues where id = ${issueId} for update`);
+      locked();
+      await released;
+    });
+    fixtureHolds.add(holding);
+    try {
+      await isLocked;
+      const startedAt = Date.now();
+      await heartbeat.resumeQueuedRuns();
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect((await heartbeat.getRun(next.runId))?.status).toBe("queued");
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+    } finally {
+      release();
+      await holding;
+      await holder.$client.end({ timeout: 1 });
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, ownerId));
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, next.runId));
+    }
+  }, 20_000);
+
+  it("skips a contended issue row and claims on the next pass when no live owner is recorded", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Contended", status: "todo", assigneeAgentId: agentId });
+    const next = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_assigned" });
+    const holder = createDb(tempDb!.connectionString);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; fixtureReleases.add(resolve); });
+    let locked!: () => void;
+    const isLocked = new Promise<void>((resolve) => { locked = resolve; });
+    const holding = holder.transaction(async (tx) => {
+      await tx.execute(sql`select id from issues where id = ${issueId} for update`);
+      locked();
+      await released;
+    });
+    fixtureHolds.add(holding);
+    try {
+      await isLocked;
+      const startedAt = Date.now();
+      await heartbeat.resumeQueuedRuns();
+      // The optional claim skips the held row instead of queueing behind it.
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      expect((await heartbeat.getRun(next.runId))?.status).toBe("queued");
+    } finally {
+      release();
+      await holding;
+      await holder.$client.end({ timeout: 1 });
+    }
+    // The next promotion pass claims normally once the row is free.
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
+    expect((await heartbeat.getRun(next.runId))?.status).toBe("succeeded");
+  }, 20_000);
 
   it("skips generic timer wakes with no actionable assigned work before adapter execution", async () => {
     const { agentId } = await seedCompanyAndAgent({

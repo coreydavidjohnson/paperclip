@@ -2496,6 +2496,64 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
+  it("hands a current agent-owned disposition repair back once with persisted history (PER-1091)", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, issueId: sourceIssueId, runId });
+    await db.update(issues).set({ checkoutRunId: runId, executionRunId: runId }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "agent",
+      ownerAgentId: coderId, previousOwnerAgentId: coderId, returnOwnerAgentId: coderId,
+      cause: "deliberate_wait_without_target", fingerprint: "disposition_repair:v1:per1091",
+      evidence: { reason: "deliberate_wait_without_target", sourceRunId: runId },
+      nextAction: "Restore the owner's work path.",
+      wakePolicy: { type: "bounded_owner_disposition_repair", retryAgentId: coderId, attempt: 1, maxAttempts: 2 },
+      maxAttempts: 2,
+    });
+    const wake = vi.fn(async () => null);
+    const app = createApp({ type: "agent", companyId, agentId: coderId, runId, source: "agent_key" }, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "Owner work path restored." };
+    const first = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(first.body.issue).toMatchObject({ status: "todo", assigneeAgentId: coderId, activeRecoveryAction: null });
+    expect(first.body.issue).toMatchObject({ checkoutRunId: null, executionRunId: null });
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toMatchObject({ checkoutRunId: null, executionRunId: null });
+    expect(first.body.recoveryAction).toMatchObject({ id: action.id, status: "resolved", outcome: "handed_back", fingerprint: action.fingerprint, evidence: action.evidence });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith(coderId, expect.objectContaining({
+      reason: "issue_recovery_action_restored", payload: expect.objectContaining({ issueId: sourceIssueId, recoveryActionId: action.id }),
+    }));
+    const stored = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(stored).toEqual([expect.objectContaining({ status: "resolved", outcome: "handed_back", fingerprint: action.fingerprint, evidence: action.evidence })]);
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
+    expect(logs.filter(entry => entry.action === "issue.updated")).toHaveLength(1);
+    // Replaying an existing note does not authorize an agent to append a new one.
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      ...body, resolutionNote: "Unapproved new evidence.",
+    }).expect(403);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(stored);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toEqual(logs);
+    // Once the board annotates, whole-note audit identity must still admit the
+    // original owner's lost-response replay without a second write or wake.
+    const board = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    await request(board).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      ...body, resolutionNote: "Board observation after hand-back.",
+    }).expect(200);
+    const annotated = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const source = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const annotatedLogs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(annotated[0].resolutionNote).toBe(body.resolutionNote + String.fromCharCode(10, 10) + "Board observation after hand-back.");
+    expect(annotatedLogs.filter(entry => entry.action === "issue.recovery_action_note_added")).toHaveLength(1);
+    const readable = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: action.id }).expect(200);
+    expect(readable.body.actions[0].resolutionNote).toBe(annotated[0].resolutionNote);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(annotated);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(source);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toEqual(annotatedLogs);
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
   it("retries an exhausted disposition action once, preserving the owner and audit trail", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     await db.update(issues).set({ status: "blocked", assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));
