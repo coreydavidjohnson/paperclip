@@ -168,7 +168,20 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await ensureIssueRelationsTable(db);
   }, 20_000);
 
+  // Release deliberate test gates before draining, including after a timed-out test.
+  const fixtureReleases = new Set<() => void>();
+  const fixtureHolds = new Set<Promise<unknown>>();
+  async function drainFixtureExecutions() {
+    for (const release of fixtureReleases) release();
+    fixtureReleases.clear();
+    await Promise.all(fixtureHolds);
+    fixtureHolds.clear();
+    // The existing 30s hook budget remains fail-closed; status alone is too early.
+    await heartbeat.drainActiveRunExecutions();
+  }
+
   afterEach(async () => {
+    await drainFixtureExecutions();
     beforeContinuationDispatchCheck = null;
     afterContinuationDispatchCheck = null;
     mockAdapterExecute.mockReset();
@@ -201,6 +214,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
   });
 
   afterAll(async () => {
+    if (heartbeat) await drainFixtureExecutions();
     await tempDb?.cleanup();
   });
 
@@ -344,7 +358,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await queue(firstIssueId, first);
     await queue(secondIssueId, second);
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; fixtureReleases.add(resolve); });
     mockAdapterExecute.mockImplementation(async () => {
       await gate;
       return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Assignment finished.", provider: "test", model: "test-model" };
@@ -425,7 +439,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const next = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_assigned" });
     const holder = createDb(tempDb!.connectionString);
     let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; fixtureReleases.add(resolve); });
     let locked!: () => void;
     const isLocked = new Promise<void>((resolve) => { locked = resolve; });
     const holding = holder.transaction(async (tx) => {
@@ -433,6 +447,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       locked();
       await released;
     });
+    fixtureHolds.add(holding);
     try {
       await isLocked;
       const startedAt = Date.now();
@@ -456,7 +471,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const next = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_assigned" });
     const holder = createDb(tempDb!.connectionString);
     let release!: () => void;
-    const released = new Promise<void>((resolve) => { release = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; fixtureReleases.add(resolve); });
     let locked!: () => void;
     const isLocked = new Promise<void>((resolve) => { locked = resolve; });
     const holding = holder.transaction(async (tx) => {
@@ -464,6 +479,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       locked();
       await released;
     });
+    fixtureHolds.add(holding);
     try {
       await isLocked;
       const startedAt = Date.now();
