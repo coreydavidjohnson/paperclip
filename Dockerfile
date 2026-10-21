@@ -178,6 +178,8 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/services/heartbeat/external-run-state.runtime.test.ts \
     src/services/heartbeat/external-run-liveness.test.ts \
     src/__tests__/heartbeat-external-liveness-db.test.ts \
+    src/__tests__/heartbeat-confirmed-stop-db.test.ts \
+    src/__tests__/heartbeat-confirmed-stop-integration.test.ts \
     src/__tests__/heartbeat-external-observer-integration.test.ts \
     src/__tests__/heartbeat-route-liveness-recovery.test.ts \
     src/__tests__/heartbeat-stop-owner-liveness-recovery.test.ts \

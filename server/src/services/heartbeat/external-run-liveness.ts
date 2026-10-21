@@ -1,10 +1,13 @@
+import { isDeepStrictEqual } from "node:util";
 import { and, asc, eq, isNotNull, or, sql } from "drizzle-orm";
-import { heartbeatRuns, issueRecoveryActions, issues, runLivenessOutbox, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, heartbeatRuns, issueRecoveryActions, issues, runLivenessOutbox, type Db } from "@paperclipai/db";
 import type { AdapterExecutionResult, ExternalRunHandle, ServerAdapterModule } from "@paperclipai/adapter-utils";
 import { terminalizeLegacyExecution } from "../legacy-execution-recovery.js";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { legacyControllerBootId } from "../legacy-controller-lease.js";
 import { logger } from "../../middleware/logger.js";
+import { getExecutionBlocker } from "../execution-blocker.js";
+import { readRunCancellation } from "../run-cancellation.js";
 import { recordedExternalRunConfiguration } from "./external-run-state.js";
 import type { ExternalRunProbe } from "@paperclipai/adapter-utils";
 
@@ -58,6 +61,13 @@ export function decideExternalRunLiveness(run: DecisionRun, result: ExternalRunP
 }
 
 
+function externalProbeDue() {
+  return or(sql`coalesce(${heartbeatRuns.lastProgressAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= clock_timestamp() - interval '15 minutes'`,
+          sql`(${heartbeatRuns.externalRunHandle}->>'dispatch') in ('prepared', 'submission_unknown') and coalesce(${heartbeatRuns.lastProgressAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= clock_timestamp() - interval '10 minutes'`,
+          sql`${heartbeatRuns.deadlineAt} <= clock_timestamp()`,
+          sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`);
+}
+
 type Run = typeof heartbeatRuns.$inferSelect;
 interface Dependencies {
   getAdapter: (type: string) => ServerAdapterModule | undefined;
@@ -104,26 +114,72 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
             ? [or(sql`${heartbeatRuns.controllerLeaseExpiresAt} is null`, sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`)!] : [])],
       });
       if (!updated) return;
-      // Stop evidence closes only this run's liveness hold, never workspace, approvals or dependencies.
-      if (redispatch) {
-        const holds = await tx.select().from(issueRecoveryActions).where(and(
-          eq(issueRecoveryActions.companyId, run.companyId),
-          eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`),
-          sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
-          sql`not (${issueRecoveryActions.evidence} ? 'workspaceRestoreFailure')`,
-          sql`not (${issueRecoveryActions.evidence} ? 'workspaceRestoreRecovery')`,
-        )).for("update");
-        for (const hold of holds) await tx.update(issueRecoveryActions).set({ status: "resolved", outcome: "recovered", resolvedAt: sql`clock_timestamp()`,
-          evidence: { ...hold.evidence, automaticRecovery: undefined, continuationDelivery: "not_requested",
-            executionReconciliation: { runId: run.id, providerStopped: true, actionOutcome: "mixed", outcomeEvidence: JSON.stringify(decision.probe), actorId: "external-liveness" } },
-        }).where(eq(issueRecoveryActions.id, hold.id));
-      }
+      if (redispatch) await recordConfirmedStop(tx as unknown as Db, updated, decision.probe);
       await tx.insert(runLivenessOutbox).values({ companyId: run.companyId, runId: run.id, action: "finalize_external_run",
         dedupeKey: `liveness:${run.id}`, payload: { redispatch } }).onConflictDoNothing();
       await event(tx as unknown as Db, run, code, decision.probe);
       counters[code] = (counters[code] ?? 0) + 1;
     });
   }
+  function operatorStopped(run: Run) {
+    const cancellation = readRunCancellation(run.resultJson);
+    return run.status === "cancelled" && cancellation?.source === "operator" && cancellation.expected;
+  }
+
+  // Caller owns the issue/run locks. Never retire another run's or workspace's hold.
+  async function recordConfirmedStop(tx: Db, run: Run, probe: Record<string, unknown>) {
+    probe = { ...probe, handle: run.externalRunHandle };
+    const reconciliation = { runId: run.id, providerStopped: true, actionOutcome: "mixed",
+      probe, outcomeEvidence: JSON.stringify(probe), actorId: "external-liveness", recordedAt: new Date().toISOString() };
+    const [updated] = await tx.update(heartbeatRuns).set({
+      resultJson: { ...run.resultJson, executionReconciliation: reconciliation },
+    }).where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id))).returning();
+    const issueId = run.issueId ?? run.nativeIssueId ?? run.contextSnapshot?.issueId;
+    const holds = await tx.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.companyId, run.companyId),
+      typeof issueId === "string" ? eq(issueRecoveryActions.sourceIssueId, issueId) : sql`false`,
+      eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`),
+      eq(issueRecoveryActions.cause, "legacy_execution_requires_reconciliation"),
+      sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+      sql`not (${issueRecoveryActions.evidence} ? 'workspaceRestoreFailure')`,
+      sql`not (${issueRecoveryActions.evidence} ? 'workspaceRestoreRecovery')`,
+    )).for("update");
+    for (const hold of holds) await tx.update(issueRecoveryActions).set({
+      status: "resolved", outcome: "recovered", resolvedAt: sql`clock_timestamp()`, updatedAt: sql`clock_timestamp()`,
+      wakePolicy: null, monitorPolicy: null,
+      evidence: { ...hold.evidence, automaticRecovery: undefined, continuationDelivery: "not_requested", executionReconciliation: reconciliation },
+    }).where(eq(issueRecoveryActions.id, hold.id));
+    return updated;
+  }
+
+  async function reconcileOperatorStop(run: Run, result: ExternalRunProbe) {
+    const issueId = run.issueId ?? run.nativeIssueId ?? run.contextSnapshot?.issueId;
+    return db.transaction(async tx => {
+      // Same lock order as terminalizeLegacyExecution and the normal release path.
+      if (typeof issueId === "string") await tx.select({ id: issues.id }).from(issues).where(and(
+        eq(issues.companyId, run.companyId), eq(issues.id, issueId),
+      )).for("update");
+      const [current] = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id),
+        eq(heartbeatRuns.livenessVersion, run.livenessVersion), eq(heartbeatRuns.observerEpoch, run.observerEpoch),
+      )).for("update");
+      if (!current || !operatorStopped(current) || current.runtimeMode !== "legacy") throw new Error("external stop evidence superseded");
+      const probe = { ...result, checkedAt: new Date().toISOString(), handle: current.externalRunHandle, operatorStop: readRunCancellation(current.resultJson) };
+      await tx.update(heartbeatRuns).set({ livenessProbe: probe, livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1` })
+        .where(eq(heartbeatRuns.id, current.id));
+      if (result.state !== "gone" && result.state !== "settled") return false;
+      await recordConfirmedStop(tx as unknown as Db, current, probe);
+      const [parked] = typeof issueId === "string" ? await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        sql`${agentWakeupRequests.runId} is null`, sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+      )).limit(1) : [];
+      await tx.insert(runLivenessOutbox).values({ companyId: run.companyId, runId: run.id, action: "finalize_external_run",
+        dedupeKey: `liveness:${run.id}`, payload: { redispatch: Boolean(parked) } }).onConflictDoNothing();
+      await event(tx as unknown as Db, current, "provider_stopped", probe);
+      return true;
+    });
+  }
+
   async function inspect(candidate: Run) {
     const [run] = await db.update(heartbeatRuns).set({ livenessClaimedUntil: sql`clock_timestamp() + interval '30 seconds'`,
       deadlineAt: sql`coalesce(${heartbeatRuns.deadlineAt}, coalesce(${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) + interval '12 hours')` }).where(and(
@@ -198,10 +254,7 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
     const candidates = await db.select().from(heartbeatRuns)
       .where(and(eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.runtimeMode, "legacy"), isNotNull(heartbeatRuns.externalRunHandle),
         or(sql`${heartbeatRuns.livenessClaimedUntil} is null`,sql`${heartbeatRuns.livenessClaimedUntil} <= clock_timestamp()`),
-        or(sql`coalesce(${heartbeatRuns.lastProgressAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= clock_timestamp() - interval '15 minutes'`,
-          sql`(${heartbeatRuns.externalRunHandle}->>'dispatch') in ('prepared', 'submission_unknown') and coalesce(${heartbeatRuns.lastProgressAt}, ${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= clock_timestamp() - interval '10 minutes'`,
-          sql`${heartbeatRuns.deadlineAt} <= clock_timestamp()`,
-          sql`${heartbeatRuns.controllerLeaseExpiresAt} <= clock_timestamp()`),
+        externalProbeDue(),
       )).orderBy(sql`${heartbeatRuns.livenessClaimedUntil} asc nulls first`, asc(heartbeatRuns.createdAt)).limit(25);
     for (let i = 0; i < candidates.length; i += 4) await Promise.all(candidates.slice(i, i+4).map(async candidate => {
       try {
@@ -209,6 +262,58 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       } catch (err) { logger.warn({ err, runId: candidate.id }, "External liveness remains retryable"); }
     }));
   }
+  /** One bounded, company-scoped cutover page. Dry run never mutates or stops a provider.
+   * The cursor advances past unprovable wakes, so they cannot starve later pages. */
+  async function sweepParkedWakes(options: { companyId: string; afterWakeId?: string; apply?: boolean }) {
+    const wakes = await db.select().from(agentWakeupRequests).where(and(
+      eq(agentWakeupRequests.companyId, options.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+      sql`${agentWakeupRequests.runId} is null`,
+      options.afterWakeId ? sql`${agentWakeupRequests.id} > ${options.afterWakeId}::uuid` : undefined,
+    )).orderBy(asc(agentWakeupRequests.id)).limit(25);
+    const entries: Array<{ wakeId: string; issueId: string | null; runId: string | null; state: string; applied: boolean }> = [];
+    const inspected = new Map<string, { state: string; applied: boolean }>();
+    for (const wake of wakes) {
+      const issueId = typeof wake.payload?.issueId === "string" ? wake.payload.issueId : null;
+      const entry = { wakeId: wake.id, issueId, runId: null as string | null, state: "no_probeable_execution_hold", applied: false };
+      entries.push(entry);
+      if (!issueId || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(issueId)) continue;
+      const hold = await getExecutionBlocker(db, options.companyId, issueId);
+      const [task] = !hold?.runId ? await db.select({ executionRunId: issues.executionRunId }).from(issues).where(and(
+        eq(issues.companyId, options.companyId), eq(issues.id, issueId),
+      )) : [];
+      entry.runId = hold?.runId ?? task?.executionRunId ?? null;
+      if (!entry.runId) continue;
+      if (inspected.has(entry.runId)) { Object.assign(entry, inspected.get(entry.runId)); continue; }
+      try {
+        const [run] = await db.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, options.companyId), eq(heartbeatRuns.id, entry.runId),
+        ));
+        if (!run?.externalRunHandle || run.runtimeMode !== "legacy") { entry.state = "missing_durable_handle"; continue; }
+        if (run.status !== "running" && !operatorStopped(run)) { entry.state = "manual_reconciliation_required"; continue; }
+        if (run.status === "running") {
+          const [due] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(eq(heartbeatRuns.id, run.id), externalProbeDue()));
+          if (!due) { entry.state = "progress_grace"; continue; }
+        }
+        const saved = recordedExternalRunConfiguration(run), adapter = dependencies.getAdapter(saved.adapterType);
+        if (!adapter?.probeRun) { entry.state = "probe_unavailable"; continue; }
+        const config = await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId, saved.config));
+        const result = await boundedExternalRunOperation(signal => adapter.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
+        entry.state = result.state;
+        if (operatorStopped(run)) {
+          if (options.apply && (result.state === "gone" || result.state === "settled")) entry.applied = await reconcileOperatorStop(run, result);
+        } else {
+          const [{ now }] = await db.select({ now: sql<Date>`clock_timestamp()`.mapWith(heartbeatRuns.createdAt) }).from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
+          const decision = decideExternalRunLiveness(run, result, now);
+          if (decision.end === "external_session_gone") {
+            if (options.apply) { await finish(run, decision); entry.applied = (await db.select({ code: heartbeatRuns.errorCode }).from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0]?.code === "external_session_gone"; }
+          } else if (result.state === "gone") entry.state = "gone_not_confirmed";
+        }
+      } catch (error) { entry.state = "probe_unprovable"; }
+      finally { inspected.set(entry.runId, { state: entry.state, applied: entry.applied }); }
+    }
+    return { dryRun: !options.apply, entries, nextCursor: wakes.length === 25 ? wakes.at(-1)!.id : null };
+  }
+
   async function consumeOutbox() {
     const pending = await db.select().from(runLivenessOutbox).where(and(eq(runLivenessOutbox.status, "pending"),
       sql`${runLivenessOutbox.nextAttemptAt} <= clock_timestamp()`)).orderBy(asc(runLivenessOutbox.nextAttemptAt)).limit(25);
@@ -224,12 +329,26 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
           eq(heartbeatRuns.id,row.runId!),eq(heartbeatRuns.companyId,row.companyId!)));
         if (!run) throw new Error("external run outbox source missing");
         if (["running","queued"].includes(run.status)) throw new Error("external run is not terminal");
-        if (row.action === "stop_provider_session") {
+        const reconciliation = run.resultJson?.executionReconciliation as Record<string, unknown> | undefined;
+        const stopped = operatorStopped(run) && reconciliation?.runId === run.id &&
+          reconciliation.actorId === "external-liveness" && reconciliation.providerStopped === true &&
+          ["gone", "settled"].includes(String(run.livenessProbe?.state)) &&
+          isDeepStrictEqual(reconciliation.probe, run.livenessProbe) &&
+          isDeepStrictEqual(run.livenessProbe?.handle, run.externalRunHandle) &&
+          isDeepStrictEqual(run.livenessProbe?.operatorStop, readRunCancellation(run.resultJson));
+        if (row.action === "stop_provider_session" && !stopped) {
           const saved=recordedExternalRunConfiguration(run);
           const adapter=dependencies.getAdapter(saved.adapterType);
           if (!adapter?.stopRun) throw new Error("adapter stopRun unavailable");
           const config=await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId,saved.config));
           await boundedExternalRunOperation(signal=>adapter.stopRun!({config,handle:run.externalRunHandle as ExternalRunHandle,signal}));
+          if (operatorStopped(run) && run.runtimeMode === "legacy") {
+            if (!adapter.probeRun) throw new Error("adapter probeRun unavailable after operator stop");
+            const probe = await boundedExternalRunOperation(signal => adapter.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
+            if (!await reconcileOperatorStop(run, probe)) throw new Error(`operator stop not confirmed: ${probe.state}`);
+          }
+        } else if (row.action === "stop_provider_session" && stopped) {
+          // The stop proof committed before a lost ACK. Never stop the reused session again.
         } else if (row.action === "finalize_external_run") {
           // Persist/admit the recovery contract before releasing queued human
           // input. Otherwise terminal cleanup can promote an unsafe plain wake.
@@ -243,5 +362,5 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       }
     }
   }
-  return { sweep, consumeOutbox, metrics: () => ({ ...counters }) };
+  return { sweep, consumeOutbox, sweepParkedWakes, metrics: () => ({ ...counters }) };
 }

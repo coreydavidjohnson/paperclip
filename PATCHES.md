@@ -223,6 +223,11 @@ heartbeat.ts.
   Completion transfers cleanup-event authority only from its accepted terminal row.
   Direct-Stop no-work accounting requires the exact settlement receipt and epoch.
   Newer recovery coalesces older input-free receipts; saved human input is retained.
+- Confirmed-stop integration (PER-1011): operator cancellation retains its hold
+  until a fresh original-turn probe returns gone/settled. Reconciliation and
+  the existing keyed release outbox commit together; a retained proof prevents
+  a lost ACK from stopping a reused session. The bounded cutover CLI defaults
+  to read-only and reports unprovable sources. Ordinary task gates still apply.
 - Files: adapter-utils contract, database migration `0355_run_liveness`,
   `services/heartbeat/external-run-state.ts`, `external-run-liveness.ts`,
   runtime/output/completion/lifecycle/recovery/queue integration, controller lease,

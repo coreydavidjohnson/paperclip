@@ -1859,7 +1859,7 @@ export function heartbeatService(
       void observation.finally(() => activeRunExecutionPromises.delete(observation));
     },
     onTerminal: async run => {
-      await setWakeupStatus(run.wakeupRequestId, "failed", { finishedAt: run.finishedAt ?? new Date(), error: run.error });
+      await setWakeupStatus(run.wakeupRequestId, run.status === "cancelled" ? "cancelled" : "failed", { finishedAt: run.finishedAt ?? new Date(), error: run.error });
       await releaseEnvironmentLeasesForRun({ runId: run.id, companyId: run.companyId, agentId: run.agentId,
         status: run.status, failureReason: run.error, providerResourceDisposition: providerResourceDispositionForTerminalRun("stop_and_retain", run.status) });
       await releaseIssueExecutionAndPromote(run, { suppressImmediateRecovery: true });
@@ -1872,7 +1872,7 @@ export function heartbeatService(
         requestedByActorType: "system", requestedByActorId: "external-liveness", idempotencyKey: `liveness:${run.id}`,
         payload: { issueId }, contextSnapshot: { issueId, source: "external.liveness", forceFreshSession: true,
           recovery: { predecessorRunId: run.id, outcomesUnknown: true },
-          prompt: "The previous external session is gone. Its action outcomes are unknown. Inspect current task state and verify prior effects before continuing; do not blindly replay earlier actions." },
+          prompt: "The previous external execution has stopped or is gone. Its action outcomes are unknown. Inspect current task state and verify prior effects before continuing; do not blindly replay earlier actions." },
       });
     },
   });
@@ -4160,6 +4160,7 @@ export function heartbeatService(
     recoverNativeRunsAfterRestart,
     reapOrphanedRuns,
     sweepExternalRunLiveness: externalLiveness.sweep,
+    sweepParkedExternalWakes: externalLiveness.sweepParkedWakes,
     consumeExternalRunLivenessOutbox: externalLiveness.consumeOutbox,
     sweepOrphanedActiveLeases,
     sweepPendingCleanupLeases,
