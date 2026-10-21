@@ -1115,3 +1115,13 @@ now use the existing upstream EMBEDDED_POSTGRES_TEST_TIMEOUT_MS (90 seconds),
 as the dependency-scheduling and redaction suites already do. Assertions,
 production timeouts and the required full image gate are unchanged. Remove
 this test-only carry when the tracked upstream suites use their native budget.
+
+
+PER-218 sibling audit after build 21824: 49 files passed, but stale-queue's
+20-second beforeAll timed out (1,088 passed cases; 51 skipped due to failed
+setup). Its beforeAll and the last sibling 20-second company-skills-service
+startup override now use the same existing native budget. Same-pinned-image
+diagnostic 21825 completed both suites with exit 0; console clipping prevents
+an independent final test-count readback, so no count is claimed. The two
+20-second contention-test deadlines remain unchanged. The full packaged image,
+compiled migrations, scale fixture and normal release gates remain required.

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   agents,
   agentWakeupRequests,
   companies,
@@ -166,7 +167,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       },
     });
     await ensureIssueRelationsTable(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   // Release deliberate test gates before draining, including after a timed-out test.
   const fixtureReleases = new Set<() => void>();
