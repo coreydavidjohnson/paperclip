@@ -14,7 +14,7 @@ function fixture() {
   const run = { id: runId, companyId, agentId: callerId, status: "running",
     responsibleUserId: "board-user", contextSnapshot: { issueId: parentId }, resultJson: null,
     nativeIssueId: null, activeIdentityContextId: null };
-  const body = { assigneeAgentId: targetId, status: "todo", blockParentUntilDone: true };
+  const body = { assigneeAgentId: targetId, status: "todo", blockParentUntilDone: false };
   const rows: unknown[][] = [[target], [caller, target], [parent], [run]];
   const locks: string[] = [];
   const db = {
@@ -51,11 +51,12 @@ describe("bounded native Home Lab child delegation", () => {
     ["unauthenticated source", f => { f.actor.source = "none"; }],
     ["scoped key", f => { f.actor.keyScope = { kind: "skill_test", issueId: f.parentId } as any; }],
     ["wrong status", f => { f.body.status = "in_progress"; }],
-    ["no parent blocker", f => { f.body.blockParentUntilDone = false; }],
+    ["blocking child", f => { f.body.blockParentUntilDone = true; }],
     ["additional prerequisites", f => { Object.assign(f.body, { blockedByIssueIds: [randomUUID()] }); }],
     ["user assignment", f => { Object.assign(f.body, { assigneeUserId: "board" }); }],
     ["owner changed", f => { f.parent.assigneeAgentId = randomUUID(); }],
     ["terminal parent", f => { f.parent.status = "done"; }],
+    ["unknown parent status", f => { f.parent.status = "unknown"; }],
     ["wrong issue run", f => { f.run.contextSnapshot.issueId = randomUUID(); }],
     ["native issue mismatch", f => { Object.assign(f.run, { nativeIssueId: randomUUID() }); }],
     ["stopped run", f => { f.run.status = "cancelled"; }],
