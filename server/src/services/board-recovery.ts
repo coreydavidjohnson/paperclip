@@ -68,7 +68,7 @@ export async function checkBoardRecovery(db:Db, issueId:string, deps:BoardRecove
     sql`coalesce(${agentWakeupRequests.reason},'') != ${BOARD_RECOVERY_REASON}`,
     // A wake deferred by this exact execution hold is not a live continuation.
     // Inspect the provider before reconciling; leave real queued work alone.
-    blocker ? sql`not (${agentWakeupRequests.status} = 'deferred_issue_execution' and coalesce(${agentWakeupRequests.reason},'') = 'execution_reconciliation_required')` : undefined)).limit(1);
+    blocker ? sql`not (${agentWakeupRequests.status} = 'deferred_issue_execution' and (coalesce(${agentWakeupRequests.reason},'') = 'execution_reconciliation_required' or coalesce(${agentWakeupRequests.payload}->'executionWait'->>'recoveryActionId','') = ${blocker.recoveryActionId ?? ''}))` : undefined)).limit(1);
   if(queued) return {status:'held'};
   const config=await deps.resolveConfig(issue.companyId,agent.adapterConfig);
   const session=await probeNewestIssueSession({companyId:issue.companyId,agentId:agent.id,issueId},config,deps.request);
