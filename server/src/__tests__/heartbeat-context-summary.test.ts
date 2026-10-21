@@ -5,9 +5,37 @@ import {
   summarizeHeartbeatRunContextSnapshot,
   summarizeHeartbeatRunListResultJson,
 } from "../services/heartbeat.js";
-import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
+import { selectPaperclipPromptSections, renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 
 describe("buildPaperclipTaskMarkdown", () => {
+  it.each([false, true])("delivers five comment bodies once on the real assignment path (resumed=%s)", (resumedSession) => {
+    const issue = { id: "issue-batch", identifier: "PER-1092", title: "Wake batch", description: "Assignment brief" };
+    const comments = Array.from({ length: 5 }, (_, index) => ({ id: `comment-${index}`, body: `Unique pending direction ${index}.` }));
+    const input = { issue, wakeComments: comments, includeWakeComments: false };
+    const context = {
+      paperclipTaskMarkdownAssignment: buildPaperclipTaskMarkdown(input),
+      paperclipTaskMarkdownAssignmentCompact: buildPaperclipTaskMarkdown({ ...input, includeDescription: false }),
+      paperclipTurnContext: { version: 1, events: { owner: "wake_prompt" } },
+      paperclipWake: { reason: "issue_commented", issue, comments, commentIds: comments.map(comment => comment.id),
+        commentWindow: { requestedCount: 5, includedCount: 5, missingCount: 0 }, fallbackFetchNeeded: false },
+    };
+    const { taskContextNote, wakePrompt } = selectPaperclipPromptSections(context, { resumedSession });
+    const prompt = [taskContextNote, wakePrompt].join(String.fromCharCode(10));
+    expect(taskContextNote).not.toContain("Pending wake comments (oldest to newest):");
+    expect(taskContextNote).not.toContain("Wake comment 1 (");
+    for (const comment of comments) {
+      expect(taskContextNote).not.toContain(comment.body);
+      expect(wakePrompt).toContain(comment.body);
+      expect(prompt.split(comment.body)).toHaveLength(2);
+    }
+  });
+
+  it("does not print a bodyless single-comment heading on the assignment path", () => {
+    const markdown = buildPaperclipTaskMarkdown({ issue: { id: "single", identifier: null, title: "Single" },
+      wakeComments: [{ id: "comment", body: "Current direction" }], includeWakeComments: false });
+    expect(markdown).not.toContain("Latest wake comment:");
+  });
+
   it("asks for early naming only while an ordinary task has a provisional title", () => {
     const issue = { id: "task-id", identifier: "PAP-1", title: "Please investigate", description: "Please investigate sign-in failures", titleNeedsGeneration: true };
     const markdown = buildPaperclipTaskMarkdown({ issue });

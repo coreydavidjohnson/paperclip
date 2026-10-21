@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { agents, agentWakeupRequests, activityLog, companies, createDb, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { createChildIssueSchema } from "@paperclipai/shared";
+import { issueService } from "../services/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -250,5 +252,122 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.runs()).toHaveLength(2);
     const repair = (await f.runs()).find(r => r.id !== f.runId)!;
     expect(repair.contextSnapshot).toMatchObject({ legacyDispositionEpisode: { id: f.runId, attempt: 1 } });
+  });
+  it.each(["coordination", "routing"])("routing-child: %s cannot block its parent", async purpose => {
+    const f = await fixture();
+    const input = createChildIssueSchema.parse({title: "Route owner hand-back", status: "todo",
+      childPurpose: purpose, blockParentUntilDone: true});
+    const result = await issueService(db).createChild(f.issueId, input);
+    expect(result.parentBlockerAdded).toBe(false);
+    expect(result.issue.originKind).toBe(`${purpose}_child`);
+    await expect(issueService(db).update(f.issueId, { blockedByIssueIds: [result.issue.id] }))
+      .rejects.toMatchObject({status: 422, message: "Routing or coordination children cannot block their parent"});
+  });
+  it("routing-child: implementation child remains a blocker", async () => {
+    const f = await fixture();
+    const result = await issueService(db).createChild(f.issueId, {
+      title: "Implement required part", status: "todo", blockParentUntilDone: true,
+    });
+    expect(result.parentBlockerAdded).toBe(true);
+  });
+  it.each(["todo", "done", "hidden"])("routing-child: historical %s child cannot override a blocked disposition", async history => {
+    const f = await fixture();
+    await db.insert(issues).values({ companyId: f.companyId, parentId: f.issueId,
+      title: "Historical routing", status: history === "done" ? "done" : "todo",
+      hiddenAt: history === "hidden" ? new Date() : null, originKind: "routing_child" });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it("routing-child: historical child does not label an ordinary repair as a handback", async () => {
+    const f = await fixture();
+    await db.insert(issues).values({ companyId: f.companyId, parentId: f.issueId,
+      title: "Historical coordination", status: "done", hiddenAt: new Date(), originKind: "coordination_child" });
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("queued");
+    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(repair.contextSnapshot?.routingParentHandback).toBeUndefined();
+    expect(repair.contextSnapshot?.wakeReason).toBe("issue_disposition_repair");
+  });
+  async function routingHandbackFixture() {
+    const f = await fixture();
+    const childId = randomUUID();
+    await db.insert(issues).values({ id: childId, companyId: f.companyId, parentId: f.issueId,
+      title: "Current routing", status: "todo", originKind: "routing_child" });
+    await db.insert(issueRelations).values({ companyId: f.companyId, issueId: childId, relatedIssueId: f.issueId, type: "blocks" });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    return f;
+  }
+  it("routing-child: stale edge removal preserves an independent unblock descriptor", async () => {
+    const f = await routingHandbackFixture();
+    const descriptor = { owner: "board" as const, action: "Provide export credentials" };
+    await db.update(issues).set({ unblockDescriptor: descriptor }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
+    expect(await f.runs()).toHaveLength(1);
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, f.issueId))).toHaveLength(0);
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].unblockDescriptor).toEqual(descriptor);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it.each(["descriptor", "status-version", "blocked-transition", "updated-at"])("routing-child: a new %s disposition invalidates handback before dispatch", async mutation => {
+    const f = await routingHandbackFixture();
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("queued");
+    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBeNull();
+    const [before] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    const later = new Date(Date.now() + 1000);
+    await db.update(issues).set({
+      ...(mutation === "descriptor" ? { unblockDescriptor: { owner: "board" as const, action: "Wait for independent decision" } } : {}),
+      ...(mutation === "status-version" ? { statusVersion: before.statusVersion + 1 } : {}),
+      ...(mutation === "blocked-transition" ? { blockedTransitionAt: later } : {}),
+      ...(mutation === "updated-at" ? { updatedAt: later } : {}),
+    }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBe("recorded_disposition");
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    expect(await f.runs()).toHaveLength(2);
+    expect((await f.actions())[0].attemptCount).toBe(1);
+  });
+  it("routing-child: durable removal provenance survives restart and the bounded second repair", async () => {
+    const f = await routingHandbackFixture();
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    const first = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(await f.createRecovery().legacyRepairDispatchBlock(first.id)).toBeNull();
+    await f.finish(first);
+    expect(await f.createRecovery().reconcileLegacyContinuation(first.id)).toBe("queued");
+    const second = (await f.runs()).find(r => r.status === "scheduled_retry")!;
+    expect(second.contextSnapshot).toMatchObject({ routingParentHandback: true });
+    expect(await f.createRecovery().legacyRepairDispatchBlock(second.id)).toBeNull();
+    await f.finish(second);
+    expect(await f.createRecovery().reconcileLegacyContinuation(second.id)).toBe("escalated");
+    expect(await f.runs()).toHaveLength(3);
+  });
+  it.each(["clear", "approval", "dependency"])("routing-child: stale edge starts parent with %s gate", async gate => {
+    const f = await fixture();
+    const childId = randomUUID();
+    await db.insert(issues).values({id: childId, companyId: f.companyId, parentId: f.issueId,
+      title: "Route parent", status: "todo", originKind: "routing_child"});
+    await db.insert(issueRelations).values({companyId: f.companyId, issueId: childId, relatedIssueId: f.issueId, type: "blocks"});
+    await db.update(issues).set({status: "blocked"}).where(eq(issues.id, f.issueId));
+    if (gate === "approval") await db.insert(issueThreadInteractions).values({companyId: f.companyId, issueId: f.issueId,
+      kind: "request_confirmation", status: "pending", payload: {version: 1, prompt: "Approve?"}});
+    let blockerId: string | null = null;
+    if (gate === "dependency") {
+      blockerId = randomUUID();
+      await db.insert(issues).values({id: blockerId, companyId: f.companyId, title: "Real prerequisite", status: "todo"});
+      await db.insert(issueRelations).values({companyId: f.companyId, issueId: blockerId, relatedIssueId: f.issueId, type: "blocks"});
+    }
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    await f.createRecovery().reconcileLegacyContinuation(f.runId);
+    const relations = await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, f.issueId));
+    expect(relations.map(r => r.issueId)).toEqual(blockerId ? [blockerId] : []);
+    expect((await db.select().from(activityLog).where(eq(activityLog.entityId, f.issueId))).filter(row => row.action === "issue.routing_child_blocker_removed")).toHaveLength(1);
+    expect(await f.runs()).toHaveLength(gate === "clear" ? 2 : 1);
+    if (gate === "clear") {
+      const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+      expect(repair.contextSnapshot).toMatchObject({issueId: f.issueId, legacyDispositionEpisode: {attempt: 1, maxAttempts: 2}});
+      expect(repair.agentId).toBe(f.agentId);
+      expect(repair.contextSnapshot).toMatchObject({wakeReason: "issue_blockers_resolved", routingParentHandback: true});
+      expect(repair.contextSnapshot?.recoveryIntent).not.toBe("status_only");
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, childId)))[0].status).toBe("todo");
   });
 });

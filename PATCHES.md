@@ -900,3 +900,89 @@ into the current fork image or supplied by a fork migration.
 ### PER-218 migration release correction
 
 The startup generated-column migration timed out and rolled back on production. Do not rewrite heartbeat_runs to cache two JSON keys. The list projection retains the original JSON expression; the Attention anti-join, narrow cycle-safe recovered-run traversal and client refresh budget remain. Fresh-database regression rejects the generated columns and migration. This avoids a live table rewrite or widened application timeouts.
+
+
+## Restored-wake and routing-parent delivery on current production fork (PER-436)
+
+Reapply only the missing settled recovery history/exact actionId lookup, idempotent late disposition annotation, and typed routing/coordination child contracts from retained c9aab87c0 onto 5e83e5491. Preserve newer execution-hold reconciliation, dependency locking, admission fencing, list query and observer changes. Late annotations apply only to settled disposition actions; other kinds retain their existing idempotent resolution behavior. Original resolution outcome and timestamps remain unchanged. Ordinary blocked tasks remain terminal to the legacy continuation classifier; only an explicitly typed routing-child hand-back is evaluated as productive continuation, with every real wait, approval, budget and owner gate retained.
+
+Regression evidence: current baseline failed both settled history tests and five typed routing-child checks. Helper action_id failed validation before restoration. Full recovery/legacy and helper suites must pass before image publication. Homelab build/typecheck contexts include shared validator source so childPurpose is not silently stripped by a stale dependency-image validator. Retire this carry when equivalent upstream contracts are available.
+## Assignment wake comment carrier (PER-1092)
+
+- Why: assignment-only markdown printed comment headings while omitting their
+  bodies. The shared wake renderer owns those bodies; turning assignment bodies
+  back on would duplicate them in native and OmniGenT prompts.
+- Change: emit comment headings only with their bodies. Preserve follow-up
+  policy and attachment descriptors when the wake prompt owns comments.
+- Upstream checked: 06d4fe3121e57ca834b533e757bd0f540fadabc5 still has the same
+  conditional-body/unconditional-heading behavior in heartbeat/task-markdown.ts.
+  No equivalent fix found in the fetched recent comment/wake history.
+- Retirement: drop when a released upstream renderer never emits bodyless
+  headings and passes the real full/compact assignment carrier regression.
+- Test: heartbeat-context-summary.test.ts combines real assignment markdown
+  with five ordered wake comments on fresh and resumed paths, asserting each
+  body exactly once and no bodyless headings; also covers a single comment.
+
+
+## Split exhausted-run anti-probes (PER-218)
+
+- Authorized isolated repair on released fork `7d1f98205876cc46dfdec9798b42750dc05030a8`.
+- Replace the single newer-run `NOT EXISTS` containing three OR branches with
+  three conjunctive `NOT EXISTS` probes. Reuse the unchanged candidate issue-key
+  SQL expression; preserve raw JSON type/fallback behavior, blank/null handling,
+  company and agent scope, and the JavaScript-millisecond newer boundary.
+  Selection, ordering, retention and event deduplication are unchanged.
+- Upstream checked: fetched `upstream/master` at
+  `cb2d6e80d3f7ccb6cb6fb1ebbca528a608a9dd0e`; its service still has no newer-run
+  suppression anti-probe. Latest locally listed upstream release tag is
+  `v2026.1012.0`; no equivalent split repair found in service history.
+- TDD: added database-backed generated-SQL shape regression. Released source
+  fails with one probe instead of three (4 existing database tests pass);
+  repaired source passes all 5 tests using disposable embedded PostgreSQL.
+  Existing fallback/type/isolation, microsecond ties, duplicate-event and
+  seven-day-retention cases remain intact.
+- No migration, index, deployment, build, main-branch or production-data change.
+  This commit carries no endpoint latency/p95 claim. Retire when upstream
+  supplies equivalent bounded suppression and passes these contracts.
+
+## Comment attribution run lookup (PER-218)
+
+- Why: seven app-local comment GETs still took 3038–3246 ms for 25 rows.
+  In that comments-only pg_stat_statements window, the attribution run lookup
+  executed seven times for 20940.586 ms total database execution. Ambient
+  traffic remains possible; this is not a browser or phone measurement.
+- Minimal repair: reuse existing issueRunIdsCondition in issues.ts instead
+  of context OR correlated activity EXISTS. The union retains context-only,
+  activity-only and duplicate membership. Outer company, timestamp bounds,
+  own-createdByRunId bypass, complete run projection/order, log evidence,
+  persisted attribution, comment fields, pagination, authorization and secret
+  redaction are unchanged. Applies to listComments and getComment.
+- Upstream: fetched master cb2d6e80d and inspected released v2026.1012.0;
+  attribution still uses OR/EXISTS. This reuses our existing approved
+  run-history helper, not unrelated new upstream body/auth policy changes.
+- Read-only production comparison: full eight-column projection returned 13
+  rows on both sides with zero EXCEPT ALL differences. Initial EXPLAIN ANALYZE
+  was 3582.486 ms old / 36.344 ms new. This establishes query improvement,
+  not a deployed API latency claim. No index or migration required.
+- Regression: issue-comment-attribution-query.test.ts failed on baseline for
+  the missing helper call, then passed. Extended run-history-query-db.test.ts
+  covers window boundaries/null fallback, activity duplicates, own-run outside
+  window and cross-company exclusions. Offline PostgreSQL fixture and helper
+  shape checks pass; parent owns full pinned-dependency CI and API verification.
+- Retirement: remove when a released upstream lookup provides equivalent
+  indexed membership and passes these contracts/comparable measurements.
+- Packaging: compile/copy server/dist/services/issues.js with the existing
+  run-history-query.js dependency; no build or deployment performed here.
+
+Native service coverage added during delivery: real schema/comments/log-store tests cover membership, tenant isolation, own-run bypass, pagination, stored attribution and redaction. Equal created_at values retain the existing unspecified SQL tie order and first-in-input marker winner; no deterministic tie-equivalence claim. No migration or snapshot rewrite.
+
+## PER-436: await fixture lifetime before teardown
+
+- Test-only repair after exact combined-image qualification exposed trailing event
+  writes racing dependency fixture deletion and contended embedded DB startup.
+- Reuse the existing complete executor/wakeup drain before teardown, not the
+  earlier terminal status or per-run live marker. Reuse the existing bounded
+  embedded-Postgres startup/migration cost-class budget for both fixtures.
+- Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
+- No production behavior changes. Exact native full-image gate remains required.
+- Removal: upstream fixtures use the same complete lifetime and startup budget.
