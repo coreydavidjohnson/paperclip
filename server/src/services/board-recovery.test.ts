@@ -59,6 +59,25 @@ const support=await getEmbeddedPostgresTestSupport();
   expect(s.methods.length).toBeGreaterThan(0);expect(s.counts()).toEqual({wakes:0,releases:0});
   expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id,action.id)))[0]).toEqual(action);
  });
+ it.each(['workspace','budget'])('preserves an effective resolved %s hold even without an active card',async kind=>{
+  const s=await seed('failed');
+  await db.update(heartbeatRuns).set({errorCode:'omnigent_session_failed'}).where(eq(heartbeatRuns.id,s.id));
+  await db.insert(issueRecoveryActions).values({companyId:s.companyId,sourceIssueId:s.issueId,
+   kind:'active_run_watchdog',status:'resolved',ownerType:'board',returnOwnerAgentId:s.agentId,
+   cause:'legacy_execution_requires_reconciliation',fingerprint:`legacy-execution:${s.id}`,
+   evidence:{runId:s.id,automaticRecovery:{replay:'blocked'},...(kind==='workspace'
+    ?{workspaceRestoreFailure:'restore_unsafe_archive'}:{recoveryBudget:{state:'exhausted'}})},nextAction:'Inspect the protected hold.'});
+  expect((await idleForTenMinutes(s)).every(r=>r.status==='held')).toBe(true);
+  expect(s.methods).toHaveLength(0);expect(s.counts()).toEqual({wakes:0,releases:0});
+ });
+ it.each(['queued','deferred_issue_execution'])('does not bypass another real %s continuation',async status=>{
+  const s=await seed('failed');
+  await db.update(heartbeatRuns).set({errorCode:'omnigent_session_failed'}).where(eq(heartbeatRuns.id,s.id));
+  await db.insert(agentWakeupRequests).values({companyId:s.companyId,agentId:s.agentId,source:'automation',
+   reason:'issue_commented',status,payload:{issueId:s.issueId}});
+  expect((await idleForTenMinutes(s)).every(r=>r.status==='held')).toBe(true);
+  expect(s.methods).toHaveLength(0);
+ });
  it('never retires a silent run while its newest ticket session is busy',async()=>{
   const s=await seed();s.busy(true);await idleForTenMinutes(s);
   expect(s.counts()).toEqual({wakes:0,releases:0});

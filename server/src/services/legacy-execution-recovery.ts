@@ -169,9 +169,9 @@ export async function terminalizeLegacyExecution(input: {
             and(eq(issueRecoveryActions.status, "resolved"),
               sql`${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId' = ${run.id}`),
             and(
-              eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE),
               sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
-              or(inArray(issueRecoveryActions.status, ["active", "escalated"]),
+              or(and(eq(issueRecoveryActions.cause, LEGACY_RECOVERY_CAUSE),
+                  inArray(issueRecoveryActions.status, ["active", "escalated"])),
                 sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`),
             ),
           ),

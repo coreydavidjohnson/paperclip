@@ -3,7 +3,7 @@ import { parseIssueExecutionState } from './issue-execution-policy.js';
 import { readChatControlRecoveryStop } from './chat-control-recovery-stop.js';
 import { isPluginManagedIssueLifecycle } from './recovery/successful-run-handoff.js';
 import { and, desc, eq, inArray, sql } from 'drizzle-orm';
-import { agents, heartbeatRuns, issues, agentWakeupRequests, issueThreadInteractions, agentTaskSessions, routines, type Db } from '@paperclipai/db';
+import { agents, heartbeatRuns, issues, agentWakeupRequests, issueThreadInteractions, agentTaskSessions, routines, issueRecoveryActions, type Db } from '@paperclipai/db';
 import { boardRecoveryDecision, observeIdle, BOARD_RECOVERY_REASON, BOARD_RECOVERY_LIMIT, STALE_RUN_MS, type IdleObservation } from './board-recovery-policy.js';
 import { probeNewestIssueSession } from './omnigent-issue-session.js';
 import { validOmnigentReceipt } from './omnigent-attachment.js';
@@ -50,7 +50,15 @@ export async function checkBoardRecovery(db:Db, issueId:string, deps:BoardRecove
   const blocker=await getExecutionBlocker(db,issue.companyId,issueId);
   if(blocker && (blocker.cause!=='legacy_execution_requires_reconciliation' || blocker.runId!==run.id)) return {status:'held'};
   if(issue.status==='blocked' && !blocker) return {status:'held'};
+  // Resolved bookkeeping can still be an effective no-replay/workspace hold.
+  // Never infer repair from the absence of an active recovery card.
+  const [effectiveHold]=blocker?.recoveryActionId ? await db.select().from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId,issue.companyId),eq(issueRecoveryActions.sourceIssueId,issueId),
+    eq(issueRecoveryActions.id,blocker.recoveryActionId))).limit(1) : [];
+  if(effectiveHold?.evidence.workspaceRestoreFailure ||
+    (effectiveHold?.evidence.recoveryBudget as Record<string,unknown>|undefined)?.state==='exhausted') return {status:'held'};
   const action=await issueRecoveryActionService(db).getActiveForIssue(issue.companyId,issueId);
+  if(action && blocker && action.id!==blocker.recoveryActionId) return {status:'held',reason:'native_recovery_owns_continuation'};
   if((action?.evidence?.recoveryBudget as Record<string,unknown>|undefined)?.state==='exhausted') return {status:'held',reason:'native_recovery_exhausted'};
   if(action && !blocker && !(run.status==='succeeded' && action.kind==='deliberate_wait_without_target' && action.ownerType==='agent')) return {status:'held',reason:'native_recovery_owns_continuation'};
   if(run.resultJson?.workspaceRestoreFailure) return {status:'held'};
