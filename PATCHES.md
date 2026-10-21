@@ -989,3 +989,15 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
 - No production behavior changes. Exact native full-image gate remains required.
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
+
+## PER-1091: drain stale-queue test fixture lifetime
+
+- Test-only extension of the existing PER-436 fixture-lifetime repair.
+- Exact combined build exposed TRUNCATE racing trailing executor writes despite
+  terminal status and the per-run execution-control marker. Reuse the complete
+  wake/executor drain before mock reset and fixture deletion, and before DB stop.
+- Release the three deliberately held adapter/row-lock gates before draining so
+  test timeout cannot strand them; existing hook/test deadlines remain unchanged.
+- No production code, concurrency limit, timeout increase or retry waiver.
+- Regression: existing mandatory stale-queue suite and complete image gate.
+- Retire when upstream fixtures wait for the complete executor lifetime.
