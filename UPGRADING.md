@@ -137,6 +137,12 @@ redaction/tenant rules and stored-expression index searches. The PostSync job
 uses 100ms lock timeout (below normal deadlock detection), bounded retries on the
 same PK cursor, and verifies no missing projections. Backfill never overwrites
 trigger data. Preserve the source snapshots and allowlisted JSON types.
+Before walking, a zero-missing check skips an already complete projection.
+Each batch advances on ids only and evaluates snapshots only for missing rows;
+a rejecting-function regression proves already projected blobs are not re-read.
+The Job deadline bounds work without a fixed retained-row ceiling. The hook
+checks table/trigger presence and must land with the qualified migration-bearing
+image, never as a source-only release ahead of that image.
 
 Migration installation is transactional (`applyPendingMigrationsManually` uses
 `runInTransaction`; bootstrap Drizzle also uses a transaction). A 55P03 lock
