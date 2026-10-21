@@ -964,7 +964,8 @@ Native service coverage added during delivery: real schema/comments/log-store te
 ## Cross-instance Stop owner intent (PER-1108)
 
 - Restore the previously isolated-qualified 0798414f change on the current
-  production fork base 56e20cbb. Remote controllers save cancellation intent;
+  production fork base e3410f6a (including the current PER-309 release).
+  Remote controllers save cancellation intent;
   only the provider-owning controller interrupts and acknowledges the run.
   A terminal row without a provider acknowledgement is not success.
 - Required even with one timer scheduler: disabled-scheduler instances still
