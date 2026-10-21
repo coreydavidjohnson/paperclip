@@ -949,3 +949,14 @@ Regression evidence: current baseline failed both settled history tests and five
   run-history-query.js dependency; no build or deployment performed here.
 
 Native service coverage added during delivery: real schema/comments/log-store tests cover membership, tenant isolation, own-run bypass, pagination, stored attribution and redaction. Equal created_at values retain the existing unspecified SQL tie order and first-in-input marker winner; no deterministic tie-equivalence claim. No migration or snapshot rewrite.
+
+## PER-436: await fixture lifetime before teardown
+
+- Test-only repair after exact combined-image qualification exposed trailing event
+  writes racing dependency fixture deletion and contended embedded DB startup.
+- Reuse the existing complete executor/wakeup drain before teardown, not the
+  earlier terminal status or per-run live marker. Reuse the existing bounded
+  embedded-Postgres startup/migration cost-class budget for both fixtures.
+- Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
+- No production behavior changes. Exact native full-image gate remains required.
+- Removal: upstream fixtures use the same complete lifetime and startup budget.
