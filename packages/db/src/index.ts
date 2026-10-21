@@ -3,6 +3,7 @@ export { default as postgres } from "postgres";
 export {
   createDb,
   withDedicatedDbConnection,
+  persistentDedicatedDb,
   closeRegisteredClients,
   getPostgresDataDirectory,
   ensurePostgresDatabase,
