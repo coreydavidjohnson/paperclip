@@ -216,7 +216,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(steerNativeSessionMock).not.toHaveBeenCalled();
   });
 
-  it.each(["board", "wrong_run", "wrong_agent", "cancelled", "cancelling", "expired", "other_issue"])(
+  it.each(["board", "wrong_run", "wrong_agent", "cancelled", "cancelling", "expired", "other_issue", "malformed"])(
     "does not acknowledge queued comments for %s", async mode => {
       const seeded = await seedQueue();
       if (mode === "cancelled") await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, seeded.runId));
@@ -225,7 +225,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       if (mode === "other_issue") await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: randomUUID() } }).where(eq(heartbeatRuns.id, seeded.runId));
       const actor = mode === "board" ? undefined : {
         agentId: mode === "wrong_agent" ? randomUUID() : seeded.agentId,
-        runId: mode === "wrong_run" ? randomUUID() : seeded.runId,
+        runId: mode === "malformed" ? "not-a-run" : mode === "wrong_run" ? randomUUID() : seeded.runId,
       };
       const response = await request(app(seeded.companyId, "queue-owner", actor))
         .post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
@@ -236,6 +236,35 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       expect((run.resultJson as any)?.queuedSteeringAcknowledgements).toBeUndefined();
     },
   );
+
+  it("acknowledges every ordinary deferred queue included in the delivered snapshot", async () => {
+    const seeded = await seedQueue();
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+    const id = randomUUID();
+    await db.insert(issueComments).values({ id, companyId: seeded.companyId, issueId: seeded.issueId,
+      authorType: "user", authorUserId: "queue-owner", body: "Another wake" });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await db.insert(agentWakeupRequests).values({ ...wake, id: randomUUID(),
+      payload: { issueId: seeded.issueId, _paperclipWakeContext: { wakeCommentIds: [id] } },
+    });
+    const response = await request(app(seeded.companyId, "queue-owner", seeded))
+      .post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(response.status).toBe(200);
+    expect(response.body.deliveredCommentIds.sort()).toEqual([...seeded.commentIds, id].sort());
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId));
+    expect(wakes.map(w => w.status)).toEqual(["cancelled", "cancelled"]);
+  });
+
+  it("does not consume a fresh-session approval when its comments are read", async () => {
+    const seeded = await seedResponseQueue();
+    const response = await request(app(seeded.companyId, "queue-owner", seeded))
+      .post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(response.status).toBe(200);
+    expect(response.body.deliveredCommentIds).toEqual([]);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    expect(wake.status).toBe("deferred_issue_execution");
+    expect(wake.payload?.interactionId).toBe(seeded.interactionId);
+  });
 
   it.each(["cancelled", "running"])("rejects a late Done from an interrupted %s task run at the write boundary", async status => {
     const seeded = await seedQueue();
