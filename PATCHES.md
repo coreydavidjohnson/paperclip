@@ -993,3 +993,5 @@ PER-1124 delivery receipts are retained atomically across legacy run finalizatio
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
 
 PER-1124 review hardening: reuse hasLiveLegacyController under the run lock, including database-clock lease expiry and non-null controller identity. Missing-controller and missing-lease tests fail on the earlier candidate; queue receipts fail closed until the controller owns execution.
+
+PER-1124 image qualification: keep the company-skills external-source fork fixture parameterized by source type. Its four cases each retain the original first/second fork, slug deduplication, ancestry and remote-read assertions, and the original timeout. The cumulative eight-fork case exceeded 15 seconds under the full non-root image gate (905 passed, one timeout); no production code or release gate is changed.
