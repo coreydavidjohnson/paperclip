@@ -30,7 +30,7 @@ import { isControllerDraining } from "../controller-drain.js";
 import { saveOmnigentDispatchReceipt, claimOmnigentAttachment, releaseOmnigentAttachment, loadOwnedOmnigentObservation, finalizeOwnedOmnigentObservation } from "./omnigent-attachment.js";
 import { probeOmnigentAdmission } from "./omnigent-admission-probe.js";
 import { admitAgentRun, countAdmittedRunsForAgent, suspendOmnigentAdmissions, retireSuspendedOmnigentObservers } from "./run-admission.js";
-import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease } from "./legacy-controller-lease.js";
+import { legacyControllerBootId, legacyControllerClaim, renewLegacyControllerLease, hasLiveLegacyController, revokeExpiredLegacyController, watchLegacyControllerLease, startClaimedLegacyControllerLease } from "./legacy-controller-lease.js";
 import { completeTerminatedRemoteNativeSessionCleanup } from "../vendor/paperclip-runner/index.js";
 import { hasRemoteTerminationReceipt, remoteExecutionHasStopped, remoteTerminationReceipt, stoppedRemoteCleanupScopes } from "./remote-execution-termination.js";
 import { applyConnectorSkills, prepareConnectorSkillDelivery, resolveConnectorAssignments } from "./connector-runtime.js";
@@ -17865,6 +17865,8 @@ export function heartbeatService(
           });
         });
     if (!claimed) return null;
+    // Renew from the claim commit, not from executeRun's later watcher start.
+    startClaimedLegacyControllerLease(db, claimed);
 
     publishLiveEvent({
       companyId: claimed.companyId,
