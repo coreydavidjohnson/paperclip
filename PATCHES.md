@@ -972,3 +972,5 @@ Native service coverage added during delivery: real schema/comments/log-store te
   PER-1124; these historical results are not production acceptance.
 - Retirement: replace with a released, run-authenticated external-adapter
   acknowledgement/steering API that passes these contracts.
+
+PER-1124 delivery receipts are retained atomically across legacy run finalization; only the server-owned acknowledgement key is preserved, not arbitrary stale adapter metadata. The direct-adapter isolation regression injects a receipt while execution is live and checks it after success.

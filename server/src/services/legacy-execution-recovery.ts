@@ -87,6 +87,14 @@ export function legacyExecutionNeedsReconciliation(
 }
 
 /** Persist the failed legacy run, owned lock release and operator decision together. */
+/** Delivery can commit after an adapter's last snapshot; retain receipts in the SQL write. */
+export function preserveQueuedSteeringAcknowledgements(resultJson: Record<string, unknown> | null) {
+  return sql`case when ${heartbeatRuns.resultJson} ? 'queuedSteeringAcknowledgements'
+    then coalesce(${JSON.stringify(resultJson)}::jsonb, '{}'::jsonb) ||
+      jsonb_build_object('queuedSteeringAcknowledgements', ${heartbeatRuns.resultJson}->'queuedSteeringAcknowledgements')
+    else ${JSON.stringify(resultJson)}::jsonb end`;
+}
+
 export async function terminalizeLegacyExecution(input: {
   db: Db;
   run: Run;
@@ -118,6 +126,7 @@ export async function terminalizeLegacyExecution(input: {
       .set({
         status,
         ...patch,
+        ...(patch?.resultJson !== undefined ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
         executionStatusDeliveryId: randomUUID(),
         updatedAt: new Date(),
       })

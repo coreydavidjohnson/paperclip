@@ -46,6 +46,7 @@ import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispa
 import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
 import {
   legacyExecutionNeedsReconciliation,
+  preserveQueuedSteeringAcknowledgements,
   isRetiredOmnigentObserver,
   settleInterruptedNativeBootstrap,
   terminalizeLegacyExecution,
@@ -12818,6 +12819,8 @@ export function heartbeatService(
             .set({
               status,
               ...patch,
+              ...(previousStatus?.runtimeMode === "legacy" && patch?.resultJson !== undefined
+                ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
@@ -12905,6 +12908,8 @@ export function heartbeatService(
             .set({
               status,
               ...patch,
+              ...(previousStatus?.runtimeMode === "legacy" && patch?.resultJson !== undefined
+                ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
