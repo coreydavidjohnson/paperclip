@@ -1,3 +1,6 @@
+import { observeIdle, validBoardRetainedSession } from "./board-recovery-policy.js";
+import { probeNewestIssueSession } from "./omnigent-issue-session.js";
+import { checkBoardRecovery } from "./board-recovery.js";
 import { runListContextColumns, runListContextJoin } from "./run-history-query.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
@@ -18971,6 +18974,11 @@ export function heartbeatService(
       const agent = await getAgent(candidate.agentId);
       if (!agent || agent.adapterType !== 'omnigent') return null;
       const { config } = await secretsSvc.resolveAdapterConfigForRuntime(candidate.companyId, parseObject(agent.adapterConfig));
+      const issueId = readNonEmptyString(candidate.contextSnapshot?.issueId);
+      if (!issueId) return null;
+      const current = await probeNewestIssueSession({companyId:candidate.companyId,agentId:candidate.agentId,issueId},config).catch(()=>null);
+      const observation = (candidate.resultJson?.boardRecovery as {observation?:import("./board-recovery-policy.js").IdleObservation}|undefined)?.observation;
+      if (!observation || !current || !observeIdle(observation,current,Date.now()).confirmed) return null;
       return probeOmnigentAdmission(candidate, config);
     })) {
       // Abort only this local observation loop. Lease loss never interrupts
@@ -20574,7 +20582,8 @@ export function heartbeatService(
         )).orderBy(desc(heartbeatRuns.finishedAt), desc(heartbeatRuns.id)).limit(1);
         if (previous && isRetiredOmnigentObserver(previous)) {
           // Every claim branch starts fresh; never reopen an old pending turn.
-          context.forceFreshSession = true;
+          context.forceFreshSession = (previous.resultJson?.omnigentObserverRetirement as Record<string,unknown>|undefined)?.reason !== "stable_issue_session_idle";
+          context.preserveOmnigentIssueSession = context.forceFreshSession === false;
           context.previousRunId = previous.id;
           context.observerRetirementWarning = 'Earlier action outcomes are unknown. Read the retained run evidence and inspect actual targets before repeating any mutation.';
           await db.update(heartbeatRuns).set({contextSnapshot: context}).where(and(
@@ -27734,7 +27743,6 @@ export function heartbeatService(
               opts.requestedByActorId !== "execution-recovery" ||
               opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
               enrichedContextSnapshot.source !== "execution.reconciled" ||
-              enrichedContextSnapshot.forceFreshSession !== true ||
               payload?.issueId !== issue.id ||
               payload?.recoveryActionId !== actionId ||
               issue.assigneeAgentId !== agentId ||
@@ -27760,6 +27768,10 @@ export function heartbeatService(
               action?.evidence.executionReconciliation,
             );
             const sourceRunId = readNonEmptyString(decision.runId);
+            if (enrichedContextSnapshot.forceFreshSession !== true &&
+                !(enrichedContextSnapshot.forceFreshSession === false && sourceRunId && validBoardRetainedSession(action?.evidence.boardRecoveryRetainedSession, {
+                  runId:sourceRunId,companyId:issue.companyId,agentId,issueId:issue.id,
+                }))) return {kind:"skipped" as const};
             if (
               !action ||
               action.status !== "resolved" ||
@@ -30003,6 +30015,25 @@ export function heartbeatService(
   }
 
   return {
+    checkBoardRecovery: (issueId: string, dryRun = false) => checkBoardRecovery(db, issueId, {
+      dryRun,
+      resumeSuccessful: runId => recovery.reconcileLegacyContinuation(runId),
+      resolveConfig: async (companyId, config) => (await secretsSvc.resolveAdapterConfigForRuntime(companyId, config)).config,
+      wake: (agentId, issueId, sourceRunId, statusVersion) => enqueueWakeup(agentId, {
+        issueStateGuard: {statuses:["todo","in_progress"],assigneeAgentId:agentId,statusVersion},
+        source: "automation", triggerDetail: "system", reason: "paperclip_board_reconcile",
+        requestedByActorType: "system", requestedByActorId: "paperclip_board_reconcile",
+        allowRunCoalescing: false,
+        idempotencyKey: `board-recovery:${issueId}:${sourceRunId}`,
+        payload: {issueId, taskId:issueId},
+        contextSnapshot: {source:"board.recovery", previousRunId:sourceRunId, forceFreshSession:false, preserveOmnigentIssueSession:true},
+      }),
+      release: async run => {
+        adapterExecutionControls.get(run.id)?.controller.abort(new Error("Legacy controller lease lost"));
+        publishLiveEvent({companyId:run.companyId,type:"heartbeat.run.status",payload:buildHeartbeatRunStatusLiveEventPayload(run)});
+        await releaseIssueExecutionAndPromote(run, {suppressImmediateRecovery:true});
+      },
+    }),
     waitForRunExecutionDrain: async (
       runId: string,
       options: { timeoutMs?: number; intervalMs?: number } = {},

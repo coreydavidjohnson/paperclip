@@ -1,3 +1,4 @@
+import { retainedBoardSession } from "../board-recovery-policy.js";
 import { recoveryRunSelect, retryAccountingRunSelect } from "../recovery-run-query.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -3156,11 +3157,13 @@ export function recoveryService(
     if (!agentId) return null;
     // Preserve the initiating identity on the durable row, including while a
     // delayed repair is waiting to dispatch. Never substitute the issue owner.
-    const sourceRun = input.latestRun?.id ? await db.select(retryAccountingRunSelect)
+    const sourceRun = input.latestRun?.id ? await db.select({...retryAccountingRunSelect,boardRecovery:sql<unknown>`${heartbeatRuns.resultJson}->'boardRecovery'`})
       .from(heartbeatRuns).where(and(eq(heartbeatRuns.id, input.latestRun.id), eq(heartbeatRuns.companyId, input.issue.companyId)))
       .limit(1).then(rows => rows[0]) : null;
     const routingParentHandback = await currentRoutingHandback(input.issue, input.legacyEpisode?.id ?? null);
     const wakeReason = routingParentHandback ? "issue_blockers_resolved" : ISSUE_DISPOSITION_REPAIR_RETRY_REASON;
+    const keepIssueSession = (await getAgent(agentId))?.adapterType==='omnigent' &&
+      !!retainedBoardSession({boardRecovery:sourceRun?.boardRecovery},Date.now(),'monitor');
     const timing = dispositionRepairDelayMs(input.attempt, input.fingerprint);
     const now = new Date();
     const retryAt = new Date(now.getTime() + timing.delayMs);
@@ -3173,6 +3176,7 @@ export function recoveryService(
         ...(routingParentHandback ? {routingParentHandback: true} : {}),
         retryReason: ISSUE_DISPOSITION_REPAIR_RETRY_REASON,
         source: "issue.deliberate_wait_disposition_repair",
+        ...(keepIssueSession ? {forceFreshSession:false,preserveOmnigentIssueSession:true} : {}),
         executionRetryAccounting: executionRetryAccounting(sourceRun ?? {}),
         retryOfRunId: input.latestRun?.id ?? null,
         recoveryActionId: input.action.id,

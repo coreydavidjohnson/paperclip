@@ -12611,6 +12611,15 @@ export function issueRoutes(
     },
   );
 
+  // Internal cluster sweeper. Never exposed to an agent as cross-issue control.
+  router.post("/issues/:id/board-recovery/check", validate(z.object({dryRun:z.boolean().optional().default(false)})), async (req, res) => {
+    assertBoard(req);
+    const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
+    if (!issue) return;
+    assertCompanyAccess(req, issue.companyId);
+    res.json(await heartbeat.checkBoardRecovery(issue.id, req.body.dryRun));
+  });
+
   router.post("/issues/:id/monitor/check-now", async (req, res) => {
     const id = req.params.id as string;
     const issue = await getAccessibleResource(

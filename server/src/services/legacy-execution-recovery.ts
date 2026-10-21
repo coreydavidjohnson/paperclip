@@ -28,7 +28,11 @@ export function isRetiredOmnigentObserver(run: Pick<Run, "runtimeMode" | "status
       retirement.omnigentSessionId === receipt?.omnigentSessionId &&
       retirement.issueId === run.contextSnapshot?.issueId && typeof retirement.issueId === 'string' &&
       retirement.actionOutcomes === 'unknown' && retirement.providerStopped === false &&
-      ['not_found','runner_offline'].includes(String(retirement.reason))) return true;
+      (['not_found','runner_offline'].includes(String(retirement.reason)) ||
+        (retirement.reason === 'stable_issue_session_idle' && typeof retirement.currentSessionId === 'string' && !!retirement.currentSessionId &&
+          typeof retirement.sessionFingerprint === 'string' && /^[a-f0-9]{64}$/.test(retirement.sessionFingerprint) &&
+          typeof retirement.firstIdleObservedAt === 'number' && typeof retirement.lastIdleObservedAt === 'number' &&
+          retirement.lastIdleObservedAt-retirement.firstIdleObservedAt >= 600000))) return true;
   return false;
 }
 
