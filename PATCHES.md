@@ -960,3 +960,24 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
 - No production behavior changes. Exact native full-image gate remains required.
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
+
+## Cross-instance Stop owner intent (PER-1108)
+
+- Restore the previously isolated-qualified 0798414f change on the current
+  production fork base 56e20cbb. Remote controllers save cancellation intent;
+  only the provider-owning controller interrupts and acknowledges the run.
+  A terminal row without a provider acknowledgement is not success.
+- Required even with one timer scheduler: disabled-scheduler instances still
+  run atomic delivery/cleanup workers and may own an adapter continuation.
+  HTTP mutation forwarding alone does not make that path single-process.
+- Upstream check: master 65f59e339a9fb6e0635bcbd8c36791bd610326a6 and latest
+  listed release v2026.1012.0 do not supply the Luma legacy-controller lease
+  module/owner-intent integration. No upstream release upgrade or new dependency.
+- Native regression: `node --experimental-vm-modules --test
+  scripts/legacy-controller-stop-intent.test.mjs`; current-base baseline failed
+  requested intent (0 owner callbacks), while ordinary renewal passed.
+  Isolated two-server Stop/takeover acceptance is also required on the final
+  built image; the earlier image receipt is retained, not substituted.
+- Retirement: drop when a released upstream equivalent supports cross-instance
+  provider-owned cancellation acknowledgements and passes the same contracts.
+  No schema, migration, authorization, budget or provider replay change.
