@@ -8128,12 +8128,13 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   it.each([
-    { providerOutcome: "succeeded", cleanupAt: "inner", warningFails: false },
-    { providerOutcome: "failed", cleanupAt: "inner", warningFails: false },
-    { providerOutcome: "throws", cleanupAt: "inner", warningFails: false },
-    { providerOutcome: "succeeded", cleanupAt: "outer", warningFails: false },
-    { providerOutcome: "succeeded", cleanupAt: "inner", warningFails: true },
-  ] as const)("preserves a $providerOutcome provider outcome when instruction cleanup times out ($cleanupAt, warning failure: $warningFails)", async ({ providerOutcome, cleanupAt, warningFails }) => {
+    { providerOutcome: "succeeded", cleanupAt: "inner", warningFails: false, postTerminalFailure: false },
+    { providerOutcome: "failed", cleanupAt: "inner", warningFails: false, postTerminalFailure: false },
+    { providerOutcome: "throws", cleanupAt: "inner", warningFails: false, postTerminalFailure: false },
+    { providerOutcome: "succeeded", cleanupAt: "outer", warningFails: false, postTerminalFailure: false },
+    { providerOutcome: "succeeded", cleanupAt: "inner", warningFails: true, postTerminalFailure: false },
+    { providerOutcome: "succeeded", cleanupAt: "outer", warningFails: false, postTerminalFailure: true },
+  ] as const)("preserves a $providerOutcome provider outcome when instruction cleanup times out ($cleanupAt, warning failure: $warningFails, post-terminal failure: $postTerminalFailure)", async ({ providerOutcome, cleanupAt, warningFails, postTerminalFailure }) => {
     const { companyId, agentId, runId, issueId } = await seedRunFixture({ runtimeMode: "legacy", agentStatus: "idle", runStatus: "queued" });
     const interactionId = randomUUID();
     const release = vi.fn().mockRejectedValue(Object.assign(new Error("Timed out waiting for workspace restore lock at /private/agent-files.lock"), {
@@ -8147,6 +8148,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const originalAppend = runEvents.appendHeartbeatRunEvent;
     const append = vi.spyOn(runEvents, "appendHeartbeatRunEvent").mockImplementation((db, event) => {
       if (warningFails && event.eventType === "instruction_cleanup") throw new Error("Fixture warning persistence failed");
+      if (postTerminalFailure && event.eventType === "lifecycle" && event.message === "run succeeded") throw new Error("Fixture post-terminal completion failure");
       return originalAppend(db, event);
     });
     mockAdapterExecute.mockImplementationOnce((async () => {
@@ -8642,7 +8644,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       });
       const heartbeat = heartbeatService(db);
       await heartbeat.resumeQueuedRuns();
-      await waitForValue(async () => context);
+      await vi.waitFor(() => expect(context).toBeDefined(), { timeout: 30000 });
       expect(adapterExecutionControls.has(runId)).toBe(false);
       let releaseRow!: () => void;
       const rowGate = new Promise<void>((resolve) => {
@@ -8694,7 +8696,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           expect(row!.count).toBeGreaterThan(0);
         });
         releaseRegistration();
-        await vi.waitFor(() => expect(registrationAttempted).toBe(true));
+        await vi.waitFor(() => expect(registrationAttempted).toBe(true), { timeout: 15000 });
         // Readiness must remain behind the earlier Stop, without publishing a
         // joinable owner that would deadlock a duplicate Stop on this barrier.
         expect(adapterExecutionControls.has(runId)).toBe(false);

@@ -3310,7 +3310,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             // Current skips are not necessarily recoverable work. Legacy receipts
             // remain adoptable when they carry the actual saved safety contract,
             // but one predecessor must never replace another recovery wake.
-            return predecessor && (!incomingPredecessor || predecessor === incomingPredecessor) &&
+            return predecessor && wake.reason !== "heartbeat.worktree_execution_cutoff" &&
+              (!incomingPredecessor || predecessor === incomingPredecessor) &&
               ((!wake.runId && ["deferred_issue_execution", "skipped", "coalesced"].includes(wake.status)) ||
                 (wake.runId && resolvesLivenessGate(wake)));
           });
@@ -4329,6 +4330,33 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               updatedAt: new Date(),
             })
             .where(eq(agentWakeupRequests.id, wakeupRequest.id));
+
+          if (incomingPredecessor && isUuidLike(incomingPredecessor) && livenessRecovery) {
+            // A newer recovery owns the one continuation. Retain older saved
+            // receipts as evidence, but do not let the stranded scan replay them.
+            const predecessors = livenessReceipts.flatMap(wake => {
+              const predecessor = readNonEmptyString(parseObject(parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY]).recovery).predecessorRunId);
+              return predecessor && isUuidLike(predecessor) ? [predecessor] : [];
+            });
+            const sourceRuns = await tx.select({ id: heartbeatRuns.id, createdAt: heartbeatRuns.createdAt }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+              inArray(heartbeatRuns.id, [...new Set([incomingPredecessor, ...predecessors])]),
+            ));
+            const currentSource = sourceRuns.find(source => source.id === incomingPredecessor);
+            const superseded = livenessReceipts.filter(wake => {
+              const predecessor = readNonEmptyString(parseObject(parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY]).recovery).predecessorRunId);
+              const source = sourceRuns.find(source => source.id === predecessor);
+              return !wake.runId && wake.status === "deferred_issue_execution" && source && currentSource &&
+                queuedCommentIdsFromWakePayload(wake.payload).length === 0 &&
+                !isInteractionResolutionWakePayload(parseObject(wake.payload)) &&
+                !hasInteractionContinuationWakeContext(parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY])) &&
+                source.id !== currentSource.id && source.createdAt < currentSource.createdAt;
+            });
+            if (superseded.length) await tx.update(agentWakeupRequests).set({
+              status: "coalesced", runId: newRun.id, finishedAt: new Date(), updatedAt: new Date(),
+            }).where(and(inArray(agentWakeupRequests.id, superseded.map(wake => wake.id)), isNull(agentWakeupRequests.runId),
+              eq(agentWakeupRequests.status, "deferred_issue_execution")));
+          }
 
           if (adoptedComments.length) {
             await tx

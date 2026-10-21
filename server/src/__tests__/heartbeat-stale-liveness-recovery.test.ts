@@ -78,12 +78,17 @@ describe("stale recovery and post-Stop delivery (simulated adapter, real Postgre
   const newer = await secondPredecessor(f);
   execute.mockImplementation(() => finish(f.task.id));
   await heartbeat.sweepExternalRunLiveness(); await heartbeat.consumeExternalRunLivenessOutbox(); await heartbeat.drainActiveRunExecutions();
-  expect(execute).toHaveBeenCalledOnce();
+  expect(execute, JSON.stringify(execute.mock.calls.map(call => ({ recovery: call[0].context.recovery, reason: call[0].context.wakeReason })))).toHaveBeenCalledOnce();
   expect(execute.mock.calls[0][0].context.recovery).toMatchObject({ predecessorRunId: newer.id, outcomesUnknown: true });
   expect(execute.mock.calls[0][0].context.prompt).toContain("do not blindly replay");
   const [old] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, skipped.id));
   expect(old).toMatchObject({ status: "skipped", runId: null });
   await db.delete(instanceSettings);
+  const fresh = await request(f.app).post(`/api/issues/${f.task.id}/comments`).send({body: "Continue current work.",clientRequestId:crypto.randomUUID()});
+  expect(fresh.status,JSON.stringify(fresh.body)).toBe(201);
+  await vi.waitFor(()=>expect(execute).toHaveBeenCalledTimes(2),{timeout:15000}); await heartbeat.drainActiveRunExecutions();
+  expect(execute.mock.calls[1][0].context.recovery?.predecessorRunId).not.toBe(f.run.id);
+  expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id,skipped.id)))[0]).toMatchObject({status:"skipped",runId:null});
  });
 
  it("a deferred older predecessor does not replace a new recovery contract", async () => {
@@ -91,8 +96,17 @@ describe("stale recovery and post-Stop delivery (simulated adapter, real Postgre
   const newer = await secondPredecessor(f);
   execute.mockImplementation(() => finish(f.task.id));
   await heartbeat.sweepExternalRunLiveness(); await heartbeat.consumeExternalRunLivenessOutbox(); await heartbeat.drainActiveRunExecutions();
-  expect(execute).toHaveBeenCalledOnce();
+  expect(execute, JSON.stringify(execute.mock.calls.map(call => ({ recovery: call[0].context.recovery, reason: call[0].context.wakeReason })))).toHaveBeenCalledOnce();
   expect(execute.mock.calls[0][0].context.recovery).toMatchObject({ predecessorRunId: newer.id, outcomesUnknown: true });
+  await age(f.receipt.id); await heartbeat.resumeQueuedRuns(); await heartbeat.consumeExternalRunLivenessOutbox(); await heartbeat.drainActiveRunExecutions();
+  expect(execute, JSON.stringify(execute.mock.calls.map(call => ({ recovery: call[0].context.recovery, reason: call[0].context.wakeReason })))).toHaveBeenCalledOnce();
+  const bound = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, f.receipt.id)))[0];
+  expect(bound).toMatchObject({ status: "coalesced", runId: execute.mock.calls[0][0].runId });
+  const fresh = await request(f.app).post(`/api/issues/${f.task.id}/comments`).send({body: "Continue after the new recovery.", clientRequestId: crypto.randomUUID()});
+  expect(fresh.status, JSON.stringify(fresh.body)).toBe(201);
+  await vi.waitFor(() => expect(execute).toHaveBeenCalledTimes(2), { timeout: 15000 });
+  await heartbeat.drainActiveRunExecutions();
+  expect(execute.mock.calls[1][0].context.recovery?.predecessorRunId).not.toBe(f.run.id);
  });
 
  it.each(["answer", "approval"] as const)("Stop then %s keeps delivery data without starting work before fresh input", async kind => {
@@ -131,7 +145,7 @@ describe("stale recovery and post-Stop delivery (simulated adapter, real Postgre
    await questionResponseDeliveryService(db,{heartbeat}).deliver(cardId);
   }
   await heartbeat.resumeQueuedRuns(); await heartbeat.consumeExternalRunLivenessOutbox(); await heartbeat.drainActiveRunExecutions();
-  expect(execute).toHaveBeenCalledOnce();
+  expect(execute, JSON.stringify(execute.mock.calls.map(call => ({ recovery: call[0].context.recovery, reason: call[0].context.wakeReason })))).toHaveBeenCalledOnce();
  },40000);
 
  it("mentioning the former assignee cannot resurrect its old liveness receipt", async () => {

@@ -1920,7 +1920,10 @@ export function heartbeatService(
       run = claimed;
     }
 
-    const releaseInstructionCopy = createHeartbeatInstructionCopyRelease(run, instructionCopies, appendRunEvent);
+    // Only the completion we own may transfer cleanup-event authority.
+    let instructionCleanupRun = run;
+    const releaseInstructionCopy = createHeartbeatInstructionCopyRelease(run, instructionCopies,
+      (_run, event) => appendRunEvent(instructionCleanupRun, event));
 
     if (
       runOptions.nativeLeaseOwner &&
@@ -3597,6 +3600,7 @@ export function heartbeatService(
           configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
           providerTraceCapture: providerTraceCapture !== null,
           onProviderTraceFinalized: () => { providerTraceFinalized = true; },
+          onTerminalPersisted: (terminalRun) => { instructionCleanupRun = terminalRun; },
           issueContext, onLog,
         }));
       } catch (err) {

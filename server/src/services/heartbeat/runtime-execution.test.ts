@@ -155,6 +155,34 @@ describe.skipIf(!support.supported)("heartbeat runtime execution boundary", () =
     expectCleanup(input);
   });
 
+  it.each(["direct Stop", "takeover then Stop", "wrong receipt", "already accounted"] as const)(
+    "fences no-work accounting after %s", async scenario => {
+      const { input, adapter, run } = await fixture();
+      const terminalEpoch = run.observerEpoch + (scenario === "takeover then Stop" ? 2 : 1);
+      const accountedAt = scenario === "already accounted" ? new Date() : null;
+      adapter.execute.mockImplementationOnce(async () => {
+        await db.update(heartbeatRuns).set({
+          status: "cancelled", observerEpoch: terminalEpoch, costAccountingPending: false,
+          costAccountedAt: accountedAt, usageJson: { retainedUsage: true },
+          resultJson: { stoppedByUser: true }, runnerProfileJson: { externalSettlement: {
+            runId: scenario === "wrong receipt" ? randomUUID() : run.id, status: "cancelled",
+            observerEpoch: terminalEpoch - 1, terminalEpoch,
+          } },
+        }).where(eq(heartbeatRuns.id, run.id));
+        return { exitCode: 0, signal: null, timedOut: false,
+          executionRecovery: { kind: "bootstrap", providerWorkStarted: false } };
+      });
+      await executeHeartbeatRuntime(db, input);
+      const stored = await read(run.id);
+      expect(stored).toMatchObject({ status: "cancelled", observerEpoch: terminalEpoch,
+        resultJson: { stoppedByUser: true }, costAccountingPending: scenario === "direct Stop" });
+      expect(stored.usageJson).toEqual(scenario === "direct Stop"
+        ? { retainedUsage: true, accountingProviderWorkStarted: false } : { retainedUsage: true });
+      expect(stored.costAccountedAt).toEqual(accountedAt);
+      expect(await db.select().from(runUsageReceipts)).toHaveLength(0);
+    },
+  );
+
   it("records the failed workspace and keeps the original provider error", async () => {
     const { input, adapter } = await fixture();
     const error = new Error("provider failed");

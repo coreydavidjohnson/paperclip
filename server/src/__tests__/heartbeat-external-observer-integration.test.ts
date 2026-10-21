@@ -98,12 +98,22 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
   vi.mocked(getServerAdapter).mockReturnValueOnce({type:"edited_adapter",execute} as never);
   await heartbeat.reapOrphanedRuns();expect(await read(run.id)).toMatchObject({status:"running",errorCode:null});
  });
- it("delivers one outcomes-unknown recovery through the assembled heartbeat after outbox redelivery", async () => {
+ it("ends a ten-minute missing-session intent and delivers one outcomes-unknown recovery after outbox redelivery", async () => {
   const run=await fixture();
+  const intentAt = new Date(Date.now() - 610000);
+  await db.update(heartbeatRuns).set({ startedAt: intentAt, lastProgressAt: intentAt,
+   externalRunHandle: { ...run.externalRunHandle!, sessionId: "nonexistent-intent-session", dispatch: "prepared" },
+   contextSnapshot: { remoteExecution: { state: "intent", sessionId: "nonexistent-intent-session" } },
+  }).where(eq(heartbeatRuns.id, run.id));
   const [task]=await db.insert(issues).values({companyId:run.companyId,title:"[test] gone recovery",status:"in_progress",assigneeAgentId:run.agentId,responsibleUserId:"board-user",executionRunId:run.id}).returning();
   await db.update(companies).set({defaultResponsibleUserId:"board-user"}).where(eq(companies.id,run.companyId));
-  await db.update(heartbeatRuns).set({issueId:task.id,contextSnapshot:{issueId:task.id}}).where(eq(heartbeatRuns.id,run.id));
-  probe.mockResolvedValue({state:"gone",reason:"intent session absent",authoritative:true});
+  await db.update(heartbeatRuns).set({issueId:task.id,contextSnapshot:{issueId:task.id,
+   remoteExecution: { state: "intent", sessionId: "nonexistent-intent-session" },
+  }}).where(eq(heartbeatRuns.id,run.id));
+  probe.mockImplementation(async ({ handle }) => {
+   expect(handle).toMatchObject({ sessionId: "nonexistent-intent-session", dispatch: "prepared" });
+   return { state: "gone", reason: "intent session absent", authoritative: true };
+  });
   execute.mockImplementationOnce(async ctx=>{
    expect(ctx.context.recovery).toMatchObject({predecessorRunId:run.id,outcomesUnknown:true});
    expect(ctx.context.prompt).toContain("do not blindly replay");

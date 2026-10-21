@@ -116,6 +116,8 @@ export interface CompleteHeartbeatRunInput extends RunCompletionInput {
   providerTraceCapture: boolean;
   // Update the executor immediately: a later completion step can still throw.
   onProviderTraceFinalized: () => void;
+  // Transfer only our committed terminal authority, before later effects can fail.
+  onTerminalPersisted?: (run: Run) => void;
   issueContext: IssueContext;
   onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
 }
@@ -650,7 +652,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       // likewise keeps the provider session, logs, and usage after Stop wins.
       if (
         (adapterResult.nativeFinalization ||
-          ((processCancellation && !processCancellation.failed || parseObject(persistedRunWrite.run?.runnerProfileJson?.externalSettlement).observerEpoch === run.observerEpoch) && status === "cancelled")) &&
+          ((processCancellation && !processCancellation.failed || (parseObject(persistedRunWrite.run?.runnerProfileJson?.externalSettlement).observerEpoch === run.observerEpoch && parseObject(adapterResult.executionRecovery).providerWorkStarted !== false)) && status === "cancelled")) &&
         persistedRunWrite.run?.status === status
       ) {
         persistedRun = await db
@@ -693,6 +695,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       }
     }
     if (persistedRun) {
+      input.onTerminalPersisted?.(persistedRun);
       // Accounting recovery is independent of workspace or issue finalization.
       await measureRunPhase("completion.cost", () => accountRunCost(db, persistedRun!.id, budgetHooks)).catch((err) => {
         logger.error({ err, runId: run.id }, "Run accounting queued for recovery");

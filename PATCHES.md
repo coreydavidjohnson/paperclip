@@ -220,6 +220,9 @@ heartbeat.ts.
   Observer setup always releases lease renewal on failure. Configuration lookup,
   probe and stop each have a ten-second bound, including never-settling lookups.
   Prepared/submission-unknown handles become eligible for a probe after ten minutes.
+  Completion transfers cleanup-event authority only from its accepted terminal row.
+  Direct-Stop no-work accounting requires the exact settlement receipt and epoch.
+  Newer recovery coalesces older input-free receipts; saved human input is retained.
 - Files: adapter-utils contract, database migration `0355_run_liveness`,
   `services/heartbeat/external-run-state.ts`, `external-run-liveness.ts`,
   runtime/output/completion/lifecycle/recovery/queue integration, controller lease,
@@ -236,6 +239,8 @@ heartbeat.ts.
   OmniGenT adapter, parked-wake cutover, real staging matrix and combined release.
   Do not deploy the rebased fork before those gates pass.
 - Remove when: upstream owns the same durable remote-run lifecycle.
+
+- Owned terminal completion transfers cleanup-event authority before fallible post-terminal effects; the real-database cleanup regression preserves the warning after a completion exception without granting stale observers a new epoch.
 
 ## Homelab-owned settings (not fork patches)
 

@@ -39,7 +39,7 @@ import { withAdapterExecutionPhase } from "@paperclipai/adapter-utils/execution-
 import { remoteExecutionHasStopped } from "../remote-execution-termination.js";
 import { registerAdapterExecutionControl } from "../adapter-execution-control.js";
 import { resolveManagedOpenAiBilling } from "@paperclipai/adapter-utils";
-import { and, eq, isNull, sql } from "drizzle-orm";
+import { and, eq, isNull, or, sql } from "drizzle-orm";
 import { heartbeatRuns, nativeRunFinalizations, workspaceOperations } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
 import { getStartupTraceContext } from "../../instrumentation.js";
@@ -920,7 +920,14 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       // while durably recording the proof needed to release admission.
       await db.update(heartbeatRuns).set({ costAccountingPending: true,
         usageJson: sql`coalesce(${heartbeatRuns.usageJson}, '{}'::jsonb) || '{"accountingProviderWorkStarted":false}'::jsonb`,
-      }).where(and(externalObserverCondition(run), isNull(heartbeatRuns.costAccountedAt)));
+      }).where(and(isNull(heartbeatRuns.costAccountedAt), or(externalObserverCondition(run), and(
+        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+        eq(heartbeatRuns.status, "cancelled"), eq(heartbeatRuns.observerEpoch, run.observerEpoch + 1),
+        sql`${heartbeatRuns.runnerProfileJson} #>> '{externalSettlement,runId}' = ${run.id}`,
+        sql`${heartbeatRuns.runnerProfileJson} #>> '{externalSettlement,status}' = 'cancelled'`,
+        sql`${heartbeatRuns.runnerProfileJson} #>> '{externalSettlement,observerEpoch}' = ${String(run.observerEpoch)}`,
+        sql`${heartbeatRuns.runnerProfileJson} #>> '{externalSettlement,terminalEpoch}' = ${String(run.observerEpoch + 1)}`,
+      ))));
     }
     adapterResult = applyWorkspaceRestoreFailure(adapterResult);
     // A returned result can include a failed restore. Keep the workspace
