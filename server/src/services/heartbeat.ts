@@ -17250,6 +17250,26 @@ export function heartbeatService(
     }
   }
 
+  async function queuedRunDeferredByLiveIssueOwner(
+    run: typeof heartbeatRuns.$inferSelect,
+    issueId: string,
+    context: Record<string, unknown>,
+  ) {
+    if (context.wakeReason === "source_scoped_recovery_action") return false;
+    const [owner] = await db.select({
+      status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
+      executionRunId: issues.executionRunId,
+    }).from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
+    if (!owner || owner.assigneeAgentId !== run.agentId) return false;
+    if (owner.status === "done" || owner.status === "cancelled") return false;
+    if (!owner.executionRunId || owner.executionRunId === run.id) return false;
+    if (liveRunExecutions.has(owner.executionRunId)) return true;
+    const [previous] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.id, owner.executionRunId), eq(heartbeatRuns.companyId, run.companyId)));
+    return Boolean(previous) && !isHeartbeatRunTerminalStatus(previous?.status);
+  }
+
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
@@ -17390,19 +17410,29 @@ export function heartbeatService(
         return null;
       }
 
-      const staleness = await runDispatch.cancelStaleQueuedRun({
-        runId: run.id,
-        companyId: run.companyId,
-        expectedStatus: "queued",
-      });
-      if (staleness.outcome === "cancelled") {
-        applyRunDispatchPostCommitEffects(staleness.postCommitEffects);
-        logger.info(
-          { runId: run.id, issueId, errorCode: staleness.errorCode },
-          "claimQueuedRun: cancelled stale queued run",
-        );
-        return null;
+      // Promotion retries every queued run on every pass. Taking issue -> run
+      // row locks just to learn "not stale" convoyed on hot issues and starved
+      // the pool (PER-963). Preview without locks; the locked call re-decides.
+      if (await runDispatch.queuedRunNeedsLockedStalenessCheck({ runId: run.id, companyId: run.companyId })) {
+        const staleness = await runDispatch.cancelStaleQueuedRun({
+          runId: run.id,
+          companyId: run.companyId,
+          expectedStatus: "queued",
+        });
+        if (staleness.outcome === "cancelled") {
+          applyRunDispatchPostCommitEffects(staleness.postCommitEffects);
+          logger.info(
+            { runId: run.id, issueId, errorCode: staleness.errorCode },
+            "claimQueuedRun: cancelled stale queued run",
+          );
+          return null;
+        }
       }
+
+      // While another live run owns this agent's issue, the claim below would
+      // lock the issue row only to return "blocked". Skip it without locks; the
+      // locked check in lockIssueExecutionClaim stays authoritative.
+      if (await queuedRunDeferredByLiveIssueOwner(run, issueId, context)) return null;
     }
 
     const claimSlot = (tx: Db) => admitAgentRun(tx, run.companyId, run.agentId, parseHeartbeatPolicy(agent).maxConcurrentRuns, { id: run.id, issueId: issueId ?? null });
@@ -17422,13 +17452,17 @@ export function heartbeatService(
     // All ordinary and comment claims use the same company-scoped issue
     // lock. A batch may claim several runs before executeRun tracks any owner.
     async function lockIssueExecutionClaim(tx: Db) {
+      // A claim is optional work: a row held by another writer means "try on
+      // the next promotion pass", never "wait in line". The issue's existence
+      // was established before this transaction, so no row = contended.
       const [owner] = issueId ? await tx.select({
         assigneeAgentId: issues.assigneeAgentId,
         executionRunId: issues.executionRunId,
         checkoutRunId: issues.checkoutRunId,
       }).from(issues).where(and(
         eq(issues.id, issueId), eq(issues.companyId, run.companyId),
-      )).for("update") : [];
+      )).for("update", { skipLocked: true }) : [];
+      if (issueId && !owner) return { ownsIssue: false, blocked: true };
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
         context.wakeReason !== "source_scoped_recovery_action";
       if (ownsIssue && run.scheduledRetryReason === "native_safe_replacement" &&
