@@ -15293,6 +15293,7 @@ export function issueRoutes(
     const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found");
     if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
     const actor = getActorInfo(req);
+    const publications: ActivityPublication[] = [];
     const result = await db.transaction(async tx => {
       const [current] = await tx.select().from(issueRows).where(and(
         eq(issueRows.id, issue.id), eq(issueRows.companyId, issue.companyId),
@@ -15354,14 +15355,15 @@ export function issueRoutes(
       if (deliveredCommentIds.length) await tx.update(heartbeatRuns).set({ resultJson: {
         ...runResult, queuedSteeringAcknowledgements: acknowledgements,
       }, updatedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      if (deliveredCommentIds.length) await logActivity(tx as unknown as Db, {
+        companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+        agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
+        action: "issue.queued_comments_delivered", entityType: "issue", entityId: issue.id,
+        details: { commentIds: deliveredCommentIds, delivery: "issue_comments_read" },
+      }, publications);
       return { comments, deliveredCommentIds };
     });
-    if (result.deliveredCommentIds.length) await logActivity(db, {
-      companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
-      agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
-      action: "issue.queued_comments_delivered", entityType: "issue", entityId: issue.id,
-      details: { commentIds: result.deliveredCommentIds, delivery: "issue_comments_read" },
-    });
+    for (const publication of publications) publishActivity(publication);
     res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, result));
   });
 

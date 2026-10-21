@@ -942,3 +942,33 @@ The startup generated-column migration timed out and rolled back on production. 
   run-history-query.js dependency; no build or deployment performed here.
 
 Native service coverage added during delivery: real schema/comments/log-store tests cover membership, tenant isolation, own-run bypass, pagination, stored attribution and redaction. Equal created_at values retain the existing unspecified SQL tie order and first-in-input marker winner; no deterministic tie-equivalence claim. No migration or snapshot rewrite.
+
+## External-run comment delivery receipts (PER-1124)
+
+- Evidence: pinned fork b7eaf24 and upstream e5351b240a4a07bce7d8352ae9c8352e48001fd5
+  (2026-10-21) expose same-turn steering only for native Paperclip Runner.
+  OmniGenT uses the legacy external adapter protocol. Latest stable release
+  inspected in the tag list: v2026.1012.0; no compatible acknowledgement API
+  was found in current upstream. No OmniGenT or harness carry is added.
+- Contract: POST /api/issues/:id/comments/delivery, body {}, authenticates
+  the agent and X-Paperclip-Run-Id. Only the current issue owner and active,
+  uncancelled external run can receive a snapshot. Stale/expired/wrong-run
+  requests fail closed. Native runs and ordered chats retain their existing
+  delivery path. Plain GET /comments remains read-only.
+- Reuses the normal comment reader's projection, attribution and redaction.
+  Only returned, unchanged queued comments get queuedSteeringAcknowledgements.
+  Every ordinary deferred queue in the snapshot is emptied or reduced in the
+  same transaction as the acknowledgement and audit row. Interaction/approval
+  queues remain pending; read delivery does not approve or resume them.
+- Agent Tools consumes this supported fork API, never database tables.
+  The issue.queued_comments_delivered activity refreshes visible queued-comment
+  queries, including identifier aliases. Repeated reads are safe and return
+  the history without creating another delivery receipt.
+- Tests: issue-queued-comments-routes.test.ts and LiveUpdatesProvider.test.ts.
+  Baseline: 8 new server tests fail (missing API), then 80 pass. Additional
+  red cases cover malformed run IDs and more than one deferred comment wake;
+  a separate test preserves a fresh-session approval. UI test fails before
+  adding the queued-comment query invalidation. Final gates are recorded in
+  PER-1124; these historical results are not production acceptance.
+- Retirement: replace with a released, run-authenticated external-adapter
+  acknowledgement/steering API that passes these contracts.
