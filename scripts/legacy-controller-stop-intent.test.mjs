@@ -11,7 +11,9 @@ async function fixture(intent) {
   const exports = {
     'node:crypto': { randomUUID },
     'drizzle-orm': { and: noop, eq: noop, gt: noop, lte: noop, sql: noop },
-    '@paperclipai/db': { heartbeatRuns: {} },
+    '@paperclipai/db': { heartbeatRuns: {}, persistentDedicatedDb: (db, name) => {
+      assert.equal(name, 'paperclip-legacy-controller-lease'); return db;
+    } },
   };
   const source = await readFile(new URL('../server/src/services/legacy-controller-lease.ts', import.meta.url), 'utf8');
   const module = new vm.SourceTextModule(stripTypeScriptTypes(source, { mode: 'transform' }), { context });
