@@ -768,6 +768,9 @@ into the current fork image or supplied by a fork migration.
   Keep exact-action, company, run, dependency, interaction, execution hold,
   approval, pending stage, pause, availability and budget gates unchanged.
 - Keep the existing blocked board-escalation lane and action-ID replay.
+  After the recovery-history merge, check authorized whole-note replay before
+  the board-only annotation gate. New late notes remain board-only; original
+  owner retries remain read-only even after intervening board annotations.
   The ordinary restored wake remains post-commit/best-effort; this patch does
   not add an exactly-once outbox or claim crash-window delivery guarantees.
 - Upstream master 4970d5ed3d184b8b3ddfb2c1185be6cb6dc8c2ea inspected

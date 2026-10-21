@@ -2528,6 +2528,32 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
     expect(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
     expect(logs.filter(entry => entry.action === "issue.updated")).toHaveLength(1);
+    // Replaying an existing note does not authorize an agent to append a new one.
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      ...body, resolutionNote: "Unapproved new evidence.",
+    }).expect(403);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(stored);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toEqual(logs);
+    // Once the board annotates, whole-note audit identity must still admit the
+    // original owner's lost-response replay without a second write or wake.
+    const board = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    await request(board).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      ...body, resolutionNote: "Board observation after hand-back.",
+    }).expect(200);
+    const annotated = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const source = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const annotatedLogs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(annotated[0].resolutionNote).toBe(body.resolutionNote + "
+
+Board observation after hand-back.");
+    expect(annotatedLogs.filter(entry => entry.action === "issue.recovery_action_note_added")).toHaveLength(1);
+    const readable = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: action.id }).expect(200);
+    expect(readable.body.actions[0].resolutionNote).toBe(annotated[0].resolutionNote);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(annotated);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(source);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toEqual(annotatedLogs);
+    expect(wake).toHaveBeenCalledTimes(1);
   });
 
   it("retries an exhausted disposition action once, preserving the owner and audit trail", async () => {

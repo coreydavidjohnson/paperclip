@@ -9162,7 +9162,6 @@ export function issueRoutes(
               if (settled.kind === "deliberate_wait_without_target" && resolutionNote) {
                 // Whole-note audit identity survives later annotations and paragraph
                 // boundaries. The issue lock serializes this lookup with the append.
-                assertBoard(req);
                 const [recordedNote] = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
                   eq(activityLog.companyId, lockedIssue.companyId),
                   eq(activityLog.entityType, "issue"),
@@ -9174,6 +9173,9 @@ export function issueRoutes(
                 if (settled.resolutionNote === resolutionNote || recordedNote) {
                   return { issue: lockedIssue, recoveryAction: settled, replayed: true };
                 }
+                // An authorized replay is read-only; only the board may append
+                // new evidence to a settled disposition action.
+                assertBoard(req);
                 // Late disposition evidence is annotation, not another resolution:
                 // retain the original outcome, timestamps and note; never replay.
                 if (activeRecoveryAction || sourceIssueStatus !== lockedIssue.status ||
