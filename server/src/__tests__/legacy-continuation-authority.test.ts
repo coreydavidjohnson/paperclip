@@ -261,6 +261,41 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.runs()).toHaveLength(2);
     expect((await f.actions())[0]).toMatchObject({ ownerType: "agent", attemptCount: 1 });
   });
+  it("PER-404 exhausts one bare-blocked episode and escalates only once across later sweeps", async () => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    const first = (await f.runs()).find(r => r.id !== f.runId)!;
+    await f.finish(first);
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    const second = (await f.runs()).find(r => r.status === "scheduled_retry")!;
+    expect(second.contextSnapshot).toMatchObject({ legacyDispositionEpisode: { id: f.runId, attempt: 2, maxAttempts: 2 } });
+    await f.finish(second);
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(await f.runs()).toHaveLength(3);
+    expect(await f.actions()).toHaveLength(1);
+    expect((await f.actions())[0]).toMatchObject({ ownerType: "board", attemptCount: 2 });
+    const audit = await db.select().from(activityLog).where(eq(activityLog.entityId, f.issueId));
+    expect(audit.filter(a => a.action === "issue.disposition_repair_escalated")).toHaveLength(1);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, f.issueId));
+    expect(comments.filter(c => c.body.startsWith("Paperclip exhausted the bounded original-owner"))).toHaveLength(1);
+  });
+  it("PER-404 leaves blocked chat-channel lifecycle to its conversation controller", async () => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked", originKind: "chat_channel" }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it.each(["todo", "in_progress"])("PER-404 preserves a named credential action even while %s", async status => {
+    const f = await fixture();
+    await db.update(issues).set({ status, unblockDescriptor: { owner: "board" as const, action: "Provide credentials" } }).where(eq(issues.id, f.issueId));
+    expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
+    expect(await f.runs()).toHaveLength(1);
+  });
   it.each(["descriptor", "dependency", "question", "approval"])("PER-404 preserves a blocked %s gate", async gate => {
     const f = await fixture();
     await db.update(issues).set({ status: "blocked", ...(gate === "descriptor" ? {

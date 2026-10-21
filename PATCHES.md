@@ -979,3 +979,8 @@ Regression-first evidence: on the current exact packaged fork, the new classifie
 and persisted one-sweep regressions fail (2 failed, 87 passed). Existing routing
 HTTP-422, real waits, lineage/budget, dispatch and duplicate controls remain.
 Keep this carry in our fork only; retire it when upstream covers the same cases.
+
+Cross-provider review follow-up: blocked chat-channel issues remain owned by their
+conversation controller even before settlement. Persisted controls also cover
+post-exhaustion sweep deduplication and named credential actions in all statuses.
+Database startup uses the existing shared embedded-Postgres cost-class budget.
