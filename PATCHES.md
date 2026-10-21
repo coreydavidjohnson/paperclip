@@ -960,3 +960,22 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - Files: heartbeat-dependency-scheduling.test.ts, issue-comment-redaction.test.ts.
 - No production behavior changes. Exact native full-image gate remains required.
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
+
+
+## Restore unsupported-blocked owner repair after combined-fork integration (PER-404)
+
+The current combined fork retained typed routing-child protection but lost the
+approved ef4c45e57/67d208ceb bare-blocked carry. Upstream f3af9887 (2026-10-21)
+and stable v2026.1012.0 still treat blocked as a final disposition before
+checking real waiting evidence. Restore only that missing carry on e3410f6af.
+A successful legacy owner's unsupported blocked disposition enters the existing
+two-attempt, identity-bound and idempotent repair. Named unblock actions,
+dependencies, pending questions/approvals, stop/pause/budget, active execution,
+other recovery authority and unknown-outcome holds retain their gates. The
+stranded sweep includes blocked but never replays failed or native sources.
+Typed routing hand-back dispatch keeps its exact-disposition provenance fence.
+
+Regression-first evidence: on the current exact packaged fork, the new classifier
+and persisted one-sweep regressions fail (2 failed, 87 passed). Existing routing
+HTTP-422, real waits, lineage/budget, dispatch and duplicate controls remain.
+Keep this carry in our fork only; retire it when upstream covers the same cases.

@@ -17,7 +17,7 @@ describe("legacy continuation authority", () => {
     expect(decideLegacyContinuation({ ...blocked, episode: { ...input.episode, attempt: 2 } }).kind).toBe("exhausted");
     expect(decideLegacyContinuation({ ...blocked, gates: { ...input.gates, pendingWait: true } })).toEqual({ kind: "skip", reason: "durable_wait" });
   });
-  it.each(["done", "cancelled", "blocked", "in_review"])("respects persisted %s disposition", status => {
+  it.each(["done", "cancelled", "in_review"])("respects persisted %s disposition", status => {
     expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, status } }).kind).toBe("skip");
   });
   it.each(["failed", "cancelled", "interrupted", "timed_out", "running"])("does not convert a %s process into repair", status => {
