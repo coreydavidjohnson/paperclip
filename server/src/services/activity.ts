@@ -1,3 +1,4 @@
+import { compactRunContext } from "./run-history-query.js";
 import { issueRunIdsCondition } from "./run-history-query.js";
 import { executionProjectionsForRuns } from "./execution-projection.js";
 import { and, asc, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
@@ -406,10 +407,10 @@ export function activityService(db: Db) {
           continuationAttempt: heartbeatRuns.continuationAttempt,
           lastUsefulActionAt: heartbeatRuns.lastUsefulActionAt,
           nextAction: heartbeatRuns.nextAction,
-          wakeCommentIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds'`,
-          wakeCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`,
-          contextCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'commentId'`,
-          contextIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
+          wakeCommentIds: sql<string[] | null>`${compactRunContext} -> 'wakeCommentIds'`,
+          wakeCommentId: sql<string | null>`${compactRunContext} ->> 'wakeCommentId'`,
+          contextCommentId: sql<string | null>`${compactRunContext} ->> 'commentId'`,
+          contextIssueId: sql<string | null>`${compactRunContext} ->> 'issueId'`,
         })
         .from(heartbeatRuns)
         .innerJoin(

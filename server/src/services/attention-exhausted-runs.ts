@@ -1,5 +1,14 @@
+import { compactRunContext } from "./run-history-query.js";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { agents, heartbeatRunEvents, heartbeatRuns, type Db } from "@paperclipai/db";
+
+// Same PK/company lookup for the correlated newer-run alias. The source JSON
+// fallback is only for historical rows not yet copied by the bounded backfill.
+const newerContext = sql`coalesce(
+  (select c.context from heartbeat_run_list_context c
+    where c.run_id = newer.id and c.company_id = newer.company_id),
+  newer.context_snapshot
+)`;
 
 export function listAttentionExhaustedRuns(db: Db, companyId: string) {
   // Recovery can revisit an exhausted run. Deduplicate its historical events
@@ -21,12 +30,12 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
 
   // Match the legacy raw-JSON candidate fallback, not newer-run text coercion.
   const issueKey = sql`(case when jsonb_typeof(case
-    when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
-      or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
-    then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-    else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
-    then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
-        ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
+    when ${compactRunContext} -> 'issueId' is null
+      or ${compactRunContext} -> 'issueId' = 'null'::jsonb
+    then ${compactRunContext} -> 'taskId'
+    else ${compactRunContext} -> 'issueId' end) = 'string'
+    then coalesce(${compactRunContext} ->> 'issueId',
+        ${compactRunContext} ->> 'taskId', '')
     else '' end)`;
 
   return db
@@ -41,8 +50,8 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
       // Preserve JSON types and issueId/taskId fallback semantics without
       // transferring prompts, transcripts, or the rest of the run context.
       contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
-        'issueId', ${heartbeatRuns.contextSnapshot} -> 'issueId',
-        'taskId', ${heartbeatRuns.contextSnapshot} -> 'taskId'
+        'issueId', ${compactRunContext} -> 'issueId',
+        'taskId', ${compactRunContext} -> 'taskId'
       )`,
       createdAt: heartbeatRuns.createdAt,
       updatedAt: heartbeatRuns.updatedAt,
@@ -57,7 +66,8 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
       // Feed retention only: keep historical runs and recovery evidence intact.
       sql`${heartbeatRuns.createdAt} >= now() - interval '7 days'`,
       eq(agents.companyId, companyId),
-      // Independent anti-probes let each fallback use its expression index.
+      // Keep stored-expression index search keys (no blob projection); residual
+      // null checks and candidate fields read the compact sidecar.
       sql`not exists (select 1 from heartbeat_runs newer
         where newer.company_id = ${heartbeatRuns.companyId}
           and newer.agent_id = ${heartbeatRuns.agentId}
@@ -67,14 +77,14 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
         where newer.company_id = ${heartbeatRuns.companyId}
           and newer.agent_id = ${heartbeatRuns.agentId}
           and newer.created_at >= date_trunc('milliseconds', ${heartbeatRuns.createdAt}) + interval '1 millisecond'
-          and newer.context_snapshot ->> 'issueId' is null
+          and ${newerContext} ->> 'issueId' is null
           and newer.context_snapshot ->> 'taskId' = ${issueKey})`,
       sql`not exists (select 1 from heartbeat_runs newer
         where newer.company_id = ${heartbeatRuns.companyId}
           and newer.agent_id = ${heartbeatRuns.agentId}
           and newer.created_at >= date_trunc('milliseconds', ${heartbeatRuns.createdAt}) + interval '1 millisecond'
           and newer.context_snapshot ->> 'issueId' is null
-          and newer.context_snapshot ->> 'taskId' is null
+          and ${newerContext} ->> 'taskId' is null
           and ${issueKey} = '')`,
       notInArray(agents.status, ["terminated"]),
       inArray(heartbeatRuns.status, ["failed", "timed_out"]),
