@@ -8,7 +8,7 @@ const { execFileSync } = require('node:child_process');
 test('both heartbeat finalization callbacks preserve the narrowed log handle', () => {
   const source = readFileSync(join(__dirname, '../src/services/heartbeat.ts'), 'utf8');
   // These complete blocks end immediately before the shared final-byte read.
-  const blocks = [...source.matchAll(/if \(handle\) \{[\s\S]*?(?=\n\s*const finalLogBytes = logSummary\?\.bytes;)/g)]
+  const blocks = [...source.matchAll(/^([ \t]*)if \(handle\) \{[\s\S]*?^\1\}(?=\n\1const finalLogBytes = logSummary\?\.bytes;)/gm)]
     .map(match => match[0]).filter(block => block.includes('completionTiming.measure("log_finalize"'));
   assert.equal(blocks.length, 2, 'cover success and failure finalization');
   const storeSource = readFileSync(join(__dirname, '../src/services/run-log-store.ts'), 'utf8');
