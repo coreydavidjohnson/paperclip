@@ -7,7 +7,14 @@ import { issueRoutes } from "../routes/issues.js";
 import { describeEmbeddedPostgres, resetCompanyIssueFixtures, routeApp, seedCompanyWithBoardAccess, useEmbeddedPostgres } from "./helpers/route-test-harness.js";
 
 describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
-  const ctx = useEmbeddedPostgres("paperclip-blocked-wait-", { resetEach: async (db) => { await db.delete(activityLog); await db.delete(issueApprovals); await db.delete(approvals); await resetCompanyIssueFixtures(db); } });
+  const ctx = useEmbeddedPostgres("paperclip-blocked-wait-", {
+    resetEach: async (db) => {
+      await db.delete(activityLog);
+      await db.delete(issueApprovals);
+      await db.delete(approvals);
+      await resetCompanyIssueFixtures(db);
+    },
+  });
   async function fixture(status = "todo") {
     const company = await seedCompanyWithBoardAccess(ctx.db, "Blocked wait");
     const [issue] = await ctx.db.insert(issues).values({ companyId: company.companyId, title: "Dependent", status }).returning();
@@ -21,9 +28,21 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
     expect(rows.map(row => row.title)).toEqual(["Dependent"]);
   });
 
+  it("does not insert a blocked issue when an outer transaction catches the rejection", async () => {
+    const { companyId } = await fixture();
+    await ctx.db.transaction(async (tx) => {
+      const svc = issueService(tx as unknown as typeof ctx.db);
+      await expect(svc.create(companyId, { title: "Caught invalid wait", status: "blocked" }))
+        .rejects.toMatchObject({ status: 422, details: { code: "blocked_wait_required" } });
+      const rows = await tx.select().from(issues).where(eq(issues.companyId, companyId));
+      expect(rows.map(row => row.title)).toEqual(["Dependent"]);
+    });
+  });
+
   it.each(["todo", "blocked"])("rejects entering/reasserting blocked from %s, even with prose", async (status) => {
     const { issue, svc } = await fixture(status);
-    await expect(svc.update(issue.id, { status: "blocked", unblockDescriptor: { owner: "board", action: "Wait for X" } })).rejects.toMatchObject({ status: 422 });
+    await expect(svc.update(issue.id, { status: "blocked", unblockDescriptor: { owner: "board", action: "Wait for X" } }))
+      .rejects.toMatchObject({ status: 422, details: { code: "blocked_wait_required" } });
     const [after] = await ctx.db.select().from(issues).where(eq(issues.id, issue.id));
     expect(after.status).toBe(status);
     expect(after.unblockDescriptor).toBeNull();
@@ -73,7 +92,10 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
 
   it("rejects descriptor-only HTTP repeated blocked writes", async () => {
     const { issue, actor } = await fixture("blocked");
-    await request(routeApp(ctx.db, actor, issueRoutes)).patch(`/api/issues/${issue.id}`).send({ status: "blocked", unblockDescriptor: { owner: "board", action: "Wait for CI" } }).expect(422);
+    const response = await request(routeApp(ctx.db, actor, issueRoutes))
+      .patch(`/api/issues/${issue.id}`)
+      .send({ status: "blocked", unblockDescriptor: { owner: "board", action: "Wait for CI" } }).expect(422);
+    expect(response.body.details).toMatchObject({ code: "blocked_wait_required" });
   });
 
   it("accepts a real blocker through HTTP and rejects descriptor-only HTTP creation", async () => {
@@ -82,6 +104,8 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
     const app = routeApp(ctx.db, actor, issueRoutes);
     await request(app).patch(`/api/issues/${issue.id}`)
       .send({ status: "blocked", blockedByIssueIds: [blocker.id] }).expect(200);
+    await request(app).post(`/api/companies/${companyId}/issues`)
+      .send({ title: "Valid wait target", status: "blocked", blockedByIssueIds: [blocker.id] }).expect(201);
     await request(app).post(`/api/companies/${companyId}/issues`)
       .send({ title: "No wait target", status: "blocked", unblockDescriptor: { owner: "board", action: "Wait" } }).expect(422);
   });
