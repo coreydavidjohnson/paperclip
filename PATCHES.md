@@ -1001,3 +1001,22 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - No production code, concurrency limit, timeout increase or retry waiver.
 - Regression: existing mandatory stale-queue suite and complete image gate.
 - Retire when upstream fixtures wait for the complete executor lifetime.
+
+## PER-209: bind managed compression recovery to the server-owned block
+
+- Upstream checked at 043f2514e67c50320433a0013fb228a75a51325c (2026-10-22).
+  It retains automatic no-replay settlement without a compression status receipt.
+- Our source-owned helper must compact the same stopped session before native
+  delivery; removing the premature ordinary retry exposed a resolved hold the
+  helper previously skipped. Do not reopen arbitrary historical blocked actions.
+- Native settlement writes managedCompressionBlock {runId,statusVersion,updatedAt}
+  only when this legacy compression failure actually changes a nonblocked task.
+  The supported resolver validates the receipt under its existing issue row lock,
+  so later human blocks/edits and old receipts without provenance stay held.
+- No action replay, new wake writer, provider patch, schema or deadline change.
+  Existing latest-source, ownership, approval and dependency checks remain.
+- Regression: scripts/managed-compression-block.test.mjs (21 cases; positive
+  cases observed red before implementation), issue-recovery-actions.test.ts
+  (real resolver guards/idempotence), native-safe-replacement.test.ts (native
+  receipt and preexisting block). Cluster semantic/image gates still required.
+- Retire when released upstream supplies equivalent status-provenance validation.

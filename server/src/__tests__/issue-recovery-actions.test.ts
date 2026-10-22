@@ -1809,6 +1809,44 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
   });
 
+  it.each(["unchanged", "human_reblock", "human_edit", "no_proof"])("guards resolved compression restoration under the issue lock (%s)", async (mode) => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", errorCode: "omnigent_context_compression_failed" }).where(eq(heartbeatRuns.id, runId));
+    const [blocked] = await db.update(issues).set({ status: "blocked", updatedAt: new Date() }).where(eq(issues.id, sourceIssueId)).returning();
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", status: "resolved", outcome: "blocked", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+      nextAction: "Preserve the stopped compression session.", evidence: { runId,
+        originalFailureCode: "omnigent_context_compression_failed",
+        ...(mode === "no_proof" ? {} : { managedCompressionBlock: {
+          runId, statusVersion: blocked!.statusVersion, updatedAt: blocked!.updatedAt.toISOString(),
+        } }), automaticRecovery: { policy: "preserve_without_replay_v1", replay: "blocked" } } }).returning();
+    // The helper's earlier read saw `blocked`. A later edit must win even if
+    // restoration arrives with otherwise valid source and provider evidence.
+    if (mode === "human_reblock") {
+      await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+      await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    } else if (mode === "human_edit") {
+      await db.update(issues).set({ updatedAt: new Date(blocked!.updatedAt.getTime() + 1000) }).where(eq(issues.id, sourceIssueId));
+    }
+    const body = { actionId: action!.id, outcome: "restored", sourceIssueStatus: "todo",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "mixed",
+        outcomeEvidence: "The original session completed managed compaction; prior work remains preserved and must not be replayed." } };
+    const app = createApp();
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(mode === "unchanged" ? 200 : 409);
+    const [after] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
+    if (mode === "unchanged") {
+      expect(after!.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "pending" });
+      await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(after);
+    } else {
+      expect(after).toEqual(action);
+      expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]!.status).toBe("blocked");
+    }
+  });
+
   it("reconciles a settled execution hold while preserving dependencies and approvals without replay", async () => {
     const { companyId, coderId, managerId, sourceIssueId, prefix } = await seedCompany();
     const runId = randomUUID();
