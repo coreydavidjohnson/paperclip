@@ -1,3 +1,4 @@
+import { createCompletionTiming } from "./completion-timing.js";
 import { runListContextColumns, runListContextJoin } from "./run-history-query.js";
 import { externalObjectService } from "./external-objects.js";
 import { isAiAuthenticationBlocked } from "./ai-auth-failure.js";
@@ -20345,6 +20346,9 @@ export function heartbeatService(
     }
 
     let legacyAdapterEntered = false;
+    const completionTiming = createCompletionTiming(runId, (event) => {
+      if (legacyAdapterEntered) logger.info({ completionTiming: event }, "run completion stage");
+    });
     let run = await getRun(runId);
     if (!run) return;
     if (run.status !== "queued" && run.status !== "running") return;
@@ -25091,8 +25095,12 @@ export function heartbeatService(
                 },
               );
             if (!guardedDispatch.dispatched) return;
-            adapterResult = await guardedDispatch.resultPromise;
-            if (!executionControl.controller.signal.aborted) await controllerLease.assertOwned();
+            try {
+              adapterResult = await guardedDispatch.resultPromise;
+            } finally {
+              completionTiming.mark("adapter_return");
+            }
+            if (!executionControl.controller.signal.aborted) await completionTiming.measure("controller_lease_check", () => controllerLease.assertOwned());
             // Lease loss is detachment, not a provider failure or cancellation.
             // OmniGenT preserves its external turn; no cleanup/retry is authorized.
             if (agent.adapterType === "omnigent" && (adapterResult.errorCode === "omnigent_controller_detached" ||
@@ -25339,19 +25347,19 @@ export function heartbeatService(
           throw adapterErr;
         } finally {
           try {
-            await revokeHeartbeatRunGatewayTokens({
+            await completionTiming.measure("gateway_token_release", () => revokeHeartbeatRunGatewayTokens({
               db,
               companyId: agent.companyId,
               runId: run.id,
-            });
+            }));
           } catch (revokeErr) {
             logger.warn(
               { err: revokeErr, runId: run.id, companyId: agent.companyId },
               "failed to revoke heartbeat-run MCP gateway tokens",
             );
           }
-          await nativeInstructionReservation?.release();
-          await instructionCopies.release(agent.companyId, run.id);
+          await completionTiming.measure("instruction_reservation_release", async () => { await nativeInstructionReservation?.release(); });
+          await completionTiming.measure("instruction_copy_release", () => instructionCopies.release(agent.companyId, run.id));
         }
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
         // project can pass authorization and clone locally at run prep, then fail to stage into the
@@ -25444,7 +25452,7 @@ export function heartbeatService(
           failedProcessRunCancellations.get(run.id);
         await processCancellation?.settled;
         let outcome: RunSessionOutcome;
-        const latestRun = await getRun(run.id);
+        const latestRun = await completionTiming.measure("run_query", () => getRun(run.id));
         if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
           outcome = latestRun.status;
         } else if (executionControl.controller.signal.aborted) {
@@ -25481,14 +25489,14 @@ export function heartbeatService(
           previousLegacySessionId: runtimeForAdapter.sessionId,
         });
         const rawUsage = normalizeUsageTotals(adapterResult.usage);
-        const sessionUsageResolution = await resolveNormalizedUsageForSession({
+        const sessionUsageResolution = await completionTiming.measure("usage_query", () => resolveNormalizedUsageForSession({
           agentId: agent.id,
           runId: run.id,
           sessionId:
             nextSessionState.displayId ?? nextSessionState.legacySessionId,
           rawUsage,
           usageBasis: adapterResult.usageBasis ?? null,
-        });
+        }));
         const normalizedUsage = sessionUsageResolution.normalizedUsage;
         const runErrorMessage =
           outcome === "cancelled"
@@ -25519,13 +25527,14 @@ export function heartbeatService(
           compressed: boolean;
         } | null = null;
         if (handle) {
-          logSummary = await runLogStore.finalize(handle);
+          const logHandle = handle;
+          logSummary = await completionTiming.measure("log_finalize", () => runLogStore.finalize(logHandle));
         }
         const finalLogBytes = logSummary?.bytes;
         if (outputProgressState.pending && typeof finalLogBytes === "number") {
           outputProgressState.pending.bytes = finalLogBytes;
         }
-        await flushOutputProgress({ force: true });
+        await completionTiming.measure("output_progress_flush", () => flushOutputProgress({ force: true }));
 
         if (providerTraceCapture) {
           try {
@@ -25629,7 +25638,7 @@ export function heartbeatService(
           adapterResult.summary ?? null,
         );
 
-        const finalRunPatch: Partial<typeof heartbeatRuns.$inferInsert> = {
+        const finalRunPatch = completionTiming.measureSync("final_patch_construction", (): Partial<typeof heartbeatRuns.$inferInsert> => ({
           finishedAt: new Date(),
           error: runErrorMessage,
           errorCode: runErrorCode,
@@ -25644,7 +25653,7 @@ export function heartbeatService(
           logBytes: logSummary?.bytes,
           logSha256: logSummary?.sha256,
           logCompressed: logSummary?.compressed ?? false,
-        };
+        }));
         const persistedRunWrite = await setRunStatusIfRunning(
           run.id,
           status,
@@ -26239,8 +26248,9 @@ export function heartbeatService(
           compressed: boolean;
         } | null = null;
         if (handle) {
+          const logHandle = handle;
           try {
-            logSummary = await runLogStore.finalize(handle);
+            logSummary = await completionTiming.measure("log_finalize", () => runLogStore.finalize(logHandle));
           } catch (finalizeErr) {
             logger.warn(
               { err: finalizeErr, runId },
@@ -26252,7 +26262,7 @@ export function heartbeatService(
         if (outputProgressState.pending && typeof finalLogBytes === "number") {
           outputProgressState.pending.bytes = finalLogBytes;
         }
-        await flushOutputProgress({ force: true }).catch((flushErr) => {
+        await completionTiming.measure("output_progress_flush", () => flushOutputProgress({ force: true })).catch((flushErr) => {
           logger.warn(
             { err: flushErr, runId },
             "failed to flush run output progress after error",

@@ -1020,3 +1020,9 @@ Native service coverage added during delivery: real schema/comments/log-store te
   (real resolver guards/idempotence), native-safe-replacement.test.ts (native
   receipt and preexisting block). Cluster semantic/image gates still required.
 - Retire when released upstream supplies equivalent status-provenance validation.
+PER669: Completion-stage diagnostics
+
+- Instance-local, closed-field monotonic spans for legacy adapter return and awaited controller finalization; no outbound telemetry, payload, URL or error text.
+- Preserves polling, ownership, approvals, cancellation and original error identity. Includes immutable captured log handles in both callbacks.
+- Focused checks: server/test/completion-timing.node.ts and completion-timing-semantic.node.cjs; normal full semantic/build gates remain required.
+- Retire when an upstream release provides equivalent sanitized completion boundaries.
