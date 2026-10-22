@@ -152,7 +152,7 @@ function issueListSearchParams(filters?: IssueListFilters) {
     params.set("includeAgentCreatedTasks", String(filters.includeAgentCreatedTasks));
   if (filters?.includeRoutineExecutions)
     params.set("includeRoutineExecutions", "true");
-  if (filters?.includeBlockedBy) params.set("includeBlockedBy", "true");
+  if (filters?.includeBlockedBy !== undefined) params.set("includeBlockedBy", String(filters.includeBlockedBy));
   if (filters?.includeBlockedInboxAttention)
     params.set("includeBlockedInboxAttention", "true");
   if (filters?.includeLiveDescendantSummary)

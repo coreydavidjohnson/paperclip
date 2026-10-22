@@ -2725,7 +2725,11 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     });
 
     const defaultResult = await svc.list(companyId);
-    expect(defaultResult.find((issue) => issue.id === blockedId)?.blockedBy).toBeUndefined();
+    expect(defaultResult.find((issue) => issue.id === blockedId)?.blockedBy).toEqual([
+      expect.objectContaining({ id: blockerId }),
+    ]);
+    const slim = await svc.list(companyId, { includeBlockedBy: false });
+    expect(slim.find((issue) => issue.id === blockedId)?.blockedBy).toBeUndefined();
 
     const result = await svc.list(companyId, { includeBlockedBy: true });
     const byId = new Map(result.map((issue) => [issue.id, issue]));
@@ -4116,7 +4120,8 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         executionWorkspaceId,
       },
     ]);
-    await svc.update(dependentId, { blockedByIssueIds: [blockerId] });
+    // Historical post-completion wait: new writes must not block on a done ticket.
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: dependentId, type: "blocks" });
 
     return {
       companyId,
@@ -4578,6 +4583,55 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
       isDependencyReady: true,
       pendingFinalizeBlockerIssueIds: [],
     });
+  });
+
+  it("treats blockers with no executionWorkspaceId as not subject to the workspace-finalize barrier", async () => {
+    const companyId = randomUUID();
+    const assigneeAgentId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: assigneeAgentId,
+      companyId,
+      name: "QA",
+      role: "qa",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+
+    const blockerId = randomUUID();
+    const dependentId = randomUUID();
+    await db.insert(issues).values([
+      // Done blocker with no execution workspace ever attached (e.g. closed manually).
+      { id: blockerId, companyId, title: "Manual done blocker", status: "done", priority: "medium" },
+      {
+        id: dependentId,
+        companyId,
+        title: "Dependent",
+        status: "blocked",
+        priority: "medium",
+        assigneeAgentId,
+      },
+    ]);
+    // Historical post-completion wait: new writes must not block on a done ticket.
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: dependentId, type: "blocks" });
+
+    // No executionWorkspaceId → no barrier → dependent should be wakeable.
+    await expect(svc.listWakeableBlockedDependents(blockerId)).resolves.toEqual([
+      expect.objectContaining({
+        id: dependentId,
+        assigneeAgentId,
+        blockerIssueIds: [blockerId],
+      }),
+    ]);
   });
 
   it("reports dependency readiness for blocked issue chains", async () => {

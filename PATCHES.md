@@ -374,3 +374,29 @@ heartbeat.ts.
   refusal/repair, guarded replay and durable normal same-session continuation.
 - Upstream checked at `67aa87a93bb1bbc4559105497863f541f9fb4e9b` (2026-10-25).
   Its resolve path still requires a blocked source; no equivalent guard exists.
+
+## PER-626: first-class blocked waits and visible dependency links
+
+- Observed upstream at `043f2514e67c50320433a0013fb228a75a51325c` still allows
+  descriptor-only entering-Blocked writes and only projects blocker relations
+  when requested. This is observed behavior, not a claim about upstream intent.
+  The private task explicitly requires stricter waits and board-visible links.
+- The shared issue service rejects create, entering/repeated Blocked and final
+  blocker removal unless the proposed issue has a real unresolved same-company
+  dependency or pending linked question/approval card. Validate before writes,
+  within the status/relation transaction. A prose descriptor is not a wake path.
+  Preserve native cancelled-blocker and pending-workspace-finalization semantics.
+  Leaving Blocked remains possible for recovery of legacy invalid rows.
+- Native full/compact lists include the existing batched blocker projection by
+  default; explicit `includeBlockedBy=false` remains supported. Both row layouts
+  show real navigable blocker identifiers as sibling links, not nested anchors.
+- Tests: `blocked-wait-invariant.test.ts`, `issues-service.test.ts`, and
+  `IssueRow.test.tsx`. The MCP projection and regressions live in homelab.
+- Delivery prerequisite: native recovery still writes descriptor-only Blocked
+  dispositions (reproduced in `issue-recovery-actions.test.ts`, stranded assigned
+  escalation). PER-968 owns the independently tracked recovery/status contract.
+  Adapt genuine automated recovery liveness and all direct status writers before
+  deployment; do not exempt system callers, fabricate waits, or weaken this guard.
+  This ledger records candidate scope, not publication/deployment verification.
+- Retire when a released upstream service enforces equivalent first-class waits
+  across supported writes and includes/navigates blocker links in board lists.
