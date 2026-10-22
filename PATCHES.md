@@ -1072,3 +1072,76 @@ compiler pin, timeout relaxation or semantic gate removal.
   successful completion with a one-connection shared pool.
 - Upstream checked with the readiness patch above; retire when the pinned
   upstream release supplies transaction-client-safe equivalent wake admission.
+
+## Atomic status and exhausted-disposition repair (PER-968)
+
+- Upstream checked: master 4415665d67b16ffefbe4519c4bdd521f37bb87b9 lacks
+  the common status refusal and guarded board contract. Released upstream
+  v2026.1012.0 is the newest tag; this patch stays on the supplied combined
+  fork base 5e83e54912d227e126382b2008756312a42d1511, not a whole-release upgrade.
+- Root cause: status committed before best-effort recovery revalidation. A
+  board escalation captured while blocked could survive a later status change
+  and reject both the old-source hand-back and ordinary resume.
+- Common issue update now refuses non-blocked status changes while an active
+  board escalation exists, before relations, cards or run locks change. The
+  existing resolve transaction settles the exact action before its status
+  update; failure rolls both back. Same-status comments do not silently clear
+  board escalation. No generic recovery clear or temporary blocker.
+- Extend the existing POST /api/issues/:id/recovery-actions/resolve contract:
+  authenticated board actor; actionId UUID; outcome=restored;
+  sourceIssueStatus=todo; nonempty resolutionNote (short normal instruction);
+  expectedSource={status,statusVersion,updatedAt,assigneeAgentId};
+  expectedAction={fingerprint,updatedAt}. Both snapshots are required together.
+  statusVersion is a nonnegative integer; timestamps are ISO-8601 datetimes;
+  assigneeAgentId is a UUID. Current source status must be blocked, todo or
+  in_progress. Match every supplied source/action field under source-then-action
+  locks. Permit only deliberate_wait_without_target, board owner,
+  board_escalation, terminalReason=unchanged_source_state_exhausted.
+  Reject replacement actions, dependencies, pending questions/confirmations,
+  approvals/review stages, pause/budget gates, active execution or owner changes.
+- Normal continuation uses existing issue_commented / automation / system
+  admission, with source issue.comment, saved authenticated board actor and
+  only the short resolutionNote as paperclipAgentMessage. No recoveryActionId,
+  forceFreshSession, reset, rotation or alternate saved binding. Existing
+  agentTaskSessions supplies sessionIdBefore unchanged. The action transaction
+  persists pending delivery; periodic execution-control sweeps retry it.
+- Admission deduplicates guarded-status-repair:<actionId> under the source
+  lock, including lost acknowledgements after the prior run is terminal.
+  Delivered means admitted, not provider success; ordinary native run recovery
+  owns subsequent failure. Never replay unknown provider effects. Newly active
+  execution/holds defer in this same outbox without another queued receipt.
+  Attempted outbox rows rotate updatedAt so 25 blocked rows cannot starve
+  younger repairs. A newer source status/version/owner supersedes undelivered
+  intent without a wake. Exact unchanged request replay returns 200; any new
+  source/action decision returns 409 rather than overwriting it.
+- Tests: issue-recovery-actions.test.ts covers the third trap, board comment
+  and native in-run refusal, exclusion snapshots, action-row lock race,
+  unchanged repeats, lost acknowledgement, concurrent sweep delivery, normal
+  same-session payload, newer-decision supersession and batch fairness.
+  Review findings for starvation and deferred duplication were reproduced
+  failing then passing against real disposable PostgreSQL. No test memory.
+- No migration, dependency, identity, model, grant or external-chat changes.
+  Parent PER-631 retains sweep detector/prompt integration; agent comments do
+  not independently authorize expanding this native atomicity patch.
+- Retire when a released upstream equivalent passes the same atomicity,
+  exclusion, durable-delivery and same-session regressions. Exact image CI,
+  isolated staging and live acceptance remain required delivery gates.
+
+### PER-968 current-production integration (2026-10-22)
+
+Applies only the eight-file atomic repair patch e832dcda onto production fork
+155e25d000fd08e80d1c6f58ffee2898982260ac (supersedes the 2026-10-21 44ec1436f
+rehearsal). PER-1091's agent-owned disposition hand-back is retained; the board
+branch additionally admits a non-blocked source only for a guarded request whose
+exact expectedSource/expectedAction snapshots already matched under lock. The historical 352168030 branch and
+its unrelated run-context candidates remain preserved, but are not revived by
+this delivery. Current production code outside the atomic patch is unchanged.
+Preserves atomic whole-note audit and late-note annotation. Guarded replay
+validates its exact receipt before the ordinary annotation idempotency shortcut;
+final outcome and delivery intent commit before post-commit publication.
+Both existing stale-replay and late-note tests must pass. Cluster patch tests,
+final image qualification and live acceptance are pending; no deployment claimed.
+- Integrated 2026-10-22 onto production fork 689c637f (PER-669 timing
+  diagnostics atop 155e25d0); only this ledger conflicted.
+- Integrated 2026-10-22 onto production fork 7bd82cec (PER-209 compression
+  provenance and timing gate atop 689c637f); only this ledger conflicted.

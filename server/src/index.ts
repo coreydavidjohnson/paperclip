@@ -1,3 +1,4 @@
+import { deliverGuardedStatusRepairs } from "./services/guarded-status-repair.js";
 import { beginControllerDrain, controllerDrainRemainingMs, isControllerDraining } from "./controller-drain.js";
 import { startLiveEventTransport, subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { chatCompletionDeliveryService } from "./services/chat-completion-delivery.js";
@@ -1163,6 +1164,7 @@ async function startServerWithDatabaseTeardown(
   const executionControlSweeps = [
     ["finalization", () => reconcileAbandonedExecutionControl(db)],
     ["replacement", () => heartbeat ? reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession: run => verifyStoppedNativeSessionForReplacement(db, run) }) : undefined],
+    ["guarded_status_delivery", () => heartbeat ? deliverGuardedStatusRepairs(db, heartbeat.wakeup) : undefined],
     ["reconciliation_delivery", () => heartbeat ? deliverReconciledExecutions(db, heartbeat.wakeup) : undefined],
     ["status_delivery", () => deliverExecutionStatuses(db)],
     ["automatic_disposition", () => settleUnrecoverableExecutions(db)],
