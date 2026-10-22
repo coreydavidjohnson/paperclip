@@ -1025,3 +1025,20 @@ Native service coverage added during delivery: real schema/comments/log-store te
   `server/src/__tests__/health-readiness-db.test.ts` holds each real pool in turn,
   verifies healthy isolated probes, one cached connection, fail-closed timeout
   and recovery. No migration, new dependency, timeout increase or SQL replay.
+
+## Wake admission reserved-client safety (PER-1156 / PER-477)
+
+- Reapplies the reviewed behavior of preserved `e233016793c297ca45f86481acf8c025779b9d53`
+  to current `39930365`: read-only session/filesystem preflight finishes before
+  reserving the issue transaction, and queued identity/routine reads use `tx`.
+- Source tracing confirms nested shared-pool acquisitions in current wake
+  admission. The one-connection embedded-PostgreSQL regression fails on
+  `39930365` with pool exhaustion and passes with this patch. This is not proof
+  that the path caused the independently sampled October 22 readiness blips.
+- Locked authority, issue/dependency checks and durable deferred wakes remain;
+  dispatch still resolves the actual workspace. No admission/concurrency cap.
+- Test: `heartbeat-wake-pool-starvation.test.ts` checks slow filesystem preflight,
+  changed dependency state, retry, waiter receipts, responsible identity and
+  successful completion with a one-connection shared pool.
+- Upstream checked with the readiness patch above; retire when the pinned
+  upstream release supplies transaction-client-safe equivalent wake admission.
