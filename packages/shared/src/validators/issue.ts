@@ -563,6 +563,16 @@ export const retryWorkspaceExportSchema = z.object({
 
 export const resolveIssueRecoveryActionSchema = z
   .object({
+    expectedSource: z.object({
+      status: z.enum(["backlog", "todo", "in_progress", "in_review", "blocked", "done", "cancelled"]),
+      statusVersion: z.number().int().nonnegative(),
+      updatedAt: z.string().datetime(),
+      assigneeAgentId: z.string().guid(),
+    }).strict().optional(),
+    expectedAction: z.object({
+      fingerprint: z.string().min(1),
+      updatedAt: z.string().datetime(),
+    }).strict().optional(),
     executionReconciliation: z
       .object({
         runId: z.string().guid(),
