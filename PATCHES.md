@@ -1014,6 +1014,9 @@ Native service coverage added during delivery: real schema/comments/log-store te
   within the status/relation transaction. A prose descriptor is not a wake path.
   Preserve native cancelled-blocker and pending-workspace-finalization semantics.
   Leaving Blocked remains possible for recovery of legacy invalid rows.
+  Refuse hard deletion if its cascading relations would remove a blocked
+  dependent's last valid wait; serialize source/dependent locks before effects.
+  A remaining real link or pending card permits deletion.
 - Native full/compact lists include the existing batched blocker projection by
   default; explicit `includeBlockedBy=false` remains supported. Both row layouts
   show real navigable blocker identifiers as sibling links, not nested anchors.

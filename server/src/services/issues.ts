@@ -11465,6 +11465,28 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        // Deletion cascades relation rows. Serialize with blocked decisions so
+        // it cannot silently remove a dependent's final first-class wait.
+        // Lock the source first: new relations need its FK key-share lock.
+        const [source] = await tx.select({ id: issues.id, companyId: issues.companyId })
+          .from(issues).where(eq(issues.id, id)).for("update");
+        if (!source) return null;
+        const dependentIds = tx.select({ id: issueRelations.relatedIssueId })
+          .from(issueRelations).where(and(eq(issueRelations.companyId, source.companyId),
+            eq(issueRelations.issueId, id), eq(issueRelations.type, "blocks")));
+        // Lock ALL related issues, not only currently blocked rows: a concurrent
+        // transition from Todo to Blocked must be rechecked after its row lock.
+        const dependents = await tx.select({ id: issues.id, companyId: issues.companyId, status: issues.status })
+          .from(issues).where(and(eq(issues.companyId, source.companyId), inArray(issues.id, dependentIds)))
+          .orderBy(issues.id).for("update");
+        for (const dependent of dependents) {
+          if (dependent.status !== "blocked") continue;
+          const remainingIds = await tx.select({ id: issueRelations.issueId }).from(issueRelations)
+            .where(and(eq(issueRelations.companyId, source.companyId),
+              eq(issueRelations.relatedIssueId, dependent.id), eq(issueRelations.type, "blocks")))
+            .then(rows => rows.map(row => row.id).filter(blockerId => blockerId !== id));
+          await assertIssueBlockedWait(tx, dependent, remainingIds);
+        }
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)
