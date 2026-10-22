@@ -990,6 +990,33 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - No production behavior changes. Exact native full-image gate remains required.
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
 
+## Cross-instance Stop owner intent (PER-1108)
+
+- Restore the previously isolated-qualified 0798414f change on the current
+  production fork base e3410f6a (including the current PER-309 release).
+  Remote controllers save cancellation intent;
+  only the provider-owning controller interrupts and acknowledges the run.
+  A terminal row without a provider acknowledgement is not success.
+- Required even with one timer scheduler: disabled-scheduler instances still
+  run atomic delivery/cleanup workers and may own an adapter continuation.
+  HTTP mutation forwarding alone does not make that path single-process.
+- Upstream check: master 65f59e339a9fb6e0635bcbd8c36791bd610326a6 and latest
+  listed release v2026.1012.0 (bba6a45f0d364cfd962ac59b3bdf2426a8222adb)
+  both contain legacy-controller-lease.ts. Their lease watchers renew ownership
+  but do not read executionCancellation or invoke the owning Stop callback.
+  Released cancelRunInternal still captures adapter ownership from the local
+  process map. Newer structured cancellation metadata alone is not the missing
+  remote-owner handoff. Keep this bounded backport on the current production
+  base rather than combining an urgent replica change with a broad upgrade.
+  No upstream release upgrade or new dependency.
+- Native regression: `node --experimental-vm-modules --test
+  scripts/legacy-controller-stop-intent.test.mjs`; current-base baseline failed
+  requested intent (0 owner callbacks), while ordinary renewal passed.
+  Isolated two-server Stop/takeover acceptance is also required on the final
+  built image; the earlier image receipt is retained, not substituted.
+- Retirement: drop when a released upstream equivalent supports cross-instance
+  provider-owned cancellation acknowledgements and passes the same contracts.
+  No schema, migration, authorization, budget or provider replay change.
 ## PER-1091: drain stale-queue test fixture lifetime
 
 - Test-only extension of the existing PER-436 fixture-lifetime repair.

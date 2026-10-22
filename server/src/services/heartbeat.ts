@@ -20451,7 +20451,12 @@ export function heartbeatService(
         run.controllerBootId !== legacyControllerBootId) return;
     activeRunExecutions.add(run.id);
     const executionControl = createAdapterExecutionControl();
-    const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller);
+    const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller, async () => {
+      const current = await getRun(run.id);
+      if (current) await cancelRunInternal(run.id, current.error ?? undefined, {
+        errorCode: current.errorCode ?? undefined, resultJson: parseObject(current.resultJson),
+      }).catch(err => logger.warn({ err, runId: run.id }, "owning controller could not settle saved Stop intent"));
+    });
     let runScratch: HeartbeatRunScratch | null = null;
     let githubLauncherLocation:
       Parameters<typeof cleanupGitHubOperationLaunchers>[0] | null = null;
@@ -20547,6 +20552,17 @@ export function heartbeatService(
             }
           },
         });
+        // A reattached observer also returns the real adapter's Stop receipt to
+        // its owning cancellation call before that call terminalizes the run.
+        if (executionControl.controller.signal.aborted &&
+            parseObject(result.resultJson?.executionCancellation).state === "acknowledged") {
+          await db.update(heartbeatRuns).set({
+            resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+              executionCancellation: result.resultJson!.executionCancellation,
+            })}::jsonb`, updatedAt: new Date(),
+          }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+            eq(heartbeatRuns.controllerBootId, legacyControllerBootId), eq(heartbeatRuns.status, "running")));
+        }
         // Stop owns cancellation settlement; unavailable evidence grants no
         // terminalization, replacement or replay authority.
         if (executionControl.controller.signal.aborted || result.errorCode === "omnigent_controller_detached" ||
@@ -29607,6 +29623,32 @@ export function heartbeatService(
     const agent = await getAgent(run.agentId);
     const errorCode = options.errorCode ?? "cancelled";
 
+    // PER-1108: a remote Stop posts intent; only the provider owner acknowledges it.
+    if (run.runtimeMode === "legacy" && run.status === "running" && run.controllerBootId &&
+        run.controllerBootId !== legacyControllerBootId) {
+      await db.update(heartbeatRuns).set({ error: reason, errorCode,
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+          ...options.resultJson,
+          executionCancellation: { state: "requested", requestedAt: new Date().toISOString() },
+        })}::jsonb`, updatedAt: new Date(),
+      }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+        eq(heartbeatRuns.status, "running"), eq(heartbeatRuns.controllerBootId, run.controllerBootId),
+        sql`coalesce(${heartbeatRuns.resultJson}->'executionCancellation'->>'state', '') not in ('requested', 'acknowledged')`));
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        const current = await getRun(run.id);
+        if (current?.status === "running" && current.controllerBootId === legacyControllerBootId)
+          return cancelRunInternal(run.id, reason, options);
+        if (current && isHeartbeatRunTerminalStatus(current.status)) {
+          if (parseObject(current.resultJson?.executionCancellation).state !== "acknowledged")
+            throw conflict("Provider termination is not verified; inspect this run before continuing.");
+          return current;
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      throw conflict("Stop intent is saved, but the owning controller has not acknowledged provider termination.");
+    }
+
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
     );
@@ -29766,11 +29808,7 @@ export function heartbeatService(
 
           const finishedAt = new Date();
           const persistedCancellationResult =
-            run.runtimeMode === "native"
-              ? await getRun(run.id).then((current) =>
-                  parseObject(current?.resultJson),
-                )
-              : {};
+            await getRun(run.id).then(current => parseObject(current?.resultJson));
           return await setRunStatusFromLive(
             run.id,
             "cancelled",
@@ -29802,6 +29840,8 @@ export function heartbeatService(
                             errorCode, errorMessage: reason,
                           })
                         : {}),
+                      ...(parseObject(persistedCancellationResult.executionCancellation).state === "acknowledged"
+                        ? { executionCancellation: persistedCancellationResult.executionCancellation } : {}),
                       // The native cancellation helper may have advanced a durable
                       // pending intent to its acknowledged state after `run` was
                       // first read. Never let that stale snapshot overwrite the
