@@ -1036,9 +1036,33 @@ PER-1124 image qualification: keep the company-skills external-source fork fixtu
 - Regression: existing mandatory stale-queue suite and complete image gate.
 - Retire when upstream fixtures wait for the complete executor lifetime.
 
+## PER-209: bind managed compression recovery to the server-owned block
+
+- Upstream checked at 043f2514e67c50320433a0013fb228a75a51325c (2026-10-22).
+  It retains automatic no-replay settlement without a compression status receipt.
+- Our source-owned helper must compact the same stopped session before native
+  delivery; removing the premature ordinary retry exposed a resolved hold the
+  helper previously skipped. Do not reopen arbitrary historical blocked actions.
+- Native settlement writes managedCompressionBlock {runId,statusVersion,updatedAt}
+  only when this legacy compression failure actually changes a nonblocked task.
+  The supported resolver validates the receipt under its existing issue row lock,
+  so later human blocks/edits and old receipts without provenance stay held.
+- No action replay, new wake writer, provider patch, schema or deadline change.
+  Existing latest-source, ownership, approval and dependency checks remain.
+- Regression: scripts/managed-compression-block.test.mjs (21 cases; positive
+  cases observed red before implementation), issue-recovery-actions.test.ts
+  (real resolver guards/idempotence), native-safe-replacement.test.ts (native
+  receipt and preexisting block). Cluster semantic/image gates still required.
+- Retire when released upstream supplies equivalent status-provenance validation.
 PER669: Completion-stage diagnostics
 
 - Instance-local, closed-field monotonic spans for legacy adapter return and awaited controller finalization; no outbound telemetry, payload, URL or error text.
 - Preserves polling, ownership, approvals, cancellation and original error identity. Includes immutable captured log handles in both callbacks.
 - Focused checks: server/test/completion-timing.node.ts and completion-timing-semantic.node.cjs; normal full semantic/build gates remain required.
 - Retire when an upstream release provides equivalent sanitized completion boundaries.
+
+PER209 integration: the completion semantic fixture invokes the installed tsc
+CLI because TypeScript 7 does not expose the old in-process compiler API.
+It compiles the actual two callback blocks and also requires the original
+mutable nullable-handle variant to fail with TS2345. No product behavior,
+compiler pin, timeout relaxation or semantic gate removal.

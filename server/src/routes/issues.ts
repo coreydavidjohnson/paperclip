@@ -1,4 +1,5 @@
 import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
+import { managedCompressionBlockUnchanged } from "../services/managed-compression-block.js";
 import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
 import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
@@ -9152,6 +9153,13 @@ export function issueRoutes(
                 throw conflict(
                   "Verified outcomes must restore this source recovery without replacing another active recovery action.",
                 );
+              }
+              // A managed compression continuation can restore only the exact
+              // block projected by its failure, never a later human hold/edit.
+              // The issue lock closes the helper's last-read/resolve race.
+              if (settled.evidence.originalFailureCode === "omnigent_context_compression_failed" &&
+                  !managedCompressionBlockUnchanged(lockedIssue, settled, executionReconciliation.runId)) {
+                throw conflict("The managed compression block changed or lacks server-owned provenance; preserve the hold.");
               }
               const [reopened] = await tx
                 .update(issueRecoveryActions)

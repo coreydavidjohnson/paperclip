@@ -289,6 +289,22 @@ const support = externalDatabaseUrl
         expect(afterHold!.outcome).toBe("blocked");
       }
     });
+    it.each(["in_progress", "blocked"])("records compression provenance only for its own status transition (%s)", async (status) => {
+      const source = await seed();
+      await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, source.runId));
+      await db.update(issues).set({ status }).where(eq(issues.id, source.issueId));
+      const [run] = await db.update(heartbeatRuns).set({ runtimeMode: "legacy", nativeIssueId: null,
+        errorCode: "omnigent_context_compression_failed" }).where(eq(heartbeatRuns.id, source.runId)).returning();
+      await terminalizeLegacyExecution({ db, run: run!, status: "failed" });
+      await settleUnrecoverableExecutions(db);
+      const [task] = await db.select().from(issues).where(eq(issues.id, source.issueId));
+      const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, source.issueId));
+      expect(action).toMatchObject({ status: "resolved", outcome: "blocked" });
+      if (status === "in_progress") expect(action!.evidence.managedCompressionBlock).toEqual({
+        runId: source.runId, statusVersion: task!.statusVersion, updatedAt: task!.updatedAt.toISOString(),
+      });
+      else expect(action!.evidence).not.toHaveProperty("managedCompressionBlock");
+    });
     it("automatically closes an exhausted incident once, preserves ownership, and records no replay", async () => {
       const source = await seed(3);
       await reconcileSafeNativeReplacements(db);
