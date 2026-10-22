@@ -7838,6 +7838,11 @@ export function issueRoutes(
     const includeLiveDescendantSummary = parseOptionalBooleanQuery(
       req.query.includeLiveDescendantSummary,
     );
+    const includeBlockedBy = parseOptionalBooleanQuery(req.query.includeBlockedBy);
+    if (includeBlockedBy === null) {
+      res.status(400).json({ error: "includeBlockedBy must be true or false when provided" });
+      return;
+    }
     const includeReviewAttention = parseOptionalBooleanQuery(req.query.includeReviewAttention);
     const includeUnblockDescriptor = parseOptionalBooleanQuery(req.query.includeUnblockDescriptor);
     if (includeReviewAttention === null || includeUnblockDescriptor === null) {
@@ -8003,9 +8008,7 @@ export function issueRoutes(
       includePluginOperations:
         req.query.includePluginOperations === "true" ||
         req.query.includePluginOperations === "1",
-      includeBlockedBy:
-        req.query.includeBlockedBy === "true" ||
-        req.query.includeBlockedBy === "1",
+      includeBlockedBy: includeBlockedBy ?? true,
       includeBlockedInboxAttention:
         req.query.includeBlockedInboxAttention === "true" ||
         req.query.includeBlockedInboxAttention === "1",
@@ -13345,68 +13348,9 @@ export function issueRoutes(
             );
         }
       }
-      const enteringBlocked =
-        existing.status !== "blocked" && updateFields.status === "blocked";
-      if (enteringBlocked) {
-        const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
-          ? [...new Set(req.body.blockedByIssueIds as string[])]
-          : null;
-        const hasUnresolvedBlocker = requestedBlockerIds
-          ? requestedBlockerIds.length > 0 &&
-            (await db
-              .select({ id: issueRows.id })
-              .from(issueRows)
-              .where(
-                and(
-                  eq(issueRows.companyId, existing.companyId),
-                  inArray(issueRows.id, requestedBlockerIds),
-                  notInArray(issueRows.status, ["done", "cancelled"]),
-                ),
-              )
-              .limit(1)
-              .then((rows) => rows.length > 0))
-          : (await svc.getDependencyReadiness(existing.id))
-              .unresolvedBlockerCount > 0;
-        const [pendingInteraction, pendingApproval] = await Promise.all([
-          db
-            .select({ id: issueThreadInteractions.id })
-            .from(issueThreadInteractions)
-            .where(
-              and(
-                eq(issueThreadInteractions.companyId, existing.companyId),
-                eq(issueThreadInteractions.issueId, existing.id),
-                eq(issueThreadInteractions.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-          db
-            .select({ id: approvals.id })
-            .from(issueApprovals)
-            .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
-            .where(
-              and(
-                eq(issueApprovals.companyId, existing.companyId),
-                eq(issueApprovals.issueId, existing.id),
-                eq(approvals.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-        ]);
-        if (
-          !hasUnresolvedBlocker &&
-          !pendingInteraction &&
-          !pendingApproval &&
-          !descriptor
-        ) {
-          res.status(422).json({
-            error:
-              "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
-          });
-          return;
-        }
-      }
+      const enteringBlocked = existing.status !== "blocked" && updateFields.status === "blocked";
+      // Shared service validation also covers create, repeated Blocked writes,
+      // and removing the final blocker, under the mutation transaction lock.
       if (
         reviewRequest !== undefined &&
         transition.patch.executionState === undefined

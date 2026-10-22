@@ -2718,6 +2718,52 @@ async function listUnresolvedBlockerDetails(
   });
 }
 
+/** A descriptor describes a wait; only a dependency or pending card supplies a wake. */
+export async function hasIssueBlockedWait(
+  dbOrTx: Pick<Db, "select">,
+  issue: { id: string; companyId: string },
+  requestedBlockerIds?: string[],
+): Promise<boolean> {
+  const blockerIds = requestedBlockerIds ?? await dbOrTx
+    .select({ id: issueRelations.issueId }).from(issueRelations)
+    .where(and(eq(issueRelations.companyId, issue.companyId),
+      eq(issueRelations.relatedIssueId, issue.id), eq(issueRelations.type, "blocks")))
+    .then((rows) => rows.map(row => row.id));
+  const ids = [...new Set(blockerIds)].filter(id => id !== issue.id);
+  if (ids.length > 0) {
+    const blockers = await dbOrTx.select({
+      id: issues.id, status: issues.status, executionWorkspaceId: issues.executionWorkspaceId,
+    }).from(issues).where(and(eq(issues.companyId, issue.companyId), inArray(issues.id, ids)));
+    // Preserve native cancelled-blocker and workspace-finalize release semantics.
+    if (blockers.some(row => row.status !== "done")) return true;
+    const pendingFinalize = await listPendingFinalizeBlockerIssueIds(dbOrTx, issue.companyId,
+      blockers.flatMap(row => row.executionWorkspaceId
+        ? [{ blockerIssueId: row.id, executionWorkspaceId: row.executionWorkspaceId }] : []));
+    if (pendingFinalize.size > 0) return true;
+  }
+  const [question] = await dbOrTx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
+    .where(and(eq(issueThreadInteractions.companyId, issue.companyId),
+      eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.status, "pending"))).limit(1);
+  if (question) return true;
+  const [approval] = await dbOrTx.select({ id: approvals.id }).from(issueApprovals)
+    .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+    .where(and(eq(issueApprovals.companyId, issue.companyId), eq(approvals.companyId, issue.companyId),
+      eq(issueApprovals.issueId, issue.id), eq(approvals.status, "pending"))).limit(1);
+  return Boolean(approval);
+}
+
+async function assertIssueBlockedWait(
+  dbOrTx: Pick<Db, "select">,
+  issue: { id: string; companyId: string },
+  requestedBlockerIds?: string[],
+) {
+  if (!await hasIssueBlockedWait(dbOrTx, issue, requestedBlockerIds)) {
+    throw unprocessable("Blocked requires an unresolved linked ticket or a pending question/approval card", {
+      code: "blocked_wait_required", issueId: issue.id,
+    });
+  }
+}
+
 async function listUnresolvedBlockerIssueIds(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
@@ -7932,7 +7978,7 @@ export function issueService(db: Db) {
       const unreadForUserId = filters?.unreadForUserId?.trim() || undefined;
       const contextUserId =
         unreadForUserId ?? touchedByUserId ?? inboxArchivedByUserId;
-      const includeBlockedBy = filters?.includeBlockedBy === true;
+      const includeBlockedBy = filters?.includeBlockedBy !== false;
       const includeBlockedInboxAttention =
         filters?.includeBlockedInboxAttention === true;
       const includeLiveDescendantSummary =
@@ -10271,6 +10317,10 @@ export function issueService(db: Db) {
           }),
         );
 
+        if (values.status === "blocked") {
+          values.id ??= randomUUID();
+          await assertIssueBlockedWait(tx, { id: values.id, companyId }, blockedByIssueIds ?? []);
+        }
         const [issue] = await tx.insert(issues).values(values).returning();
         await recordChatHandoff(tx, issue, actorRunId);
         if (idempotencyKey) {
@@ -11008,6 +11058,12 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        // Validate the proposed wait under the status lock, before any write.
+        // Incidental edits to legacy invalid waits remain possible for recovery.
+        if ((issueData.status ?? receiptExisting.status) === "blocked" &&
+            (issueData.status === "blocked" || blockedByIssueIds !== undefined || issueData.unblockDescriptor !== undefined)) {
+          await assertIssueBlockedWait(tx, receiptExisting, blockedByIssueIds);
+        }
         if (actorAgentId && actorRunId) {
           // Recheck under a run lock: a request admitted before Stop must not
           // commit a late Done after cancellation revoked its credentials.

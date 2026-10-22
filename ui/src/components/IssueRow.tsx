@@ -214,6 +214,25 @@ export function IssueRow({
     </Badge>
   ) : null;
 
+  // Sibling links above the overlay preserve row navigation without nested anchors.
+  const blockerLinks = issue.blockedBy?.length ? (
+    <span data-slot="task-row-blockers" className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs text-muted-foreground sm:order-3">
+      <span>Blocked by</span>
+      {issue.blockedBy.map((blocker) => (
+        <Link
+          key={blocker.id}
+          to={createIssueDetailPath(blocker.identifier ?? blocker.id)}
+          className="relative z-10 font-mono underline-offset-2 hover:underline focus-visible:underline"
+          title={`${blocker.title} (${blocker.status})`}
+          aria-label={`Blocker ${blocker.identifier ?? blocker.id}: ${blocker.title}`}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {blocker.identifier ?? blocker.id}
+        </Link>
+      ))}
+    </span>
+  ) : null;
+
   if (presentation === "task") {
     const isUnread = unreadState === "visible" || unreadState === "fading";
     return (
@@ -313,6 +332,7 @@ export function IssueRow({
               </span>
             ) : null}
           </span>
+          {blockerLinks}
           {checklistDependencyChips ? (
             <span className="flex flex-wrap gap-1">{checklistDependencyChips}</span>
           ) : null}
@@ -398,6 +418,7 @@ export function IssueRow({
           </span>
           {recoveryIndicator}
         </span>
+        {blockerLinks}
         {checklistDependencyChips ? (
           <span className="flex flex-wrap gap-1 sm:order-3 sm:ml-(--sz-calc-13)">
             {checklistDependencyChips}
