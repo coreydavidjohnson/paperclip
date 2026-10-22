@@ -1026,3 +1026,9 @@ PER669: Completion-stage diagnostics
 - Preserves polling, ownership, approvals, cancellation and original error identity. Includes immutable captured log handles in both callbacks.
 - Focused checks: server/test/completion-timing.node.ts and completion-timing-semantic.node.cjs; normal full semantic/build gates remain required.
 - Retire when an upstream release provides equivalent sanitized completion boundaries.
+
+PER209 integration: the completion semantic fixture invokes the installed tsc
+CLI because TypeScript 7 does not expose the old in-process compiler API.
+It compiles the actual two callback blocks and also requires the original
+mutable nullable-handle variant to fail with TS2345. No product behavior,
+compiler pin, timeout relaxation or semantic gate removal.
