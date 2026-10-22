@@ -979,6 +979,37 @@ Regression evidence: current baseline failed both settled history tests and five
 
 Native service coverage added during delivery: real schema/comments/log-store tests cover membership, tenant isolation, own-run bypass, pagination, stored attribution and redaction. Equal created_at values retain the existing unspecified SQL tie order and first-in-input marker winner; no deterministic tie-equivalence claim. No migration or snapshot rewrite.
 
+## External-run comment delivery receipts (PER-1124)
+
+- Evidence: pinned fork b7eaf24 and upstream e5351b240a4a07bce7d8352ae9c8352e48001fd5
+  (2026-10-21) expose same-turn steering only for native Paperclip Runner.
+  OmniGenT uses the legacy external adapter protocol. Latest stable release
+  inspected in the tag list: v2026.1012.0; no compatible acknowledgement API
+  was found in current upstream. No OmniGenT or harness carry is added.
+- Contract: POST /api/issues/:id/comments/delivery, body {}, authenticates
+  the agent and X-Paperclip-Run-Id. Only the current issue owner and active,
+  uncancelled external run can receive a snapshot. Stale/expired/wrong-run
+  requests fail closed. Native runs and ordered chats retain their existing
+  delivery path. Plain GET /comments remains read-only.
+- Reuses the normal comment reader's projection, attribution and redaction.
+  Only returned, unchanged queued comments get queuedSteeringAcknowledgements.
+  Every ordinary deferred queue in the snapshot is emptied or reduced in the
+  same transaction as the acknowledgement and audit row. Interaction/approval
+  queues remain pending; read delivery does not approve or resume them.
+- Agent Tools consumes this supported fork API, never database tables.
+  The issue.queued_comments_delivered activity refreshes visible queued-comment
+  queries, including identifier aliases. Repeated reads are safe and return
+  the history without creating another delivery receipt.
+- Tests: issue-queued-comments-routes.test.ts and LiveUpdatesProvider.test.ts.
+  Baseline: 8 new server tests fail (missing API), then 80 pass. Additional
+  red cases cover malformed run IDs and more than one deferred comment wake;
+  a separate test preserves a fresh-session approval. UI test fails before
+  adding the queued-comment query invalidation. Final gates are recorded in
+  PER-1124; these historical results are not production acceptance.
+- Retirement: replace with a released, run-authenticated external-adapter
+  acknowledgement/steering API that passes these contracts.
+
+PER-1124 delivery receipts are retained atomically across legacy run finalization; only the server-owned acknowledgement key is preserved, not arbitrary stale adapter metadata. The direct-adapter isolation regression injects a receipt while execution is live and checks it after success.
 ## PER-436: await fixture lifetime before teardown
 
 - Test-only repair after exact combined-image qualification exposed trailing event
@@ -990,6 +1021,9 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - No production behavior changes. Exact native full-image gate remains required.
 - Removal: upstream fixtures use the same complete lifetime and startup budget.
 
+PER-1124 review hardening: reuse hasLiveLegacyController under the run lock, including database-clock lease expiry and non-null controller identity. Missing-controller and missing-lease tests fail on the earlier candidate; queue receipts fail closed until the controller owns execution.
+
+PER-1124 image qualification: keep the company-skills external-source fork fixture parameterized by source type. Its four cases each retain the original first/second fork, slug deduplication, ancestry and remote-read assertions, and the original timeout. The cumulative eight-fork case exceeded 15 seconds under the full non-root image gate (905 passed, one timeout); no production code or release gate is changed.
 ## PER-1091: drain stale-queue test fixture lifetime
 
 - Test-only extension of the existing PER-436 fixture-lifetime repair.

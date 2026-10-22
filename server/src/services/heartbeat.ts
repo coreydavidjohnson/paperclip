@@ -47,6 +47,7 @@ import { claimQueuedNativeReviewRun } from "./native-runtime/native-review-dispa
 import { buildNativeReviewRequest } from "./native-runtime/native-review-prompt.js";
 import {
   legacyExecutionNeedsReconciliation,
+  preserveQueuedSteeringAcknowledgements,
   isRetiredOmnigentObserver,
   settleInterruptedNativeBootstrap,
   terminalizeLegacyExecution,
@@ -12822,6 +12823,8 @@ export function heartbeatService(
             .set({
               status,
               ...patch,
+              ...(previousStatus?.runtimeMode === "legacy" && patch?.resultJson !== undefined
+                ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
@@ -12909,6 +12912,8 @@ export function heartbeatService(
             .set({
               status,
               ...patch,
+              ...(previousStatus?.runtimeMode === "legacy" && patch?.resultJson !== undefined
+                ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
               executionStatusDeliveryId: randomUUID(),
               updatedAt: new Date(),
             })
@@ -25684,6 +25689,7 @@ export function heartbeatService(
               .update(heartbeatRuns)
               .set({
                 ...finalRunPatch,
+                resultJson: preserveQueuedSteeringAcknowledgements(finalRunPatch.resultJson ?? null),
                 finishedAt:
                   persistedRunWrite.run.finishedAt ?? finalRunPatch.finishedAt,
                 updatedAt: new Date(),
@@ -25881,10 +25887,10 @@ export function heartbeatService(
             await db
               .update(heartbeatRuns)
               .set({
-                resultJson: {
+                resultJson: preserveQueuedSteeringAcknowledgements({
                   ...persistedResultJson,
                   presentationDecision,
-                },
+                }),
                 updatedAt: new Date(),
               })
               .where(eq(heartbeatRuns.id, livenessRun.id));

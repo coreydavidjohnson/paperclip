@@ -124,7 +124,7 @@ import { formatBytes } from "../lib/issue-output";
 import { createIssueDetailPath, withIssueDetailHeaderSeed } from "../lib/issueDetailBreadcrumb";
 import { resolveIssueActiveRun, shouldTrackIssueActiveRun } from "../lib/issueActiveRun";
 import { extractIssueTimelineEvents } from "../lib/issue-timeline-events";
-import { applyLocalQueuedIssueCommentState, isQueuedIssueComment } from "../lib/optimistic-issue-comments";
+import { applyLocalQueuedIssueCommentState, getIssueCommentReadReceipts, isQueuedIssueComment } from "../lib/optimistic-issue-comments";
 import type { IssueChatComment } from "../lib/issue-chat-messages";
 import { Badge } from "@/components/ui/badge";
 
@@ -2232,9 +2232,15 @@ export function PipelineItemDetailView({ pipelineId, caseId }: { pipelineId: str
       }
     }
 
+    const readReceipts = getIssueCommentReadReceipts(conversationActivity ?? []);
     return conversationComments.map((comment) => {
       const meta = runMetaByCommentId.get(comment.id);
       const nextComment: IssueChatComment = meta ? { ...comment, ...meta } : { ...comment };
+      const receipt = readReceipts.get(comment.id);
+      if (receipt) return {
+        ...nextComment, consumedByRunId: receipt.runId,
+        conversationAnchorAt: receipt.anchorAt, conversationAnchorSequence: receipt.sequence,
+      };
       if (followUpCommentIds.has(comment.id)) {
         nextComment.followUpRequested = true;
       }

@@ -1,3 +1,4 @@
+import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
 import { managedCompressionBlockUnchanged } from "../services/managed-compression-block.js";
 import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
 import { setIssueTitle } from "../services/issue-title.js";
@@ -15439,6 +15440,91 @@ export function issueRoutes(
     res.json(
       await runRedactions.redactForIssue(issue.companyId, issue.id, comments),
     );
+  });
+
+  // External runtimes cannot use native-session steering. Deliver a comment
+  // snapshot and its queue receipt together; a plain GET remains read-only.
+  router.post("/issues/:id/comments/delivery", validate(z.object({}).strict()), async (req, res) => {
+    if (req.actor.type !== "agent" || !req.actor.agentId || !z.string().uuid().safeParse(req.actor.runId).success) {
+      throw forbidden("Comment delivery requires an authenticated agent run");
+    }
+    const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const actor = getActorInfo(req);
+    const publications: ActivityPublication[] = [];
+    const result = await db.transaction(async tx => {
+      const [current] = await tx.select().from(issueRows).where(and(
+        eq(issueRows.id, issue.id), eq(issueRows.companyId, issue.companyId),
+      )).for("update");
+      const [run] = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, req.actor.runId!), eq(heartbeatRuns.companyId, issue.companyId),
+        eq(heartbeatRuns.agentId, req.actor.agentId!),
+      )).for("update");
+      const context = readObject(run?.contextSnapshot);
+      const runResult = readObject(run?.resultJson);
+      if (!current || !run || current.assigneeAgentId !== req.actor.agentId ||
+          current.executionRunId !== run.id || run.status !== "running" || run.finishedAt ||
+          (context.issueId !== current.id && context.taskId !== current.id) ||
+          readObject(runResult.executionCancellation).state) {
+        throw forbidden("Comment delivery must target this issue's active, uncancelled run");
+      }
+      if (run.runtimeMode !== "legacy" || current.conversationAgentId) {
+        throw conflict("This runtime must deliver messages through its ordered steering path");
+      }
+      if (!(await hasLiveLegacyController(tx as unknown as Db, run))) {
+        throw forbidden("Comment delivery requires a live external controller");
+      }
+      // Reuse the ordinary reader's historical projection, author attribution
+      // and username/secret redaction; never expose raw comment rows here.
+      const comments = await svc.listComments(current.id);
+      const deliveredCommentIds: string[] = [];
+      const acknowledgements = { ...readObject(runResult.queuedSteeringAcknowledgements) };
+      const wakes = await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, current.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        sql`${agentWakeupRequests.payload}->>'issueId' = ${current.id}`,
+      )).for("update");
+      for (const wake of wakes) {
+        if (queuedInteractionId(wake.payload) || !queuedCommentIdsFromWakePayload(wake.payload).length) continue;
+        const locked = await lockQueuedCommentState({ tx, issue: current, actor,
+          queueId: wake.id, targetRunId: run.id });
+        const queueDeliveredIds: string[] = [];
+        const returned = new Map(comments.map(comment => [comment.id, comment]));
+        for (const entry of locked.queue.entries) {
+          const comment = returned.get(entry.comment.id);
+          if (comment && !comment.deletedAt &&
+              new Date(comment.updatedAt).getTime() === new Date(entry.comment.updatedAt).getTime()) {
+            queueDeliveredIds.push(comment.id);
+          }
+        }
+        if (queueDeliveredIds.length) {
+          deliveredCommentIds.push(...queueDeliveredIds);
+          const delivered = new Set(queueDeliveredIds);
+          const remaining = locked.queue.entries.map(entry => entry.comment.id).filter(id => !delivered.has(id));
+          const now = new Date();
+          await tx.update(agentWakeupRequests).set(remaining.length
+            ? { payload: withQueuedCommentIdsInWakePayload(locked.wake.payload, remaining), updatedAt: now }
+            : { status: "cancelled", finishedAt: now, updatedAt: now }
+          ).where(eq(agentWakeupRequests.id, locked.wake.id));
+          for (const id of queueDeliveredIds) acknowledgements[id] = {
+            status: "acknowledged", queueId: locked.wake.id, turnId: null,
+            delivery: "issue_comments_read", acknowledgedAt: now.toISOString(),
+          };
+        }
+      }
+      if (deliveredCommentIds.length) await tx.update(heartbeatRuns).set({ resultJson: {
+        ...runResult, queuedSteeringAcknowledgements: acknowledgements,
+      }, updatedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      if (deliveredCommentIds.length) await logActivity(tx as unknown as Db, {
+        companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+        agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
+        action: "issue.queued_comments_delivered", entityType: "issue", entityId: issue.id,
+        details: { commentIds: deliveredCommentIds, delivery: "issue_comments_read" },
+      }, publications);
+      return { comments, deliveredCommentIds };
+    });
+    for (const publication of publications) publishActivity(publication);
+    res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, result));
   });
 
   /** Maps a wake-queue queued-comment mutation error onto the same HTTP error the route threw before this mutation moved into the module. */

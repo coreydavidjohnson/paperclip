@@ -149,6 +149,7 @@ import {
   createOptimisticIssueComment,
   flattenIssueCommentPages,
   getNextIssueCommentPageParam,
+  getIssueCommentReadReceipts,
   ISSUE_COMMENT_PAGE_SIZE,
   isQueuedIssueComment,
   loadRemainingIssueCommentPages,
@@ -1645,7 +1646,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         anchorAt: string;
         sequence: number;
         anchorMs: number;
-        kind: "run_start" | "steer";
+        kind: "run_start" | "steer" | "read";
       }
     >();
 
@@ -1716,6 +1717,11 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         sequence,
         anchorMs,
         kind: "steer",
+      });
+    }
+    for (const [commentId, receipt] of getIssueCommentReadReceipts(resolvedActivity)) {
+      inputPlacementByCommentId.set(commentId, {
+        ...receipt, anchorMs: new Date(receipt.anchorAt).getTime(), kind: "read",
       });
     }
     for (const [commentId, placement] of localSteeringPlacements) {
@@ -1839,7 +1845,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         locallyQueuedCommentRunIds.get(comment.id) ??
         nextComment.queueTargetRunId ??
         null;
-      if (inputPlacement?.kind === "steer") {
+      if (inputPlacement && inputPlacement.kind !== "run_start") {
         return nextComment;
       }
       const locallyQueuedComment = applyLocalQueuedIssueCommentState(
@@ -2008,7 +2014,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
       if (
         consumedQueuedCommentIds.has(comment.id) ||
         discardedQueuedCommentIds.has(comment.id) ||
-        comment.steeredIntoRunId
+        comment.consumedByRunId
       ) {
         return [];
       }

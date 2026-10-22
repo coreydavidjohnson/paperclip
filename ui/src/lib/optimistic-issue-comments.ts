@@ -1,4 +1,4 @@
-import type { Issue, IssueComment } from "@paperclipai/shared";
+import type { ActivityEvent, Issue, IssueComment } from "@paperclipai/shared";
 
 /**
  * First-page size for the issue-detail comment feed. Single source of truth so
@@ -79,11 +79,30 @@ export function createOptimisticIssueComment(params: {
   };
 }
 
+/** Durable acknowledged reads supersede timestamp and local submission heuristics. */
+export function getIssueCommentReadReceipts(
+  activity: readonly Pick<ActivityEvent, "action" | "runId" | "details" | "createdAt">[],
+) {
+  const receipts = new Map<string, { runId: string; anchorAt: string; sequence: number }>();
+  for (const event of [...activity].sort((a, b) => toTimestamp(a.createdAt) - toTimestamp(b.createdAt))) {
+    if (event.action !== "issue.queued_comments_delivered" || !event.runId ||
+        event.details?.delivery !== "issue_comments_read" || !Array.isArray(event.details.commentIds)) continue;
+    const time = toTimestamp(event.createdAt);
+    if (!Number.isFinite(time)) continue;
+    event.details.commentIds.forEach((id, sequence) => {
+      if (typeof id !== "string" || !id || receipts.has(id)) return;
+      receipts.set(id, { runId: event.runId!, anchorAt: new Date(time).toISOString(), sequence });
+    });
+  }
+  return receipts;
+}
+
 export function isQueuedIssueComment(params: {
   comment: Pick<IssueTimelineComment, "createdAt"> &
     Partial<Pick<OptimisticIssueComment, "clientStatus">> & {
       id?: string;
       authorAgentId?: string | null;
+      consumedByRunId?: string | null;
     };
   activeRunStartedAt?: Date | string | null;
   activeRunAgentId?: string | null;
@@ -92,6 +111,7 @@ export function isQueuedIssueComment(params: {
   runId?: string | null;
   interruptedRunId?: string | null;
 }) {
+  if (params.comment.consumedByRunId) return false;
   if (params.runId) return false;
   if (params.interruptedRunId) return false;
   if (
@@ -108,7 +128,7 @@ export function isQueuedIssueComment(params: {
   return toTimestamp(params.comment.createdAt) >= toTimestamp(params.activeRunStartedAt);
 }
 
-export function applyLocalQueuedIssueCommentState<T extends IssueComment>(
+export function applyLocalQueuedIssueCommentState<T extends IssueComment & { consumedByRunId?: string | null }>(
   comment: T,
   params: {
     queuedTargetRunId?: string | null;
@@ -116,6 +136,7 @@ export function applyLocalQueuedIssueCommentState<T extends IssueComment>(
     runningRunId?: string | null;
   },
 ): T | LocallyQueuedIssueComment<T> {
+  if (comment.consumedByRunId) return comment;
   const queuedTargetRunId = params.queuedTargetRunId ?? null;
   if (!queuedTargetRunId || !params.targetRunIsLive) return comment;
   if (params.runningRunId && params.runningRunId !== queuedTargetRunId) return comment;

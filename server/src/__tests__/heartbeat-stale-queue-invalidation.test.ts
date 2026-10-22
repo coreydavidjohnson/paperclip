@@ -955,14 +955,11 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(ordering).toEqual(["validated", "parked"]);
     };
     await heartbeat.resumeQueuedRuns();
-    await waitForCondition(async () => {
-      const run = await db
-        .select({ status: heartbeatRuns.status })
-        .from(heartbeatRuns)
-        .where(eq(heartbeatRuns.id, runId))
-        .then((rows) => rows[0] ?? null);
-      return run?.status === "cancelled";
-    });
+    // resumeQueuedRuns starts asynchronous setup; a timed poll can expire
+    // before parkPromise exists. Await the existing execution lifetime under
+    // the unchanged enclosing test deadline, then assert the terminal state.
+    await heartbeat.drainActiveRunExecutions();
+    expect(parkPromise).not.toBeNull();
     await parkPromise;
 
     const issue = await db
@@ -970,6 +967,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
+    const run = await db.select({ status: heartbeatRuns.status })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, runId))
+      .then((rows) => rows[0] ?? null);
+    expect(run?.status).toBe("cancelled");
     expect(issue?.status).toBe("backlog");
     expect(ordering).toEqual(["validated", "parked"]);
     expect(countExecuteCallsForRun(runId)).toBe(0);
