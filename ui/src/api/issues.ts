@@ -143,7 +143,7 @@ function issueListSearchParams(filters?: IssueListFilters) {
   if (filters?.createdFromIssueId) params.set("createdFromIssueId", filters.createdFromIssueId);
   if (filters?.includeRoutineExecutions)
     params.set("includeRoutineExecutions", "true");
-  if (filters?.includeBlockedBy) params.set("includeBlockedBy", "true");
+  if (filters?.includeBlockedBy !== undefined) params.set("includeBlockedBy", String(filters.includeBlockedBy));
   if (filters?.includeBlockedInboxAttention)
     params.set("includeBlockedInboxAttention", "true");
   if (filters?.includeLiveDescendantSummary)

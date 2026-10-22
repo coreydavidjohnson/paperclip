@@ -2865,7 +2865,11 @@ describeEmbeddedPostgres("issueService.list participantAgentId", () => {
     });
 
     const defaultResult = await svc.list(companyId);
-    expect(defaultResult.find((issue) => issue.id === blockedId)?.blockedBy).toBeUndefined();
+    expect(defaultResult.find((issue) => issue.id === blockedId)?.blockedBy).toEqual([
+      expect.objectContaining({ id: blockerId }),
+    ]);
+    const slim = await svc.list(companyId, { includeBlockedBy: false });
+    expect(slim.find((issue) => issue.id === blockedId)?.blockedBy).toBeUndefined();
 
     const result = await svc.list(companyId, { includeBlockedBy: true });
     const byId = new Map(result.map((issue) => [issue.id, issue]));
@@ -4236,7 +4240,8 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         executionWorkspaceId,
       },
     ]);
-    await svc.update(dependentId, { blockedByIssueIds: [blockerId] });
+    // Historical post-completion wait: new writes must not block on a done ticket.
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: dependentId, type: "blocks" });
 
     return {
       companyId,
@@ -4784,7 +4789,8 @@ describeEmbeddedPostgres("issueService blockers and dependency wake readiness", 
         assigneeAgentId,
       },
     ]);
-    await svc.update(dependentId, { blockedByIssueIds: [blockerId] });
+    // Historical post-completion wait: new writes must not block on a done ticket.
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: dependentId, type: "blocks" });
 
     // No executionWorkspaceId → no barrier → dependent should be wakeable.
     await expect(svc.listWakeableBlockedDependents(blockerId)).resolves.toEqual([
