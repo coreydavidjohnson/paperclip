@@ -1001,3 +1001,27 @@ Native service coverage added during delivery: real schema/comments/log-store te
 - No production code, concurrency limit, timeout increase or retry waiver.
 - Regression: existing mandatory stale-queue suite and complete image gate.
 - Retire when upstream fixtures wait for the complete executor lifetime.
+
+## PER-1156: isolate readiness from shared-client query pipelines
+
+- Why: on 2026-10-22 at 03:21:13Z, production `/ready` timed out at
+  2,005 ms while a separate same-pod `select 1` took 34-85 ms and static
+  app requests took 2-4 ms. Three full-company run-history statements were
+  CPU-active for 6-8 seconds, without lock blockers. The shared client has
+  max 10 connections and postgres.js max_pipeline 100; idle server backends
+  existed, so this is not evidence that all connections were exhausted.
+- Reuse `persistentDedicatedDb` with purpose `paperclip-readiness`: one cached,
+  single-connection client per originating Db, never one connection per poll.
+  The 2-second deadline, single-flight promise, drain/startup/transport/auth
+  checks and sanitized failure logs remain unchanged. Test doubles retain the
+  existing shared-client fallback. This isolates the health probe; it does not
+  claim to repair the expensive history statements owned by PER-218.
+- Upstream checked 2026-10-22: fetched paperclipai/master `008186346` and
+  release `v2026.1012.0`; neither has our `/ready` handler or an equivalent
+  isolated readiness client. History search found no released equivalent.
+- Retire when a released upstream probe passes the same isolation/failure tests.
+- Tests: `node --experimental-vm-modules --test scripts/health-readiness.test.mjs`
+  (new isolation cases failed on the prior handler); native PostgreSQL test
+  `server/src/__tests__/health-readiness-db.test.ts` holds each real pool in turn,
+  verifies healthy isolated probes, one cached connection, fail-closed timeout
+  and recovery. No migration, new dependency, timeout increase or SQL replay.
