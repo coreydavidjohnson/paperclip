@@ -57,6 +57,33 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
     await expect(svc.update(issue.id, { status: "todo", blockedByIssueIds: [] })).resolves.toMatchObject({ status: "todo" });
   });
 
+  it("refuses deleting a blocked dependent's last blocker without cascading away its wait", async () => {
+    const { companyId, issue, svc } = await fixture();
+    const blocker = await svc.create(companyId, { title: "Do not strand dependent" });
+    await svc.update(issue.id, { status: "blocked", blockedByIssueIds: [blocker.id] });
+    await expect(svc.remove(blocker.id))
+      .rejects.toMatchObject({ status: 422, details: { code: "blocked_wait_required", issueId: issue.id } });
+    expect((await svc.getRelationSummaries(issue.id)).blockedBy.map(b => b.id)).toEqual([blocker.id]);
+    expect(await svc.getById(blocker.id)).not.toBeNull();
+  });
+
+  it.each(["card", "dependency"])("allows blocker deletion when another %s preserves the wait", async (kind) => {
+    const { companyId, issue, svc } = await fixture();
+    const blocker = await svc.create(companyId, { title: "Removable dependency" });
+    await svc.update(issue.id, { status: "blocked", blockedByIssueIds: [blocker.id] });
+    const alternate = kind === "dependency"
+      ? await svc.create(companyId, { title: "Alternate wait" }) : null;
+    if (alternate) {
+      await svc.update(issue.id, { blockedByIssueIds: [blocker.id, alternate.id] });
+    } else {
+      await ctx.db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+        kind: "ask_user_questions", payload: { questions: [] } as never });
+    }
+    await expect(svc.remove(blocker.id)).resolves.toMatchObject({ id: blocker.id });
+    expect((await svc.getRelationSummaries(issue.id)).blockedBy.map(b => b.id))
+      .toEqual(alternate ? [alternate.id] : []);
+  });
+
   it("rejects done and foreign-company blockers", async () => {
     const { companyId, issue, svc } = await fixture();
     const done = await svc.create(companyId, { title: "Finished CI", status: "done" });
