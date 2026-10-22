@@ -12,13 +12,15 @@ const source = stripTypeScriptTypes(readFileSync(
 const importedNames = [...source.matchAll(/import\s*\{([^}]+)\}\s*from/g)]
   .flatMap((match) => match[1].split(",").map((name) => name.trim()).filter(Boolean));
 
-async function fixture({ execute = () => Promise.resolve([]), missingDb = false, authReady = true, realTimers = false } = {}) {
+async function fixture({ execute = () => Promise.resolve([]), missingDb = false, authReady = true, realTimers = false, dedicatedExecute = null } = {}) {
   const state = { transport: true, draining: false, phase: "ready" };
   const logs = [];
   const routes = new Map();
   const timers = new Map();
   let timerId = 0;
   let queries = 0;
+  let dedicatedQueries = 0;
+  const purposes = [];
   const context = vm.createContext({
     Buffer,
     process: { env: {} },
@@ -52,6 +54,12 @@ async function fixture({ execute = () => Promise.resolve([]), missingDb = false,
     }),
     logger,
     sql: () => "select 1",
+    persistentDedicatedDb: (_db, purpose) => {
+      purposes.push(purpose);
+      return dedicatedExecute ? {
+        execute(sql) { dedicatedQueries++; return dedicatedExecute(sql); },
+      } : null;
+    },
   });
   const module = new vm.SourceTextModule(source, { context });
   await module.link(() => new vm.SyntheticModule(Object.keys(stubs), function () {
@@ -64,6 +72,8 @@ async function fixture({ execute = () => Promise.resolve([]), missingDb = false,
   return {
     state, logs, timers,
     get queries() { return queries; },
+    get dedicatedQueries() { return dedicatedQueries; },
+    purposes,
     async request() {
       const response = { statusCode: 200, body: undefined };
       await routes.get("GET /ready")({}, {
@@ -214,4 +224,32 @@ test("real 2-second deadline logs timeout without waiting for a hung database", 
   const elapsed = performance.now() - started;
   assert.ok(elapsed >= 1900 && elapsed < 4500, `unexpected deadline: ${elapsed}ms`);
   assert.equal(f.queries, 1);
+});
+
+test("readiness bypasses unrelated work queued in the shared database client", async () => {
+  const f = await fixture({
+    execute: () => { throw new Error("shared pool unavailable"); },
+    dedicatedExecute: () => Promise.resolve([]),
+  });
+  for (let i = 0; i < 2; i++) {
+    assert.deepEqual(await f.request(), { statusCode: 200, body: { ready: true } });
+  }
+  assert.equal(f.queries, 0, "readiness must never queue in the shared client");
+  assert.equal(f.dedicatedQueries, 2);
+  assert.deepEqual(f.purposes, ["paperclip-readiness", "paperclip-readiness"]);
+});
+
+test("a hung dedicated probe still fails closed at 2s and stays single-flight", async () => {
+  const f = await fixture({ dedicatedExecute: () => new Promise(() => {}) });
+  const requests = [f.request(), f.request()];
+  f.expireTimers();
+  for (const response of await Promise.all(requests)) {
+    assert.deepEqual(response, { statusCode: 503, body: { ready: false } });
+  }
+  assert.equal(f.queries, 0);
+  assert.equal(f.dedicatedQueries, 1);
+  assert.equal(f.logs.length, 2);
+  for (const log of f.logs) assert.deepEqual(JSON.parse(JSON.stringify(log.args[0])), {
+    event: "readiness_failed", reasons: ["database_probe_timeout"], stage: "database_probe",
+  });
 });
