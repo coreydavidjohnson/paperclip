@@ -11008,6 +11008,19 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        // Recovery resolution owns this transition. Refuse under the source
+        // lock, before status/relations/cards/run locks can partially change.
+        if (issueData.status && issueData.status !== receiptExisting.status && issueData.status !== "blocked") {
+          const [escalation] = await tx.select().from(issueRecoveryActions).where(and(
+            eq(issueRecoveryActions.companyId, receiptExisting.companyId),
+            eq(issueRecoveryActions.sourceIssueId, id),
+            inArray(issueRecoveryActions.status, ["active", "escalated"]),
+            sql`${issueRecoveryActions.wakePolicy}->>'type' = 'board_escalation'`,
+          )).for("update").limit(1);
+          if (escalation) throw conflict("Resolve the exact board escalation with an explicit source status before changing status.", {
+            code: "recovery_status_resolution_required", actionId: escalation.id,
+          });
+        }
         if (actorAgentId && actorRunId) {
           // Recheck under a run lock: a request admitted before Stop must not
           // commit a late Done after cancellation revoked its credentials.

@@ -23,6 +23,8 @@ import {
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
 import { createHash, randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { deliverGuardedStatusRepairs } from "../services/guarded-status-repair.js";
 import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -34,6 +36,7 @@ import {
   inArray,
   isNull,
   notInArray,
+  or,
   sql,
 } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -4287,6 +4290,7 @@ export function issueRoutes(
           )
         : input.activeRecoveryAction;
     if (!activeRecoveryAction) return null;
+    if (activeRecoveryAction.wakePolicy?.type === "board_escalation") return activeRecoveryAction;
 
     const resolutionNote = await classifySourceRecoveryRevalidation(input);
     if (!resolutionNote) return activeRecoveryAction;
@@ -9084,6 +9088,8 @@ export function issueRoutes(
         sourceIssueStatus,
         resolutionNote,
         executionReconciliation,
+        expectedSource,
+        expectedAction,
       } = req.body;
       if (outcome === "false_positive" || outcome === "cancelled") {
         assertBoard(req);
@@ -9111,6 +9117,13 @@ export function issueRoutes(
           .then((rows) => rows[0] ?? null);
         if (!lockedIssue) throw notFound("Issue not found");
 
+        // Source then action is the shared mutation lock order. Lock the row
+        // before comparing its optimistic version, including in-place updates.
+        await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, lockedIssue.companyId),
+          eq(issueRecoveryActions.sourceIssueId, lockedIssue.id),
+          inArray(issueRecoveryActions.status, ["active", "escalated"]),
+        )).for("update");
         let activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
           lockedIssue.companyId,
           lockedIssue.id,
@@ -9162,11 +9175,24 @@ export function issueRoutes(
               }
               const [reopened] = await tx
                 .update(issueRecoveryActions)
-                .set({ status: "active", outcome: null, resolvedAt: null })
+                .set({ status: "active", outcome: null, resolvedAt: null, evidence: sql`${issueRecoveryActions.evidence} - 'guardedStatusRepair'` })
                 .where(eq(issueRecoveryActions.id, settled.id))
                 .returning();
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
+              if (expectedSource || expectedAction) {
+                assertBoard(req);
+                const receipt = settled.evidence.guardedStatusRepair as Record<string, unknown> | undefined;
+                if (activeRecoveryAction || !receipt ||
+                    !isDeepStrictEqual(receipt.request, { expectedSource, expectedAction, outcome, sourceIssueStatus, resolutionNote }) ||
+                    lockedIssue.status !== sourceIssueStatus ||
+                    lockedIssue.statusVersion !== receipt.statusVersion ||
+                    lockedIssue.updatedAt.toISOString() !== receipt.updatedAt ||
+                    lockedIssue.assigneeAgentId !== receipt.assigneeAgentId) {
+                  throw conflict("The repaired source changed after this request.", { code: "recovery_snapshot_stale" });
+                }
+                return { issue: lockedIssue, recoveryAction: settled, replayed: true };
+              }
               if (settled.kind === "deliberate_wait_without_target" && resolutionNote) {
                 // Whole-note audit identity survives later annotations and paragraph
                 // boundaries. The issue lock serializes this lookup with the append.
@@ -9221,6 +9247,37 @@ export function issueRoutes(
         ) {
           throw notFound("Active recovery action not found");
         }
+        if (expectedSource || expectedAction) {
+          assertBoard(req);
+          if (actor.actorType !== "user" || typeof actor.actorId !== "string") {
+            throw conflict("Guarded repair requires an authenticated board actor.");
+          }
+          if (!actionId || !expectedSource || !expectedAction || !resolutionNote?.trim() ||
+              lockedIssue.status !== expectedSource.status ||
+              lockedIssue.statusVersion !== expectedSource.statusVersion ||
+              lockedIssue.updatedAt.toISOString() !== expectedSource.updatedAt ||
+              lockedIssue.assigneeAgentId !== expectedSource.assigneeAgentId ||
+              activeRecoveryAction.fingerprint !== expectedAction.fingerprint ||
+              new Date(activeRecoveryAction.updatedAt).toISOString() !== expectedAction.updatedAt) {
+            throw conflict("The source or recovery action changed. Refresh before repairing.", { code: "recovery_snapshot_stale" });
+          }
+          if (activeRecoveryAction.kind !== "deliberate_wait_without_target" ||
+              activeRecoveryAction.ownerType !== "board" ||
+              activeRecoveryAction.wakePolicy?.type !== "board_escalation" ||
+              activeRecoveryAction.evidence?.terminalReason !== "unchanged_source_state_exhausted" ||
+              executionReconciliation || outcome !== "restored" || sourceIssueStatus !== "todo" ||
+              !["blocked", "todo", "in_progress"].includes(lockedIssue.status)) {
+            throw conflict("The guarded repair is only for exhausted disposition escalations.");
+          }
+          await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: activeRecoveryAction });
+          const [liveRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, lockedIssue.companyId),
+            inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+            or(eq(heartbeatRuns.nativeIssueId, lockedIssue.id),
+              sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${lockedIssue.id}`),
+          )).limit(1);
+          if (liveRun) throw conflict("The source still has active execution.", { code: "recovery_source_run_lock" });
+        }
         await requireRecoveryActionAuthority(
           req,
           lockedIssue,
@@ -9253,8 +9310,10 @@ export function issueRoutes(
             activeRecoveryAction.wakePolicy?.type === "bounded_owner_disposition_repair" &&
             (lockedIssue.status === "blocked" || lockedIssue.status === "in_progress") &&
             activeRecoveryAction.ownerAgentId === activeRecoveryAction.returnOwnerAgentId;
+          // PER-968: guarded board repair may restore a stale escalation after the
+          // source left blocked; exact source/action snapshots were checked above.
           const currentBoardEscalation =
-            lockedIssue.status === "blocked" &&
+            (lockedIssue.status === "blocked" || Boolean(expectedSource)) &&
             activeRecoveryAction.ownerType === "board" &&
             activeRecoveryAction.wakePolicy?.type === "board_escalation";
           if (
@@ -9413,6 +9472,29 @@ export function issueRoutes(
             sourceIssueStatus !== "blocked",
           );
         }
+        const recordedOutcome =
+          outcome === "restored" &&
+          sourceIssueStatus === "todo" &&
+          activeRecoveryAction.returnOwnerAgentId != null &&
+          lockedIssue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId
+            ? "handed_back"
+            : outcome === "restored" && sourceIssueStatus === "done"
+              ? "owner_completed"
+              : outcome;
+
+        const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
+          {
+            companyId: existing.companyId,
+            sourceIssueId: existing.id,
+            actionId: activeRecoveryAction.id,
+            status: actionStatus,
+            outcome: recordedOutcome,
+            resolutionNote: resolutionNote ?? null,
+          },
+          tx,
+        );
+        if (!recoveryAction) throw notFound("Active recovery action not found");
+
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
         if (outcome === "blocked" && sourceStatusChanged) {
@@ -9549,29 +9631,24 @@ export function issueRoutes(
           issue = updatedIssue;
         }
 
-        const recordedOutcome =
-          outcome === "restored" &&
-          issue.status === "todo" &&
-          activeRecoveryAction.returnOwnerAgentId != null &&
-          issue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId
-            ? "handed_back"
-            : outcome === "restored" && issue.status === "done"
-              ? "owner_completed"
-              : outcome;
 
-        const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
-          {
-            companyId: existing.companyId,
-            sourceIssueId: existing.id,
-            actionId: activeRecoveryAction.id,
-            status: actionStatus,
-            outcome: recordedOutcome,
-            resolutionNote: resolutionNote ?? null,
-          },
-          tx,
-        );
-        if (!recoveryAction) throw notFound("Active recovery action not found");
-
+        const actualOutcome = outcome === "restored" && issue.status === "todo" &&
+          activeRecoveryAction.returnOwnerAgentId != null && issue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId
+          ? "handed_back" : outcome === "restored" && issue.status === "done" ? "owner_completed" : outcome;
+        if (actualOutcome !== recoveryAction.outcome) {
+          await tx.update(issueRecoveryActions).set({ outcome: actualOutcome }).where(eq(issueRecoveryActions.id, recoveryAction.id));
+          recoveryAction.outcome = actualOutcome;
+        }
+        if (expectedSource) {
+          await tx.update(issueRecoveryActions).set({ evidence: {
+            ...recoveryAction.evidence,
+            guardedStatusRepair: {
+              request: { expectedSource, expectedAction, outcome, sourceIssueStatus, resolutionNote },
+              delivery: "pending", actorType: actor.actorType, actorId: actor.actorId,
+              statusVersion: issue.statusVersion, updatedAt: issue.updatedAt.toISOString(), assigneeAgentId: issue.assigneeAgentId,
+            },
+          } }).where(eq(issueRecoveryActions.id, recoveryAction.id));
+        }
         // Persist whole-note identity with the disposition, before fallible post-commit work.
         await logActivity(tx as unknown as Db, {
           companyId: issue.companyId,
@@ -9598,6 +9675,7 @@ export function issueRoutes(
       });
       for (const publication of postCommitActivityPublications)
         publishActivity(publication);
+      if (expectedSource) await deliverGuardedStatusRepairs(db, enqueueRecoveryActionWakeup, result.recoveryAction.id);
       if (result.replayed) {
         res.json({
           issue: result.issue,
@@ -9648,7 +9726,7 @@ export function issueRoutes(
           );
         }
       } else if (
-        !executionReconciliation &&
+        !expectedSource && !executionReconciliation &&
         sourceIssueStatus === "todo" &&
         result.issue.assigneeAgentId &&
         (existing.status !== result.issue.status ||
