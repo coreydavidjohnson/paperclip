@@ -26,6 +26,8 @@ describe("LiveUpdatesProvider issue invalidation", () => {
     }, { userId: "user-1", agentId: null }, { pathname: "/PAP/issues/PAP-1", isForegrounded: true });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.issues.queuedComments("issue-1") });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.issues.queuedComments("PAP-1") });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.issues.activity("issue-1") });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: queryKeys.issues.activity("PAP-1") });
     client.clear();
   });
 
