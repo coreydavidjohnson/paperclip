@@ -2010,6 +2010,39 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     };
   }
 
+  it.each([
+    { status: "succeeded", offset: 1, sameIssue: true, stale: true },
+    { status: "succeeded", offset: 0, sameIssue: true, stale: false },
+    { status: "succeeded", offset: -1, sameIssue: true, stale: false },
+    { status: "failed", offset: 1, sameIssue: true, stale: false },
+    { status: "succeeded", offset: 1, sameIssue: false, stale: false },
+  ] as const)("PER-1181 invalidates only a newer successful same-ticket continuation: $status $offset $sameIssue", async ({status, offset, sameIssue, stale}) => {
+    const { action, companyId, coderId, sourceIssueId } = await seedReconciledDelivery();
+    const resolvedAt = new Date("2026-10-15T02:35:26.611Z");
+    await db.update(issueRecoveryActions).set({resolvedAt}).where(eq(issueRecoveryActions.id, action.id));
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId,
+      issueId: sameIssue ? sourceIssueId : randomUUID(), status });
+    await db.update(heartbeatRuns).set({finishedAt: new Date(resolvedAt.getTime() + offset)})
+      .where(eq(heartbeatRuns.id, runId));
+    const wake = vi.fn(async () => null);
+    await deliverReconciledExecutions(db, wake);
+    expect(wake).toHaveBeenCalledTimes(stale ? 0 : 1);
+    const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(receipt!.evidence.continuationDelivery).toBe(stale ? "invalidated" : "pending");
+  });
+
+  it("PER-1181 preserves the OmniGenT session instead of forcing a new one", async () => {
+    const { action, companyId, coderId } = await seedReconciledDelivery();
+    await db.update(agents).set({adapterType: "omnigent"})
+      .where(and(eq(agents.companyId, companyId), eq(agents.id, coderId)));
+    const wake = vi.fn(async (..._args: Parameters<ReturnType<typeof heartbeatService>["wakeup"]>) => null);
+    await deliverReconciledExecutions(db, wake);
+    expect(wake).toHaveBeenCalledOnce();
+    expect(wake.mock.calls[0]![1].contextSnapshot!.forceFreshSession).toBe(false);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]!.evidence.continuationDelivery).toBe("pending");
+  });
+
   it("delivers a reconciled execution once across concurrent sweeps without a deferred duplicate", async () => {
     const { action, heartbeat } = await seedReconciledDelivery();
     let entered = 0;
