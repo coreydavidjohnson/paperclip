@@ -1089,3 +1089,25 @@ compiler pin, timeout relaxation or semantic gate removal.
   success/DB-error test pins the alert label. The main proxy denies the internal
   metrics path, including case/trailing-slash variants; only the metrics listener
   exports it. Public TypeScript return types are explicit for declaration emit.
+
+## PER-316: questions consume durable comment-delivery receipts
+
+- Reproduced PER-1180: the external runtime read and acknowledged queued user
+  comments, but question creation inspected only its launch snapshot and kept
+  returning `newer_comment_not_delivered` after a successful repeated read.
+- Read the same source run's server-owned receipt inside the issue/run locks.
+  Only acknowledged receipts at least as recent as the comment revision count.
+  Pending/failed, malformed, stale and other-run receipts do not count. Later
+  comments still require delivery. Reading never answers or approves a card.
+- Regression uses the actual external delivery route twice, then creates a
+  pending question and proves later/edited user direction remains fenced.
+- Upstream inspected: `2cd6eb27c762cfdd6da7ab0b8da4b6a9eec0601e`
+  still checks only the launch continuation. Retire when a released equivalent
+  uses durable receipts without weakening the unread-direction guard.
+- Related native backport: that upstream revision recognizes wrapped Postgres
+  idempotency conflicts with the existing `isUniqueViolation` helper. Use that
+  exact helper here rather than the fork's top-level-only duplicate. The real
+  concurrent-question fixture reproduced Drizzle wrapping SQLSTATE 23505.
+- Tests: `server/src/__tests__/issue-queued-comments-routes.test.ts`,
+  `server/src/__tests__/issue-thread-interactions-service.test.ts`,
+  `server/src/__tests__/db-errors.test.ts`.

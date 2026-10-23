@@ -249,6 +249,12 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await expect(service.create(scope, input, seeded)).rejects.toMatchObject({ status: 409,
       details: { reason: "newer_comment_not_delivered", commentIds: [laterId] } });
     expect(await db.select().from(issueThreadInteractions)).toHaveLength(1);
+    await db.delete(issueComments).where(eq(issueComments.id, laterId));
+    await db.update(issueComments).set({ body: "Revised direction not yet read.",
+      updatedAt: new Date(Date.now() + 1_000),
+    }).where(eq(issueComments.id, seeded.commentIds[0]));
+    await expect(service.create(scope, input, seeded)).rejects.toMatchObject({ status: 409,
+      details: { reason: "newer_comment_not_delivered", commentIds: [seeded.commentIds[0]] } });
   });
 
   it.each(["board", "wrong_run", "wrong_agent", "cancelled", "cancelling", "expired", "other_issue", "malformed", "missing_boot", "missing_lease"])(
