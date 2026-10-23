@@ -3578,7 +3578,7 @@ export function issueThreadInteractionService(
             )).for("share");
             if (!deliveredRun) throw unprocessable("sourceRunId must belong to the same company");
             const delivered = deliveredContinuationCommentIds(deliveredRun.contextSnapshot);
-            const acknowledgements = deliveredRun?.resultJson?.queuedSteeringAcknowledgements;
+            const acknowledgements = deliveredRun.resultJson?.queuedSteeringAcknowledgements;
             if (delivered.known) {
               const newerHumanComments = await tx
                 .select({ id: issueComments.id, updatedAt: issueComments.updatedAt })
@@ -3600,11 +3600,11 @@ export function issueThreadInteractionService(
                 const receipt = acknowledgements && typeof acknowledgements === "object"
                   ? (acknowledgements as Record<string, unknown>)[comment.id] : null;
                 if (!receipt || typeof receipt !== "object") return true;
-                const ack = receipt as { status?: unknown; acknowledgedAt?: unknown };
+                const ack = receipt as { status?: unknown; commentUpdatedAt?: unknown };
                 // A pending/failed receipt, or a comment edited after delivery,
                 // is not proof that this run received the current direction.
-                return ack.status !== "acknowledged" || typeof ack.acknowledgedAt !== "string"
-                  || !(Date.parse(ack.acknowledgedAt) >= comment.updatedAt.getTime());
+                return ack.status !== "acknowledged" || typeof ack.commentUpdatedAt !== "string"
+                  || Date.parse(ack.commentUpdatedAt) !== comment.updatedAt.getTime();
               });
               if (undelivered.length > 0) {
                 throw conflict(

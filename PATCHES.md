@@ -1096,8 +1096,11 @@ compiler pin, timeout relaxation or semantic gate removal.
   comments, but question creation inspected only its launch snapshot and kept
   returning `newer_comment_not_delivered` after a successful repeated read.
 - Read the same source run's server-owned receipt inside the issue/run locks.
-  Only acknowledged receipts at least as recent as the comment revision count.
-  Pending/failed, malformed, stale and other-run receipts do not count. Later
+  Only acknowledged receipts for the exact comment revision count.
+  The receipt carries the delivered updatedAt, not an inferred wall-clock order.
+  Versionless external receipts require a new authenticated comment read; native
+  steering also records the exact revision. Pending/failed, malformed, stale and
+  other-run receipts do not count. Later
   comments still require delivery. Reading never answers or approves a card.
 - Regression uses the actual external delivery route twice, then creates a
   pending question and proves later/edited user direction remains fenced.

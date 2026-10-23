@@ -15431,17 +15431,30 @@ export function issueRoutes(
           for (const id of queueDeliveredIds) acknowledgements[id] = {
             status: "acknowledged", queueId: locked.wake.id, turnId: null,
             delivery: "issue_comments_read", acknowledgedAt: now.toISOString(),
+            commentUpdatedAt: new Date(returned.get(id)!.updatedAt).toISOString(),
           };
         }
       }
-      if (deliveredCommentIds.length) await tx.update(heartbeatRuns).set({ resultJson: {
+      // An authenticated repeated read also delivers the current revision of
+      // previously acknowledged comments. Upgrade old versionless receipts only
+      // after returning that revision, never from a question write or a clock.
+      const refreshedCommentIds: string[] = [];
+      for (const comment of comments) {
+        const prior = readObject(acknowledgements[comment.id]);
+        const commentUpdatedAt = new Date(comment.updatedAt).toISOString();
+        if (!comment.deletedAt && prior.status === "acknowledged" && prior.commentUpdatedAt !== commentUpdatedAt) {
+          acknowledgements[comment.id] = { ...prior, commentUpdatedAt, acknowledgedAt: new Date().toISOString() };
+          refreshedCommentIds.push(comment.id);
+        }
+      }
+      if (deliveredCommentIds.length || refreshedCommentIds.length) await tx.update(heartbeatRuns).set({ resultJson: {
         ...runResult, queuedSteeringAcknowledgements: acknowledgements,
       }, updatedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
-      if (deliveredCommentIds.length) await logActivity(tx as unknown as Db, {
+      if (deliveredCommentIds.length || refreshedCommentIds.length) await logActivity(tx as unknown as Db, {
         companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
         agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
         action: "issue.queued_comments_delivered", entityType: "issue", entityId: issue.id,
-        details: { commentIds: deliveredCommentIds, delivery: "issue_comments_read" },
+        details: { commentIds: deliveredCommentIds, refreshedCommentIds, delivery: "issue_comments_read" },
       }, publications);
       return { comments, deliveredCommentIds };
     });
@@ -15856,6 +15869,7 @@ export function issueRoutes(
                     queueId: req.body.queueId,
                     turnId: acknowledgement.turnId,
                     acknowledgedAt: now.toISOString(),
+                    commentUpdatedAt: new Date(entry.comment.updatedAt).toISOString(),
                   },
                 },
               },

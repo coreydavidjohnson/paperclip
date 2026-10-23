@@ -424,7 +424,7 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     expect(created).toMatchObject({ kind: "ask_user_questions", status: "pending" });
   });
 
-  it.each(["pending", "failed", "missing-time", "invalid-time", "stale-time", "other-run"])(
+  it.each(["pending", "failed", "missing-version", "invalid-version", "stale-version", "other-run"])(
     "does not treat a %s acknowledgement as delivered user direction", async (mode) => {
       const fixture = await seedSourceQuestionFixture({ paperclipWake: { comments: [] } });
       const commentId = randomUUID();
@@ -432,8 +432,10 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
         issueId: fixture.issueId, authorType: "user", authorUserId: "board-user", body: "Wait.",
         createdAt: new Date("2026-07-25T12:01:00.000Z"), updatedAt: new Date("2026-07-25T12:01:00.000Z") });
       const receipt = { status: ["pending", "failed"].includes(mode) ? mode : "acknowledged",
-        acknowledgedAt: mode === "missing-time" ? undefined : mode === "invalid-time" ? "not-a-date"
-          : mode === "stale-time" ? "2026-07-25T12:00:00.000Z" : "2026-07-25T12:02:00.000Z" };
+        // A later wall-clock acknowledgement must not authorize an old revision.
+        acknowledgedAt: "2026-07-25T12:02:00.000Z",
+        commentUpdatedAt: mode === "missing-version" ? undefined : mode === "invalid-version" ? "not-a-date"
+          : mode === "stale-version" ? "2026-07-25T12:00:00.000Z" : "2026-07-25T12:01:00.000Z" };
       let receiptRunId = fixture.runId;
       if (mode === "other-run") {
         receiptRunId = randomUUID();
