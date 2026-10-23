@@ -1,3 +1,4 @@
+import { apiMetrics } from "../api-metrics.js";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
 import { heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import { legacyControllerBootId } from "./legacy-controller-lease.js";
@@ -27,7 +28,10 @@ export async function saveOmnigentDispatchReceipt(db: Db, run: Run, value: unkno
     sql`(${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'activeResponseId' is null or ${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'activeResponseId' = ${String(receipt.activeResponseId ?? '')})`,
     sql`(${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'turnId' is null or ${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'turnId' = ${String(receipt.turnId ?? '')})`,
   )).returning({ id: heartbeatRuns.id });
-  if (!saved) throw new Error("Legacy controller lease lost");
+  if (!saved) {
+    apiMetrics.failure("disposition_failure");
+    throw new Error("Legacy controller lease lost");
+  }
 }
 export async function claimOmnigentAttachment(db: Db, run: Run) {
   if (!run.controllerBootId || !validOmnigentReceipt(run, run.resultJson?.omnigentDispatchReceipt)) return false;

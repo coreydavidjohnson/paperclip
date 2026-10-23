@@ -1,3 +1,4 @@
+import { apiMetrics } from "../api-metrics.js";
 import { isLiveEventTransportReady } from "../services/live-events.js";
 import { beginControllerDrain, isControllerDraining } from "../controller-drain.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
@@ -137,6 +138,9 @@ export function healthRoutes(
   },
 ) {
   const router = Router();
+  router.get("/metrics", (_req, res) => {
+    res.type("text/plain; version=0.0.4; charset=utf-8").send(apiMetrics.render());
+  });
   // Share an outstanding probe: a hung pool must not accumulate one query per kubelet poll.
   let readinessProbe: Promise<unknown> | null = null;
   // Kubelet exec preStop calls loopback; never trust forwarded headers.

@@ -1066,3 +1066,19 @@ CLI because TypeScript 7 does not expose the old in-process compiler API.
 It compiles the actual two callback blocks and also requires the original
 mutable nullable-handle variant to fail with TS2345. No product behavior,
 compiler pin, timeout relaxation or semantic gate removal.
+
+## PER-316: private API histograms and controller failure events
+
+- Native gap: the pinned release and inspected upstream have tracing/logs, not
+  this private Prometheus route histogram. No external telemetry is enabled.
+- Adds `/api/health/metrics`, measured before parsing through finish/abort.
+  Labels use registered route templates, fixed methods and HTTP status; dynamic
+  mounts collapse and series are capped. No request IDs, bodies or queries.
+- Counts lease watcher loss once per abort and failed fenced OmniGenT receipt
+  writes. These event counters are not unique failed-run counts. Container
+  restart counts remain Kubernetes' authoritative counter.
+- Tests: `pnpm --filter @paperclipai/server exec vitest run
+  src/__tests__/api-metrics.test.ts src/services/legacy-controller-lease.test.ts
+  src/services/omnigent-attachment.test.ts`.
+- Removal: replace with a released upstream private, cardinality-bounded route
+  histogram and equivalent fencing-failure signals. Preserve the alert contract.

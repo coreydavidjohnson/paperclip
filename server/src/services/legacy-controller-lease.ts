@@ -1,3 +1,4 @@
+import { apiMetrics } from "../api-metrics.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
 import { heartbeatRuns, persistentDedicatedDb, type Db } from "@paperclipai/db";
@@ -123,7 +124,12 @@ export function watchLegacyControllerLease(sharedDb: Db, run: Run, controller: A
   const db = persistentDedicatedDb(sharedDb, "paperclip-legacy-controller-lease") ?? sharedDb;
   let stopped = false;
   let pending = false;
-  const lost = () => { if (!stopped) controller.abort(new Error("Legacy controller lease lost")); };
+  const lost = () => {
+    if (!stopped && !controller.signal.aborted) {
+      apiMetrics.failure("lease_loss");
+      controller.abort(new Error("Legacy controller lease lost"));
+    }
+  };
   // Adopt the claim-time renewal: its last success is newer than the row read.
   const adopted = stopClaimRenewal(run.id);
   let deadline = setTimeout(lost, Math.max(0,
