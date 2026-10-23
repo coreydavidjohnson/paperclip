@@ -216,6 +216,41 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(steerNativeSessionMock).not.toHaveBeenCalled();
   });
 
+  it("allows a question after external comment delivery, but still fences later user direction", async () => {
+    const seeded = await seedQueue();
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(),
+      controllerLeaseExpiresAt: new Date(Date.now() + 60_000),
+      createdAt: new Date("2026-08-22T15:00:00.000Z"),
+      contextSnapshot: { issueId: seeded.issueId, paperclipWake: { comments: [] } },
+    }).where(eq(heartbeatRuns.id, seeded.runId));
+    const agentApp = app(seeded.companyId, "queue-owner", seeded);
+    const scope = { id: seeded.issueId, companyId: seeded.companyId };
+    const input = { kind: "ask_user_questions" as const, sourceRunId: seeded.runId,
+      payload: { version: 1 as const, questions: [{ id: "scope", prompt: "Which scope?",
+        selectionMode: "single" as const, options: [{ id: "one", label: "One" }] }] } };
+    const service = issueThreadInteractionService(db);
+    await expect(service.create(scope, input, seeded)).rejects.toMatchObject({ status: 409,
+      details: { reason: "newer_comment_not_delivered" } });
+    const delivered = await request(agentApp).post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(delivered.status).toBe(200);
+    expect(delivered.body.deliveredCommentIds.sort()).toEqual([...seeded.commentIds].sort());
+    const repeated = await request(agentApp).post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(repeated.status).toBe(200);
+    expect(repeated.body.deliveredCommentIds).toEqual([]);
+    expect(await service.create(scope, input, seeded)).toMatchObject({ kind: "ask_user_questions", status: "pending" });
+    // Delivery is not approval, and the original launch snapshot stays unchanged.
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    expect((run.contextSnapshot as any).paperclipWake.comments).toEqual([]);
+    const [question] = await db.select().from(issueThreadInteractions);
+    expect(question.resolvedAt).toBeNull();
+    const laterId = randomUUID();
+    await db.insert(issueComments).values({ id: laterId, companyId: seeded.companyId, issueId: seeded.issueId,
+      authorType: "user", authorUserId: "queue-owner", body: "Do not promote yet." });
+    await expect(service.create(scope, input, seeded)).rejects.toMatchObject({ status: 409,
+      details: { reason: "newer_comment_not_delivered", commentIds: [laterId] } });
+    expect(await db.select().from(issueThreadInteractions)).toHaveLength(1);
+  });
+
   it.each(["board", "wrong_run", "wrong_agent", "cancelled", "cancelling", "expired", "other_issue", "malformed", "missing_boot", "missing_lease"])(
     "does not acknowledge queued comments for %s", async mode => {
       const seeded = await seedQueue();
