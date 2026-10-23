@@ -9473,6 +9473,22 @@ export function issueRoutes(
             sourceIssueStatus !== "blocked",
           );
         }
+        const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
+        const safeHandBack =
+          outcome === "restored" &&
+          sourceIssueStatus === "todo" &&
+          activeRecoveryAction.returnOwnerAgentId != null &&
+          lockedIssue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId;
+        // Validate source authority and stop gates before mutating recovery state.
+        // Resolution must still precede svc.update, which can settle recovery itself.
+        if (sourceStatusChanged) {
+          if (safeHandBack) {
+            await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: activeRecoveryAction });
+          } else {
+            await requireRecoverySourceMutationAuthority(req, lockedIssue);
+          }
+        }
+
         const recordedOutcome =
           outcome === "restored" &&
           sourceIssueStatus === "todo" &&
@@ -9497,7 +9513,6 @@ export function issueRoutes(
         if (!recoveryAction) throw notFound("Active recovery action not found");
 
         let issue = lockedIssue;
-        const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
         if (outcome === "blocked" && sourceStatusChanged) {
           const unresolvedBlockers = await tx
             .select({ id: issueRows.id })
@@ -9520,21 +9535,6 @@ export function issueRoutes(
         }
 
         if (sourceStatusChanged) {
-          const safeHandBack =
-            outcome === "restored" &&
-            sourceIssueStatus === "todo" &&
-            activeRecoveryAction.returnOwnerAgentId != null &&
-            lockedIssue.assigneeAgentId ===
-              activeRecoveryAction.returnOwnerAgentId;
-          if (safeHandBack) {
-            await assertSafeRecoveryHandBackGates({
-              req,
-              issue: lockedIssue,
-              recoveryAction: activeRecoveryAction,
-            });
-          } else {
-            await requireRecoverySourceMutationAuthority(req, lockedIssue);
-          }
 
           if (
             lockedIssue.status === "in_review" &&

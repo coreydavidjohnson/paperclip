@@ -1179,3 +1179,13 @@ final image qualification and live acceptance are pending; no deployment claimed
   diagnostics atop 155e25d0); only this ledger conflicted.
 - Integrated 2026-10-22 onto production fork 7bd82cec (PER-209 compression
   provenance and timing gate atop 689c637f); only this ledger conflicted.
+
+### PER-1156 integrated recovery gate compatibility (2026-10-23)
+
+Validate source mutation authority and hand-back stop gates before recovery
+resolution, while keeping resolution before the atomic source update. Preserve
+PER-968 guarded repair and all pause, budget, review and run-lock denials. Route
+fixtures now return the requested resolution outcome and model the new action-row
+lock; aborts require zero source writes. The company-skill database setup uses
+the existing shared embedded-Postgres test cost budget instead of a 20s override.
+The live readiness deadline remains two seconds.

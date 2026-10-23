@@ -534,13 +534,13 @@ describe("agent issue mutation checkout ownership", () => {
     mockIssueRecoveryActionService.listActiveForIssues.mockReset();
     mockIssueRecoveryActionService.listActiveForIssues.mockResolvedValue(new Map());
     mockIssueRecoveryActionService.resolveActiveForIssue.mockReset();
-    mockIssueRecoveryActionService.resolveActiveForIssue.mockResolvedValue({
+    mockIssueRecoveryActionService.resolveActiveForIssue.mockImplementation(async (input: { outcome: string; status: string }) => ({
       id: recoveryActionId,
       companyId,
       sourceIssueId: issueId,
       recoveryIssueId: null,
       kind: "issue_graph_liveness",
-      status: "resolved",
+      status: input.status,
       ownerType: "agent",
       ownerAgentId,
       ownerUserId: null,
@@ -556,12 +556,12 @@ describe("agent issue mutation checkout ownership", () => {
       maxAttempts: null,
       timeoutAt: null,
       lastAttemptAt: new Date("2026-05-13T18:00:00.000Z"),
-      outcome: "restored",
+      outcome: input.outcome,
       resolutionNote: "Resolved by recovery owner",
       resolvedAt: new Date("2026-05-13T18:05:00.000Z"),
       createdAt: new Date("2026-05-13T17:55:00.000Z"),
       updatedAt: new Date("2026-05-13T18:05:00.000Z"),
-    });
+    }));
     mockTaskWatchdogService.getActiveForIssue.mockReset();
     mockTaskWatchdogService.getActiveForIssue.mockResolvedValue(null);
     mockTaskWatchdogService.revalidateMutationScope.mockReset();
@@ -2293,9 +2293,8 @@ describe("agent issue mutation checkout ownership", () => {
         mockChatRunRetries.prepareFailedChatRunRetry,
       ).toHaveBeenCalledTimes(1);
       expect(order).toEqual(["begin", "stage", "rollback"]);
-      // The real DB owns rollback of prepared intent and issue changes. This
-      // route stub proves both writes share its transaction and no worker ran.
-      expect(mockIssueService.update.mock.calls[0]?.[2]).toBe(db);
+      // Resolution failure aborts the transaction before any source mutation.
+      expect(mockIssueService.update).not.toHaveBeenCalled();
       expect(
         mockIssueRecoveryActionService.resolveActiveForIssue,
       ).toHaveBeenCalledExactlyOnceWith(expect.any(Object), db);
@@ -2583,7 +2582,10 @@ describe("agent issue mutation checkout ownership", () => {
       (db as any).select = vi.fn((selection?: Record<string, unknown>) => {
         const base = select(selection);
         return { from: vi.fn((table: Parameters<typeof getTableName>[0]) => getTableName(table) === "issue_recovery_actions"
-          ? { where: vi.fn(() => Promise.resolve([settled])) } : base.from(table)) };
+          ? { where: vi.fn(() => ({
+              for: vi.fn(async () => []),
+              then: async (resolve: (rows: unknown[]) => unknown) => resolve([settled]),
+            })) } : base.from(table)) };
       });
       const res = await send(ownerActor(), db);
       expect(res.status, JSON.stringify(res.body)).toBe(200);
