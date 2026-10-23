@@ -93,6 +93,37 @@ commits. There are no upstream issue or PR links by Corey's instruction.
   catalogs, default lane and unchanged built-in keys. Include these tests in
   the lightweight homelab `Fork.Dockerfile` UI-rebuild gate too.
 
+## PER-1181. Superseded recovery continuations and OmniGenT session safety
+
+- Observed upstream: `paperclipai/paperclip` master
+  `6204239cfc8c3be79fc185cf3f468ebaa0ab1e3e` (2026-10-23), latest release
+  `v2026.1012.0`. `execution-recovery-resolution.ts` still checks task owner
+  and terminal status, not a newer successful turn, and forces fresh sessions.
+  No evidence establishes this delayed replay as intentional. Public report
+  awaits explicit external-message approval; do not publish private ticket IDs.
+- Why: an action resolved on October 15 was delivered on October 22 after a
+  clean task turn, then failed because forced OmniGenT rotation lacked evidence.
+  Read-only checks found 473 pending actions, 424 stale initially and 426 stale
+  on the later check as more tasks completed. Counts are observations, not constants.
+- Files: `server/src/services/recovery-continuation-staleness.ts`,
+  `execution-recovery-resolution.ts`, `heartbeat.ts`, run-dispatch adapter/policy,
+  and `server/src/__tests__/issue-recovery-actions.test.ts`.
+- Contract: invalidate resolved pending continuations when a succeeded run of
+  the same company/effective issue finished strictly after `resolved_at`.
+  Cleanup precedes the delivery limit; recheck at admission and dispatch.
+  Null legacy resolution boundaries are not proof of staleness. Preserve
+  delivered history and the exact committed successor acknowledgement path.
+  OmniGenT recovery admission requires `forceFreshSession: false`; other
+  adapters keep their existing contract. OmniGenT owns verified rotation.
+- Test: `vitest run src/__tests__/issue-recovery-actions.test.ts
+  src/__tests__/heartbeat-stale-queue-invalidation.test.ts` from `server`.
+  Covers time boundaries, ticket/status scope, admission race, queued and
+  pre-dispatch cancellation, unrelated execution-lock preservation, concurrent
+  sweeps, and a completed exact successor after a lost acknowledgement.
+- Removal condition: adopt an upstream release with equivalent delayed-delivery,
+  admission and dispatch guards plus adapter-owned session rotation, and keep
+  these regressions green. Do not remove the carry on source inspection alone.
+
 ## Earlier image modifications inventory
 
 Before this fork, homelab used the unmodified upstream release image and added
