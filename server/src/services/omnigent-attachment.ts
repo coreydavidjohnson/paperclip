@@ -29,7 +29,7 @@ export async function saveOmnigentDispatchReceipt(db: Db, run: Run, value: unkno
     sql`(${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'turnId' is null or ${heartbeatRuns.resultJson}->'omnigentDispatchReceipt'->>'turnId' = ${String(receipt.turnId ?? '')})`,
   )).returning({ id: heartbeatRuns.id });
   if (!saved) {
-    apiMetrics.failure("disposition_failure");
+    apiMetrics.failure("lease_loss");
     throw new Error("Legacy controller lease lost");
   }
 }
@@ -91,5 +91,6 @@ export async function finalizeOwnedOmnigentObservation(db: Db, run: Run, receipt
     typeof issueId === "string" ? sql`exists (select 1 from ${issues} where ${issues.id} = ${issueId}
       and ${issues.companyId} = ${run.companyId} and ${issues.assigneeAgentId} = ${run.agentId} and ${issues.status} != 'cancelled')` : undefined,
   )).returning();
+  if (!saved) apiMetrics.failure("disposition_failure");
   return saved ?? null;
 }

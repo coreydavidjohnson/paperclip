@@ -1074,8 +1074,9 @@ compiler pin, timeout relaxation or semantic gate removal.
 - Adds `/api/health/metrics`, measured before parsing through finish/abort.
   Labels use registered route templates, fixed methods and HTTP status; dynamic
   mounts collapse and series are capped. No request IDs, bodies or queries.
-- Counts lease watcher loss once per abort and failed fenced OmniGenT receipt
-  writes. These event counters are not unique failed-run counts. Container
+- Counts lease watcher loss once per abort, rejected dispatch receipts, and
+  rejected finalization CAS attempts (including Stop winning its fence). These
+  event counters are not unique failed-run counts. Container
   restart counts remain Kubernetes' authoritative counter.
 - Tests: `pnpm --filter @paperclipai/server exec vitest run
   src/__tests__/api-metrics.test.ts src/services/legacy-controller-lease.test.ts
