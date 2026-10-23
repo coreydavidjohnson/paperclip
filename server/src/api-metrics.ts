@@ -9,8 +9,14 @@ const BUCKETS = [0.01, 0.025, 0.05, 0.1, 0.2, 0.3, 0.5, 1, 2.5, 5, 10, 30, 60];
 type Failure = "lease_loss" | "disposition_failure";
 type Sample = { labels: string; buckets: number[]; count: number; sum: number };
 
-export function createApiMetrics() {
-  const startedAt = Date.now() / 1000;
+export interface ApiMetrics {
+  middleware: RequestHandler;
+  failure(reason: Failure): void;
+  render(): string;
+}
+
+export function createApiMetrics(): ApiMetrics {
+  const startedAt = Date.now() / 1000 - process.uptime();
   const samples = new Map<string, Sample>();
   const failures: Record<Failure, number> = { lease_loss: 0, disposition_failure: 0 };
   const middleware: RequestHandler = (req, res, next) => {
@@ -19,22 +25,34 @@ export function createApiMetrics() {
     const path = req.originalUrl.split("?", 1)[0];
     if (!path.startsWith("/api/") || path === "/api/health/metrics") { next(); return; }
     const start = performance.now();
+    // Express assigns route while the matched mount is still in baseUrl, then
+    // restores baseUrl before an app-level error handler responds. Capture at
+    // assignment, not finish, so thrown 4xx/5xx keep the same label as success.
+    let route = "unmatched";
+    let matchedRoute = req.route;
+    Object.defineProperty(req, "route", {
+      configurable: true,
+      enumerable: true,
+      get: () => matchedRoute,
+      set: (value) => {
+        matchedRoute = value;
+        if (typeof value?.path === "string") {
+          const base = STATIC_MOUNTS.has(req.baseUrl) ? req.baseUrl : "/api/:mount";
+          route = (base + value.path).slice(0, 256);
+        }
+      },
+    });
     let observed = false;
     const observe = () => {
       if (observed) return;
       observed = true;
-      let route = "unmatched";
-      if (typeof req.route?.path === "string") {
-        const base = STATIC_MOUNTS.has(req.baseUrl) ? req.baseUrl : "/api/:mount";
-        route = (base + req.route.path).slice(0, 256);
-      }
       const method = METHODS.has(req.method) ? req.method : "OTHER";
       const status = !res.writableFinished ? "aborted" : String(res.statusCode);
       // Cap unexpected runtime-generated registrations. Ordinary routes are
       // bounded by source; this is a last fence for plugin registrations.
       const labelsFor = (r: string) => `method=${JSON.stringify(method)},route=${JSON.stringify(r)},status=${JSON.stringify(status)}`;
       let labels = labelsFor(route);
-      if (!samples.has(labels) && samples.size >= 2048) labels = labelsFor("overflow");
+      if (!samples.has(labels) && samples.size >= 512) labels = labelsFor("overflow");
       const sample = samples.get(labels) ?? { labels, buckets: BUCKETS.map(() => 0), count: 0, sum: 0 };
       const seconds = Math.max(0, (performance.now() - start) / 1000);
       sample.count++;
@@ -73,4 +91,4 @@ export function createApiMetrics() {
   };
 }
 
-export const apiMetrics = createApiMetrics();
+export const apiMetrics: ApiMetrics = createApiMetrics();

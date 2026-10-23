@@ -2,6 +2,7 @@ import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HttpError } from "../errors.js";
+import { createApiMetrics } from "../api-metrics.js";
 
 const mockIssueService = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -2717,6 +2718,25 @@ describe.sequential("issue comment reopen routes", () => {
         }),
       }),
     );
+  });
+
+  it("exports the alert route label for real comment-router success and persistence errors", async () => {
+    mockIssueService.getById.mockResolvedValue(makeIssue("in_progress"));
+    const metrics = createApiMetrics();
+    const app = createApp();
+    app.use(metrics.middleware);
+    await installActor(app);
+    const url = "/api/issues/11111111-1111-4111-8111-111111111111/comments";
+    const saved = await request(app).post(url).send({ body: "hello" });
+    expect(saved.status).toBe(201);
+    mockIssueService.addComment.mockRejectedValueOnce(new HttpError(500, "fixture failure"));
+    const failed = await request(app).post(url).send({ body: "hello" });
+    expect(failed.status).toBe(500);
+    for (const status of ["201", "500"]) {
+      expect(metrics.render()).toContain(`paperclip_api_request_duration_seconds_count{method="POST",route="/api/issues/:id/comments",status="${status}"} 1`);
+    }
+    expect(metrics.render()).not.toContain("11111111");
+    expect(metrics.render()).not.toContain("hello");
   });
 
   it("interrupts an active run before a combined comment update", async () => {

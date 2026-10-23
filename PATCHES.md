@@ -1083,3 +1083,9 @@ compiler pin, timeout relaxation or semantic gate removal.
   src/services/omnigent-attachment.test.ts`.
 - Removal: replace with a released upstream private, cardinality-bounded route
   histogram and equivalent fencing-failure signals. Preserve the alert contract.
+
+- Review hardening: capture route templates when Express matches the route;
+  app-level error handlers must not lose the `/api` mount. A real comment-router
+  success/DB-error test pins the alert label. The main proxy denies the internal
+  metrics path, including case/trailing-slash variants; only the metrics listener
+  exports it. Public TypeScript return types are explicit for declaration emit.
