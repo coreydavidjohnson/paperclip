@@ -106,6 +106,21 @@ function renderBoard(
 }
 
 describe("KanbanBoard", () => {
+  it("separates timer-only work from in-progress work and shows its wake time and reason", () => {
+    const parked = { ...createIssue(1, "in_progress"), monitorNextCheckAt: new Date("2026-10-24T15:00:00Z"), monitorNotes: "Observe the required 24-hour soak." };
+    const active = { ...createIssue(2, "in_progress"), monitorNextCheckAt: parked.monitorNextCheckAt };
+    const { container } = renderBoard({ issues: [parked, active], liveIssueIds: new Set([active.id]) });
+    const waiting = container.querySelector('[data-kanban-status="waiting"]');
+    const working = container.querySelector('[data-kanban-status="in_progress"]');
+    expect(waiting?.textContent).toContain(parked.title);
+    expect(waiting?.textContent).toContain("Waiting until");
+    expect(waiting?.textContent).toContain(parked.monitorNotes);
+    expect(working?.textContent).not.toContain(parked.title);
+    expect(working?.textContent).toContain(active.title);
+    expect(resolveKanbanTargetStatus("waiting", [parked])).toBeNull();
+    expect(resolveKanbanTargetStatus(parked.id, [parked])).toBeNull();
+  });
+
   beforeEach(() => {
     document.body.innerHTML = "";
   });

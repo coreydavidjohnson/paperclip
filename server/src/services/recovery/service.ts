@@ -201,6 +201,7 @@ type RecoveryWakeupOptions = {
   issueStateGuard?: {
     statuses: string[];
     assigneeAgentId: string;
+    updatedAt?: string;
   };
 };
 
@@ -1917,6 +1918,7 @@ export function recoveryService(
       | "issue_continuation_needed"
       | typeof EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON;
     source: string;
+    expectedIssueUpdatedAt?: string;
     retryOfRunId?: string | null;
     extraContext?: Record<string, unknown>;
     /**
@@ -2002,11 +2004,12 @@ export function recoveryService(
       // The sweep can combine an old in-progress issue snapshot with a newer
       // successful run. Validate eligibility under the enqueue issue lock so
       // completion or reassignment cannot create a redundant continuation.
-      ...(input.source === "issue.productive_terminal_continuation_recovery"
+      ...(input.source === "issue.productive_terminal_continuation_recovery" || input.source === "issue.runless_in_progress_recovery"
         ? {
             issueStateGuard: {
               statuses: ["in_progress"],
               assigneeAgentId: input.agentId,
+              ...(input.expectedIssueUpdatedAt ? { updatedAt: input.expectedIssueUpdatedAt } : {}),
             },
           }
         : {}),
@@ -5251,7 +5254,26 @@ export function recoveryService(
       }
 
       if (!latestRun && !issue.checkoutRunId && !issue.executionRunId) {
-        result.skipped += 1;
+        // No predecessor means no completion/retry event will ever wake it.
+        // Allow five minutes for dispatch, then use the existing guarded queue.
+        // The normal minute sweep leaves headroom under the ten-minute SLO.
+        if (Date.now() - issue.updatedAt.getTime() < 5 * 60_000 ||
+            await hasPersistedDurableWaitPath(issue, null)) {
+          result.skipped += 1;
+          continue;
+        }
+        const queued = await enqueueStrandedIssueRecovery({
+          issueId: issue.id,
+          agentId,
+          reason: "issue_continuation_needed",
+          retryReason: "issue_continuation_needed",
+          source: "issue.runless_in_progress_recovery",
+          expectedIssueUpdatedAt: issue.updatedAt.toISOString(),
+        });
+        if (queued) {
+          result.continuationRequeued += 1;
+          result.issueIds.push(issue.id);
+        } else result.skipped += 1;
         continue;
       }
       if (readDispositionRepairAttempt(latestRun)) {

@@ -86,6 +86,21 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
 }
 
 describe("IssueRow", () => {
+  it.each(["legacy", "task"] as const)("shows timer-only work as waiting in %s rows, but not live rows", (presentation) => {
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    const issue = createIssue({ status: "in_progress", monitorNextCheckAt: new Date("2026-10-24T15:00:00Z"), monitorNotes: "Observe the required 24-hour soak." });
+    act(() => root.render(<IssueRow issue={issue} presentation={presentation} />));
+    expect(container.textContent).toContain("Waiting until");
+    expect(container.textContent).toContain(issue.monitorNotes);
+    expect(container.querySelector('[aria-label="In Progress"]')).toBeNull();
+    expect(container.querySelector('[aria-label="Waiting"]')).not.toBeNull();
+    act(() => root.render(<IssueRow issue={issue} presentation={presentation} isLive />));
+    expect(container.textContent).not.toContain("Waiting until");
+    expect(container.querySelector('[aria-label="In Progress"]')).not.toBeNull();
+    act(() => root.unmount());
+  });
+
   let container: HTMLDivElement;
 
   beforeEach(() => {

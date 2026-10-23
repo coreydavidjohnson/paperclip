@@ -1,3 +1,4 @@
+import { issueActivityStatus } from "../lib/issue-monitor";
 import { AgentIdentity } from "@/components/AgentIdentity";
 import { startTransition, useDeferredValue, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
@@ -1217,8 +1218,8 @@ export function IssuesList({
       return [{ key: "__all", label: null as string | null, items: filtered }];
     }
     if (viewState.groupBy === "status") {
-      const groups = groupBy(filtered, (i) => i.status);
-      return issueStatusOrder
+      const groups = groupBy(filtered, (i) => issueActivityStatus(i, liveIssueIds?.has(i.id)));
+      return issueStatusOrder.flatMap(status => status === "in_progress" ? [status, "waiting"] : [status])
         .filter((s) => groups[s]?.length)
         .map((s) => ({ key: s, label: issueFilterLabel(s), items: groups[s]! }));
     }
@@ -1296,6 +1297,7 @@ export function IssuesList({
     filtered,
     issueFilterWorkspaceContext,
     viewState.groupBy,
+    liveIssueIds,
     agents,
     agentName,
     currentUserId,
@@ -1573,7 +1575,7 @@ export function IssuesList({
     const defaults: Record<string, unknown> = { ...(baseCreateIssueDefaults ?? {}) };
     if (projectId && defaults.projectId === undefined) defaults.projectId = projectId;
     if (groupKey) {
-      if (viewState.groupBy === "status") defaults.status = groupKey;
+      if (viewState.groupBy === "status" && groupKey !== "waiting") defaults.status = groupKey;
       else if (viewState.groupBy === "priority") defaults.priority = groupKey;
       else if (viewState.groupBy === "assignee" && groupKey !== "__unassigned") {
         if (groupKey.startsWith("__user:")) defaults.assigneeUserId = groupKey.slice("__user:".length);
@@ -2097,6 +2099,7 @@ export function IssuesList({
                         : undefined}
                     >
                       <IssueRow
+                        isLive={liveIssueIds?.has(issue.id)}
                         issue={issue}
                         issueLinkState={issueLinkState}
                         selected={selectedNavKey === `issue:${issue.id}`}
@@ -2152,7 +2155,7 @@ export function IssuesList({
                             </button>
                           ) : (
                             <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                              <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
+                              <StatusIcon status={issueActivityStatus(issue, liveIssueIds?.has(issue.id))} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                             </span>
                           )
                         }
@@ -2179,7 +2182,7 @@ export function IssuesList({
                               checklistStepNumber={checklistStepNumber}
                               statusSlot={(
                                 <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                                  <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
+                                  <StatusIcon status={issueActivityStatus(issue, liveIssueIds?.has(issue.id))} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                                 </span>
                               )}
                             />

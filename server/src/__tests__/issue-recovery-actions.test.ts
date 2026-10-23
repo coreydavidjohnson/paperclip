@@ -525,6 +525,26 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(updated.evidence).not.toHaveProperty("routingPolicy");
   });
 
+  it("wakes an assigned in-progress issue with no run after five minutes, but preserves timer waits", async () => {
+    const { sourceIssueId, coderId } = await seedCompany();
+    const enqueueWakeup = vi.fn(async () => ({ id: randomUUID() } as never));
+    const recovery = recoveryService(db, { enqueueWakeup });
+    await db.update(issues).set({ updatedAt: new Date(Date.now() - 4 * 60_000) }).where(eq(issues.id, sourceIssueId));
+    await recovery.reconcileStrandedAssignedIssues();
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+    await db.update(issues).set({ updatedAt: new Date(Date.now() - 6 * 60_000), monitorNextCheckAt: new Date(Date.now() + 86_400_000) }).where(eq(issues.id, sourceIssueId));
+    await recovery.reconcileStrandedAssignedIssues();
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+    await db.update(issues).set({ monitorNextCheckAt: null }).where(eq(issues.id, sourceIssueId));
+    const result = await recovery.reconcileStrandedAssignedIssues();
+    expect(result.continuationRequeued).toBe(1);
+    expect(enqueueWakeup).toHaveBeenCalledWith(coderId, expect.objectContaining({
+      reason: "issue_continuation_needed",
+      issueStateGuard: { statuses: ["in_progress"], assigneeAgentId: coderId, updatedAt: expect.any(String) },
+      contextSnapshot: expect.objectContaining({ issueId: sourceIssueId, source: "issue.runless_in_progress_recovery" }),
+    }));
+  });
+
   it("escalates stranded assigned work into a source action instead of a recovery issue", async () => {
     const { companyId, coderId, sourceIssue } = await seedCompany();
     const enqueueWakeup = vi.fn(async () => null);

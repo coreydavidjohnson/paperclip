@@ -1,3 +1,5 @@
+import { issueActivityStatus, timedIssueWait } from "../lib/issue-monitor";
+import { TimedIssueWait } from "./TimedIssueWait";
 import { AgentIdentity } from "@/components/AgentIdentity";
 import { useMemo, useState } from "react";
 import { Link } from "@/lib/router";
@@ -38,15 +40,17 @@ export const KANBAN_COLUMN_INITIAL_VISIBLE_LIMIT = KANBAN_COLUMN_DEFAULT_PAGE_SI
 export const KANBAN_COLUMN_REVEAL_INCREMENT = KANBAN_COLUMN_DEFAULT_PAGE_SIZE;
 export const KANBAN_COLD_STATUSES = ["backlog", "done", "cancelled"] as const;
 
-export const boardStatuses = [
+const boardStatuses = [
   "backlog",
   "todo",
   "in_progress",
+  "waiting",
   "in_review",
   "blocked",
   "done",
   "cancelled",
-] as const satisfies readonly IssueStatus[];
+] as const;
+type BoardStatus = (typeof boardStatuses)[number];
 
 const defaultKanbanColumnTone = {
   rail: "border-border bg-muted/20",
@@ -127,8 +131,8 @@ export const kanbanColumnTones: Partial<Record<IssueStatus, typeof defaultKanban
   },
 };
 
-export function getKanbanColumnTone(status: IssueStatus) {
-  return kanbanColumnTones[status] ?? defaultKanbanColumnTone;
+export function getKanbanColumnTone(status: BoardStatus) {
+  return status === "waiting" ? defaultKanbanColumnTone : kanbanColumnTones[status] ?? defaultKanbanColumnTone;
 }
 
 function statusLabel(status: string): string {
@@ -136,10 +140,12 @@ function statusLabel(status: string): string {
 }
 
 export function resolveKanbanTargetStatus(overId: string, issues: Issue[]): IssueStatus | null {
+  if (overId === "waiting") return null;
   if ((boardStatuses as readonly string[]).includes(overId)) {
     return overId as IssueStatus;
   }
-  return issues.find((issue) => issue.id === overId)?.status ?? null;
+  const target = issues.find((issue) => issue.id === overId);
+  return target && !timedIssueWait(target) ? target.status : null;
 }
 
 interface Agent {
@@ -172,7 +178,7 @@ function KanbanColumn({
   revealIncrement,
   onShowMore,
 }: {
-  status: IssueStatus;
+  status: BoardStatus;
   issues: Issue[];
   agents?: Agent[];
   liveIssueIds?: Set<string>;
@@ -183,7 +189,7 @@ function KanbanColumn({
   revealIncrement: number;
   onShowMore: () => void;
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id: status });
+  const { setNodeRef, isOver } = useDroppable({ id: status, disabled: status === "waiting" });
 
   const isEmpty = issues.length === 0;
   const visibleIssues = collapsed ? [] : issues.slice(0, visibleCount);
@@ -194,6 +200,7 @@ function KanbanColumn({
   if (collapsed) {
     return (
       <div
+        data-kanban-status={status}
         ref={setNodeRef}
         className={cn(
           "flex min-h-(--sz-220px) w-(--sz-52px) shrink-0 flex-col items-center rounded-md border px-1.5 py-2 transition-colors",
@@ -214,7 +221,7 @@ function KanbanColumn({
   }
 
   return (
-    <div className="flex flex-col shrink-0 min-w-(--sz-260px) w-(--sz-260px)">
+    <div data-kanban-status={status} className="flex flex-col shrink-0 min-w-(--sz-260px) w-(--sz-260px)">
       <div className="flex items-center gap-2 px-3 py-2 mb-1">
         <StatusIcon status={status} />
         <span className={cn("text-xs font-semibold uppercase tracking-wide", tone.header)}>
@@ -328,6 +335,7 @@ function KanbanCard({
           if (isDragging) e.preventDefault();
         }}
       >
+        <TimedIssueWait issue={issue} isLive={isLive} />
         <div className={`flex items-start gap-1.5 ${compact ? "mb-1" : "mb-1.5"}`}>
           <span className="text-xs text-muted-foreground font-mono shrink-0">
             {issue.identifier ?? issue.id.slice(0, 8)}
@@ -407,17 +415,13 @@ export function KanbanBoard({
   );
 
   const columnIssues = useMemo(() => {
-    const grouped: Record<IssueStatus, Issue[]> = {} as Record<IssueStatus, Issue[]>;
-    for (const status of boardStatuses) {
-      grouped[status] = [];
-    }
+    const grouped = Object.fromEntries(boardStatuses.map(status => [status, []])) as Record<BoardStatus, Issue[]>;
     for (const issue of issues) {
-      if (grouped[issue.status]) {
-        grouped[issue.status].push(issue);
-      }
+      const status = issueActivityStatus(issue, liveIssueIds?.has(issue.id)) as BoardStatus;
+      grouped[status]?.push(issue);
     }
     return grouped;
-  }, [issues]);
+  }, [issues, liveIssueIds]);
 
   const activeIssue = useMemo(
     () => (activeId ? issues.find((i) => i.id === activeId) : null),

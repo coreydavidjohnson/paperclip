@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   deriveMonitorState,
+  timedIssueWait,
   formatMonitorAbsolute,
   formatMonitorAbsoluteFull,
   formatMonitorEta,
@@ -231,5 +232,26 @@ describe("useMonitorCountdown", () => {
 
     flushSync(() => root.unmount());
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+
+describe("timer-only issue waits", () => {
+  const issue = { status: "in_progress", monitorNextCheckAt: "2026-10-24T15:00:00Z", monitorNotes: "Observe the required 24-hour soak." };
+  it("uses the existing monitor timestamp and plain-language reason", () => {
+    expect(timedIssueWait(issue)).toEqual({ nextCheckAt: issue.monitorNextCheckAt, reason: issue.monitorNotes });
+  });
+  it("does not mistake live work with a backup timer for waiting", () => {
+    expect(timedIssueWait(issue, true)).toBeNull();
+    for (const status of ["running", "queued"]) expect(timedIssueWait({ ...issue, activeRun: { status } })).toBeNull();
+    expect(timedIssueWait({ ...issue, activeRun: { status: "succeeded" } })).not.toBeNull();
+  });
+  it("ignores historical policy timers, closed work and invalid timestamps", () => {
+    expect(timedIssueWait({ status: "in_progress", executionPolicy: { monitor: { nextCheckAt: issue.monitorNextCheckAt } } })).toBeNull();
+    for (const status of ["done", "cancelled", "blocked", "in_review", "todo"]) expect(timedIssueWait({ ...issue, status })).toBeNull();
+    expect(timedIssueWait({ ...issue, monitorNextCheckAt: "invalid" })).toBeNull();
+  });
+  it("keeps overdue waits visible and identifies a missing reason", () => {
+    expect(timedIssueWait({ ...issue, monitorNextCheckAt: "2020-01-01T00:00:00Z", monitorNotes: null })?.reason).toBe("No wait reason recorded");
   });
 });

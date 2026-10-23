@@ -3716,6 +3716,8 @@ interface WakeupOptions {
     statuses: string[];
     assigneeAgentId: string;
     statusVersion?: number;
+    /** Reject stale recovery snapshots after a monitor, blocker or other edit. */
+    updatedAt?: string;
   };
   /** Keep causally distinct external chat continuations out of an existing run. */
   allowRunCoalescing?: boolean;
@@ -27731,6 +27733,7 @@ export function heartbeatService(
               executionRunId: issues.executionRunId,
               executionAgentNameKey: issues.executionAgentNameKey,
               createdAt: issues.createdAt,
+              updatedAt: issues.updatedAt,
             })
             .from(issues)
             .where(
@@ -27962,7 +27965,8 @@ export function heartbeatService(
             issueStateGuard &&
             (!issueStateGuard.statuses.includes(issue.status) ||
               issue.assigneeAgentId !== issueStateGuard.assigneeAgentId ||
-              (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion))
+              (issueStateGuard.statusVersion !== undefined && issue.statusVersion !== issueStateGuard.statusVersion) ||
+              (issueStateGuard.updatedAt !== undefined && issue.updatedAt.toISOString() !== issueStateGuard.updatedAt))
           ) {
             await tx.insert(agentWakeupRequests).values({
               ...durableReceiptFields,

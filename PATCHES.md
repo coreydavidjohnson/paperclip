@@ -1066,3 +1066,19 @@ CLI because TypeScript 7 does not expose the old in-process compiler API.
 It compiles the actual two callback blocks and also requires the original
 mutable nullable-handle variant to fail with TS2345. No product behavior,
 compiler pin, timeout relaxation or semantic gate removal.
+
+## PER-1180: distinguish timed waiting and recover runless work
+
+- Upstream master checked on 2026-10-23: no native waiting workflow status.
+  Reuse persisted monitor deadline/notes for a display-only Waiting column,
+  status group and reason/time label. Queued/running work stays active even
+  with a backup timer. Never persist Waiting as an issue status or drop target.
+- Reuse the native recovery queue for assigned in-progress issues that never
+  had a run, after a five-minute dispatch grace. Preserve timers, blockers,
+  pending interactions, pauses and existing recovery/authorization gates.
+  Validate snapshot updatedAt under the existing issue enqueue lock.
+- Regression: timed-wait helper, row and board rendering; recovery actions;
+  real heartbeat queue exactly-once dispatch and stale-monitor-edit rejection.
+  Existing full semantic/image qualification remains required.
+- Retire when released upstream supplies equivalent honest activity display
+  and guarded recovery for issues without predecessor runs.

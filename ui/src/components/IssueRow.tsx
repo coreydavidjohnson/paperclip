@@ -1,3 +1,5 @@
+import { issueActivityStatus } from "../lib/issue-monitor";
+import { TimedIssueWait } from "./TimedIssueWait";
 import { requiresExecutionReconciliation } from "@paperclipai/shared";
 import type { ReactNode } from "react";
 import type { ExternalObjectSummary, Issue, IssueRecoveryAction } from "@paperclipai/shared";
@@ -29,6 +31,7 @@ export type IssueRowPresentation = "legacy" | "task";
 
 export interface IssueRowProps {
   issue: Issue;
+  isLive?: boolean;
   issueLinkState?: unknown;
   selected?: boolean;
   /** Opt-in canonical collection layout. Legacy remains the default until each surface migrates. */
@@ -119,6 +122,7 @@ export function InboxArchiveButton({
 
 export function IssueRow({
   issue,
+  isLive = false,
   issueLinkState,
   selected = false,
   presentation = "legacy",
@@ -285,7 +289,7 @@ export function IssueRow({
           {leadingControl}
           {statusSlot ?? (
             <StatusIcon
-              status={issue.status} externalConversationState={issue.externalConversationState}
+              status={issueActivityStatus(issue, isLive)} externalConversationState={issue.externalConversationState}
               blockerAttention={issue.blockerAttention}
               size="md"
               className={selectedStatusClass}
@@ -306,6 +310,7 @@ export function IssueRow({
             >
               {issue.title}{titleSuffix}
             </span>
+            <TimedIssueWait issue={issue} isLive={isLive} />
             {recoveryIndicator}
             {mobileTitleMeta ? (
               <span className="ml-auto shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground sm:hidden">
@@ -385,7 +390,7 @@ export function IssueRow({
         <span className="sr-only">Open {identifier}: {issue.title}</span>
       </Link>
       <span className="flex shrink-0 items-center gap-1 pt-px sm:hidden">
-        {mobileLeading ?? <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} blockerAttention={issue.blockerAttention} size="md" className={selectedStatusClass} />}
+        {mobileLeading ?? <StatusIcon status={issueActivityStatus(issue, isLive)} externalConversationState={issue.externalConversationState} blockerAttention={issue.blockerAttention} size="md" className={selectedStatusClass} />}
         {parkedBlockerIndicator}
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-1 sm:contents">
@@ -396,6 +401,7 @@ export function IssueRow({
           >
             {issue.title}{titleSuffix}
           </span>
+          <TimedIssueWait issue={issue} isLive={isLive} />
           {recoveryIndicator}
         </span>
         {checklistDependencyChips ? (
@@ -458,7 +464,7 @@ export function IssueRow({
           {desktopMetaLeading ?? (
             <>
               <span className="hidden shrink-0 items-center gap-1 sm:inline-flex">
-                <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} blockerAttention={issue.blockerAttention} size="md" className={selectedStatusClass} />
+                <StatusIcon status={issueActivityStatus(issue, isLive)} externalConversationState={issue.externalConversationState} blockerAttention={issue.blockerAttention} size="md" className={selectedStatusClass} />
               </span>
               {checklistStep}
               <span className="shrink-0 font-mono text-xs text-muted-foreground">

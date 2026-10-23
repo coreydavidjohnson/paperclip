@@ -268,3 +268,21 @@ export function formatMonitorOffset(nextCheckAt: MonitorDate): string {
   if (eta.startsWith("overdue by ")) return `${eta.slice("overdue by ".length)} ago`;
   return eta;
 }
+
+
+/** Only a persisted deadline, not historical policy state, parks active work. */
+export function timedIssueWait(issue: MonitorIssueLike & {
+  activeRun?: { status: string } | null;
+  monitorNotes?: string | null;
+}, isLive = false): { nextCheckAt: MonitorDate; reason: string } | null {
+  const nextCheckAt = issue.monitorNextCheckAt;
+  if (issue.status !== "in_progress" || isLive ||
+      ["queued", "running"].includes(issue.activeRun?.status ?? "") ||
+      !nextCheckAt || !Number.isFinite(new Date(nextCheckAt).getTime())) return null;
+  return { nextCheckAt, reason: issue.monitorNotes?.trim() || "No wait reason recorded" };
+}
+
+/** Display-only classification: never write this back as a workflow status. */
+export function issueActivityStatus(issue: Parameters<typeof timedIssueWait>[0], isLive = false): string {
+  return timedIssueWait(issue, isLive) ? "waiting" : issue.status ?? "backlog";
+}

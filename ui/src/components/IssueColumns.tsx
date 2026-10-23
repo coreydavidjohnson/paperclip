@@ -1,3 +1,4 @@
+import { issueActivityStatus } from "../lib/issue-monitor";
 import { AgentIdentity } from "@/components/AgentIdentity";
 import type { AvatarAgent } from "./AgentAvatar";
 import type { ReactNode } from "react";
@@ -202,7 +203,7 @@ export function InboxIssueMetaLeading({
     <>
       {showStatus ? (
         <span className="hidden shrink-0 items-center sm:inline-flex">
-          {statusSlot ?? <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} blockerAttention={issue.blockerAttention} />}
+          {statusSlot ?? <StatusIcon status={issueActivityStatus(issue, isLive)} externalConversationState={issue.externalConversationState} blockerAttention={issue.blockerAttention} />}
         </span>
       ) : null}
       {checklistStepNumber !== null ? (

@@ -536,6 +536,38 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(runRows).toHaveLength(0);
   });
 
+  it("dispatches runless recovery through the real wake queue exactly once", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Recover missing dispatch", status: "in_progress", assigneeAgentId: agentId,
+      updatedAt: new Date(Date.now() - 6 * 60_000) });
+    const result = await heartbeat.reconcileStrandedAssignedIssues();
+    expect(result.continuationRequeued).toBe(1);
+    const runs = await db.select().from(heartbeatRuns);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].contextSnapshot).toMatchObject({ issueId, source: "issue.runless_in_progress_recovery" });
+    await heartbeat.reconcileStrandedAssignedIssues();
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(1);
+  });
+
+  it("rejects a runless recovery snapshot after a timer is recorded", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    const snapshotAt = new Date("2026-10-22T00:00:00Z");
+    await db.insert(issues).values({ id: issueId, companyId, title: "Timed wait racing recovery", status: "in_progress", assigneeAgentId: agentId,
+      updatedAt: new Date(snapshotAt.getTime() + 1000), monitorNextCheckAt: new Date("2099-01-01T00:00:00Z") });
+    const run = await heartbeat.wakeup(agentId, {
+      source: "automation", triggerDetail: "system", reason: "issue_continuation_needed",
+      payload: { issueId }, contextSnapshot: { issueId, source: "issue.runless_in_progress_recovery" },
+      issueStateGuard: { statuses: ["in_progress"], assigneeAgentId: agentId, updatedAt: snapshotAt.toISOString() },
+    });
+    expect(run).toBeNull();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(0);
+    expect(await db.select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason }).from(agentWakeupRequests))
+      .toEqual([{ status: "skipped", reason: "issue_state_guard_mismatch" }]);
+  });
+
   it("checks guarded issue status and assignee under the enqueue lock", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const parkedIssueId = randomUUID();

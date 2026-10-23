@@ -1,3 +1,4 @@
+import { issueActivityStatus } from "../lib/issue-monitor";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "@/lib/router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -2784,10 +2785,11 @@ function StreamlinedInbox() {
                     && blockerAttention?.state === "covered"
                   );
                   const rowStatusIcon = (
-                    <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} blockerAttention={blockerAttention} size="md" />
+                    <StatusIcon status={issueActivityStatus(issue, isLive)} externalConversationState={issue.externalConversationState} blockerAttention={blockerAttention} size="md" />
                   );
                   return (
                     <IssueRow
+                      isLive={isLive}
                       key={`issue:${issue.id}`}
                       issue={issue}
                       presentation={streamlinedUiEnabled ? "task" : "legacy"}
@@ -2883,7 +2885,7 @@ function StreamlinedInbox() {
                             <ChevronRight className={cn("h-3.5 w-3.5 transition-transform", isExpanded && "rotate-90")} />
                           </button>
                         ) : (
-                          <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} blockerAttention={blockerAttention} size="md" />
+                          <StatusIcon status={issueActivityStatus(issue, isLive)} externalConversationState={issue.externalConversationState} blockerAttention={blockerAttention} size="md" />
                         )
                       ) : undefined}
                       unreadState={isUnread ? "visible" : isFading ? "fading" : "hidden"}

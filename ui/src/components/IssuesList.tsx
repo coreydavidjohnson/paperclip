@@ -1,3 +1,4 @@
+import { issueActivityStatus } from "../lib/issue-monitor";
 import { AgentIdentity } from "@/components/AgentIdentity";
 import { startTransition, useDeferredValue, useEffect, useMemo, useState, useCallback, useRef } from "react";
 import type { ReactNode } from "react";
@@ -1267,8 +1268,8 @@ function StreamlinedIssuesList({
       return [{ key: "__all", label: null as string | null, items: filtered }];
     }
     if (viewState.groupBy === "status") {
-      const groups = groupBy(filtered, (i) => i.status);
-      return issueStatusOrder
+      const groups = groupBy(filtered, (i) => issueActivityStatus(i, liveIssueIds?.has(i.id)));
+      return issueStatusOrder.flatMap(status => status === "in_progress" ? [status, "waiting"] : [status])
         .filter((s) => groups[s]?.length)
         .map((s) => ({ key: s, label: issueFilterLabel(s), items: groups[s]! }));
     }
@@ -1346,6 +1347,7 @@ function StreamlinedIssuesList({
     filtered,
     issueFilterWorkspaceContext,
     viewState.groupBy,
+    liveIssueIds,
     agents,
     agentName,
     currentUserId,
@@ -1623,7 +1625,7 @@ function StreamlinedIssuesList({
     const defaults: Record<string, unknown> = { ...(baseCreateIssueDefaults ?? {}) };
     if (projectId && defaults.projectId === undefined) defaults.projectId = projectId;
     if (groupKey) {
-      if (viewState.groupBy === "status") defaults.status = groupKey;
+      if (viewState.groupBy === "status" && groupKey !== "waiting") defaults.status = groupKey;
       else if (viewState.groupBy === "priority") defaults.priority = groupKey;
       else if (viewState.groupBy === "assignee" && groupKey !== "__unassigned") {
         if (groupKey.startsWith("__user:")) defaults.assigneeUserId = groupKey.slice("__user:".length);
@@ -2163,6 +2165,7 @@ function StreamlinedIssuesList({
                         : undefined}
                     >
                       <IssueRow
+                        isLive={liveIssueIds?.has(issue.id)}
                         issue={issue}
                         presentation={rowPresentation}
                         issueLinkState={issueLinkState}
@@ -2229,7 +2232,7 @@ function StreamlinedIssuesList({
                         ) : undefined}
                         statusSlot={rowPresentation === "task" ? (
                           <span className="relative inline-flex items-start self-stretch sm:items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                            <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
+                            <StatusIcon status={issueActivityStatus(issue, liveIssueIds?.has(issue.id))} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                             {hasChildren && isExpanded ? (
                               <span aria-hidden="true" className="pointer-events-none absolute top-5 -bottom-2.5 left-1/2 w-px bg-border sm:hidden" />
                             ) : null}
@@ -2253,7 +2256,7 @@ function StreamlinedIssuesList({
                             </button>
                           ) : (
                             <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                              <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
+                              <StatusIcon status={issueActivityStatus(issue, liveIssueIds?.has(issue.id))} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                             </span>
                           )
                         }
@@ -2280,7 +2283,7 @@ function StreamlinedIssuesList({
                               checklistStepNumber={checklistStepNumber}
                               statusSlot={(
                                 <span className="inline-flex items-center" onClick={(e) => { e.preventDefault(); e.stopPropagation(); }}>
-                                  <StatusIcon status={issue.status} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
+                                  <StatusIcon status={issueActivityStatus(issue, liveIssueIds?.has(issue.id))} externalConversationState={issue.externalConversationState} size="md" blockerAttention={issue.blockerAttention} onChange={(s) => onUpdateIssue(issue.id, { status: s })} />
                                 </span>
                               )}
                             />
