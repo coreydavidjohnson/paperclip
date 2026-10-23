@@ -1114,3 +1114,22 @@ compiler pin, timeout relaxation or semantic gate removal.
 - Tests: `server/src/__tests__/issue-queued-comments-routes.test.ts`,
   `server/src/__tests__/issue-thread-interactions-service.test.ts`,
   `server/src/__tests__/db-errors.test.ts`.
+
+## PER-316: finish queued interruption after a controller restart
+
+- Reproduced the crash window after queued-interrupt intent commits but before
+  its original run is cancelled: a fresh controller sees an active run and waits
+  forever instead of completing the saved request.
+- Persist that original running target in the existing queue receipt. The
+  periodic resumer revalidates issue, company, agent, queue, actor and target
+  under the issue-first fence, then cancels only that target outside the locks.
+  Admission and cleanup continue through the existing durable queue. Discarded,
+  reassigned, terminal and foreign-target receipts do not authorize a stop.
+- Old receipts without an explicit target never infer one from current state.
+  This does not fix normal comment-POST replay or enable automatic UI resends.
+- Inspected upstream `2cd6eb27c762cfdd6da7ab0b8da4b6a9eec0601e` has the same
+  active-run early return in its extracted heartbeat/run-control.ts. The new
+  upstream refresh timed out; no newer fix is claimed. Retire this carry when a
+  released queue resumer safely completes the same crash boundary.
+- Regression: issue-queued-comments-routes.test.ts, including real controller
+  cancellation, new-controller delivery, successor preservation and scope guards.

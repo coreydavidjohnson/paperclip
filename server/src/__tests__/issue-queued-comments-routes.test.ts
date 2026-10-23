@@ -573,6 +573,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
     const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
     expect(["queued", "coalesced"]).toContain(wake.status);
+    expect(wake.payload?.queuedCommentInterrupt).toMatchObject({ targetRunId: seeded.runId });
     const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
     expect(successor.status).toBe("queued");
     expect(successor.contextSnapshot).toMatchObject(seeded.context);
@@ -860,6 +861,35 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId)))
       .toHaveLength(owner === "same" ? 3 : 4);
   });
+
+  it.each(["other_issue", "other_agent", "missing", "old_receipt", "discarded", "reassigned", "terminal"])(
+    "does not stop a run from an invalid or stale durable interrupt: %s", async (kind) => {
+      const seeded = await seedQueue();
+      await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, seeded.agentId));
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+      const targetId = ["other_issue", "other_agent", "missing"].includes(kind) ? randomUUID() : seeded.runId;
+      const otherAgentId = randomUUID();
+      if (kind === "other_agent" || kind === "reassigned") await db.insert(agents).values({
+        id: otherAgentId, companyId: seeded.companyId, name: "Other", role: "engineer", adapterType: "claude_local",
+      });
+      if (kind === "other_issue" || kind === "other_agent") await db.insert(heartbeatRuns).values({
+        id: targetId, companyId: seeded.companyId, agentId: kind === "other_agent" ? otherAgentId : seeded.agentId,
+        status: "running", runtimeMode: "legacy", contextSnapshot: { issueId: kind === "other_issue" ? randomUUID() : seeded.issueId },
+      });
+      if (kind === "reassigned") await db.update(issues).set({ assigneeAgentId: otherAgentId }).where(eq(issues.id, seeded.issueId));
+      if (kind === "terminal") await db.update(issues).set({ status: "done" }).where(eq(issues.id, seeded.issueId));
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+      await db.update(agentWakeupRequests).set({ status: kind === "discarded" ? "cancelled" : wake.status,
+        payload: { ...wake.payload, queuedCommentInterrupt: { actorId: "queue-owner", requestedAt: new Date().toISOString(),
+          ...(kind === "old_receipt" ? {} : { targetRunId: targetId }),
+        } },
+      }).where(eq(agentWakeupRequests.id, seeded.wakeId));
+      await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+      for (const run of await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId))) {
+        expect(run.status).toBe("running");
+      }
+    },
+  );
 
   it("resumes the durable original interrupt target after a restart before cancellation", async () => {
     const seeded = await seedQueue();

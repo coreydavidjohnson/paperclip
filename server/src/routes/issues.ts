@@ -1,3 +1,4 @@
+import { operatorInterruptCancelOptions } from "../services/operator-interrupt.js";
 import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
 import { managedCompressionBlockUnchanged } from "../services/managed-compression-block.js";
 import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
@@ -7114,25 +7115,6 @@ export function issueRoutes(
     return { activeRun, wake, queueRun, state, queue, queueState };
   }
 
-  function operatorInterruptCancelOptions(input: { issueId: string; actor: ReturnType<typeof getActorInfo> }) {
-    return {
-      errorCode: "operator_interrupted",
-      resultJson: {
-        operatorInterrupted: true,
-        interruptionSource: "issue_comment_interrupt",
-        interruptedIssueId: input.issueId,
-        interruptedByActorType: input.actor.actorType,
-        interruptedByActorId: input.actor.actorId,
-      },
-      eventMessage: "run interrupted by board comment",
-      eventPayload: {
-        issueId: input.issueId,
-        source: "issue_comment_interrupt",
-        interruptedByActorType: input.actor.actorType,
-        interruptedByActorId: input.actor.actorId,
-      },
-    };
-  }
 
   /**
    * Refuse an agent creating a child issue assigned to the agent that created
@@ -15621,6 +15603,9 @@ export function issueRoutes(
         await tx.update(agentWakeupRequests).set({
           payload: { ...readObject(locked.wake.payload), queuedCommentInterrupt: {
             actorId: actor.actorId, requestedAt: new Date().toISOString(),
+            // A restart between this commit and cancelRun must resume this
+            // exact target, never whichever successor happens to be active.
+            targetRunId: locked.activeRun?.status === "running" ? locked.activeRun.id : null,
           } },
           updatedAt: new Date(),
         }).where(eq(agentWakeupRequests.id, locked.wake.id));
