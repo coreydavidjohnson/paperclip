@@ -2033,6 +2033,10 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).toHaveBeenCalledTimes(stale ? 0 : 1);
     const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
     expect(receipt!.evidence.continuationDelivery).toBe(stale ? "invalidated" : "pending");
+    await deliverReconciledExecutions(db, wake);
+    const audit = await db.select().from(activityLog).where(eq(activityLog.action, "issue.recovery_continuation_invalidated"));
+    expect(audit).toHaveLength(stale ? 1 : 0);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(receipt);
   });
 
   it("PER-1181 preserves the OmniGenT session instead of forcing a new one", async () => {
@@ -2129,8 +2133,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
-  it("reconciles a lost wake acknowledgement after the exact successor has already finished", async () => {
-    const { action, heartbeat, companyId, previousRunId } =
+  it.each([false, true])("reconciles a lost wake acknowledgement after the exact successor has already finished (later success: %s)", async (laterSuccess) => {
+    const { action, heartbeat, companyId, previousRunId, coderId, sourceIssueId } =
       await seedReconciledDelivery();
     await db.update(issueRecoveryActions).set({ resolvedAt: new Date("2026-10-15T02:35:26.611Z") }).where(eq(issueRecoveryActions.id, action.id));
     let successorId: string | undefined;
@@ -2146,6 +2150,13 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .update(heartbeatRuns)
       .set({ status: "succeeded", finishedAt: new Date() })
       .where(eq(heartbeatRuns.id, successorId!));
+    // Legacy OmniGenT successors may have been queued with the old true flag.
+    await db.update(agents).set({ adapterType: "omnigent" }).where(eq(agents.id, coderId));
+    if (laterSuccess) {
+      const runId = randomUUID();
+      await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "succeeded" });
+      await db.update(heartbeatRuns).set({ finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+    }
     await deliverReconciledExecutions(db, heartbeat.wakeup);
     const wakes = await db
       .select()
