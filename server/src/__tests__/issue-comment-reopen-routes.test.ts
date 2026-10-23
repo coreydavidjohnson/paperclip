@@ -2719,6 +2719,48 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
+  it("does not interrupt a successor run when a saved comment POST is replayed", async () => {
+    const issue = {
+      ...makeIssue("in_progress"),
+      executionRunId: "run-1",
+    };
+    mockIssueService.getById.mockImplementation(async () => ({ ...issue }));
+    mockHeartbeatService.getRun.mockImplementation(async (id: string) => ({
+      id,
+      companyId: issue.companyId,
+      agentId: issue.assigneeAgentId,
+      status: "running",
+    }));
+    mockHeartbeatService.cancelRun.mockImplementation(async (id: string) => ({
+      id,
+      companyId: issue.companyId,
+      agentId: issue.assigneeAgentId,
+      status: "cancelled",
+    }));
+    // The real service returns this same persisted row for this user/key/body.
+    // A lost HTTP receipt must not make replay cancel the successor execution.
+    const app = await installActor(createApp());
+    const payload = {
+      body: "hello",
+      interrupt: true,
+      clientRequestId: "77777777-7777-4777-8777-777777777777",
+    };
+    const first = await request(app)
+      .post(`/api/issues/${issue.id}/comments`)
+      .send(payload);
+    expect(first.status).toBe(201);
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledTimes(1);
+    expect(mockHeartbeatService.cancelRun.mock.calls[0]?.[0]).toBe("run-1");
+
+    issue.executionRunId = "run-2";
+    const replay = await request(app)
+      .post(`/api/issues/${issue.id}/comments`)
+      .send(payload);
+    expect(replay.status).toBe(201);
+    expect(replay.body.id).toBe(first.body.id);
+    expect(mockHeartbeatService.cancelRun).toHaveBeenCalledTimes(1);
+  });
+
   it("interrupts an active run before a combined comment update", async () => {
     const issue = {
       ...makeIssue("todo"),
