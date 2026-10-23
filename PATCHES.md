@@ -99,8 +99,8 @@ commits. There are no upstream issue or PR links by Corey's instruction.
   `6204239cfc8c3be79fc185cf3f468ebaa0ab1e3e` (2026-10-23), latest release
   `v2026.1012.0`. `execution-recovery-resolution.ts` still checks task owner
   and terminal status, not a newer successful turn, and forces fresh sessions.
-  No evidence establishes this delayed replay as intentional. Public report
-  awaits explicit external-message approval; do not publish private ticket IDs.
+  No evidence establishes this delayed replay as intentional. Operator direction on October 23
+  cancels public reporting. Keep upstream findings on PER-1181 only.
 - Why: an action resolved on October 15 was delivered on October 22 after a
   clean task turn, then failed because forced OmniGenT rotation lacked evidence.
   Read-only checks found 473 pending actions, 424 stale initially and 426 stale
