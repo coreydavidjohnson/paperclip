@@ -15,7 +15,8 @@ export function supersededRecoveryContinuationPredicate() {
       and recovery_success.finished_at > ${issueRecoveryActions.resolvedAt}
       and not exists (
         select 1 from agent_wakeup_requests recovery_ack
-        where recovery_ack.company_id = ${issueRecoveryActions.companyId}
+        where recovery_ack.id = recovery_success.wakeup_request_id
+          and recovery_ack.company_id = ${issueRecoveryActions.companyId}
           and recovery_ack.agent_id = ${issueRecoveryActions.returnOwnerAgentId}
           and recovery_ack.idempotency_key = 'execution-reconciliation:' || ${issueRecoveryActions.id}::text
           and recovery_ack.run_id = recovery_success.id
