@@ -919,12 +919,36 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId))).toHaveLength(2);
   });
 
+  it("keeps durable original interrupt delivery fenced without a verified process stop", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+      .where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+    await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+      status: "running", contextSnapshot: { issueId: randomUUID() },
+    });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await db.update(agentWakeupRequests).set({ payload: { ...wake.payload,
+      queuedCommentInterrupt: { actorId: "queue-owner", targetRunId: seeded.runId },
+    } }).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+    const [waiting] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    expect(waiting.status).toBe("deferred_issue_execution");
+    expect(waiting.payload?.executionWait).toMatchObject({ reason: "process_identity_missing" });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId))).toHaveLength(2);
+  });
+
   it.each(["issueId", "taskId"])("resumes the durable original interrupt target after a restart before cancellation: %s", async (contextKey) => {
     const seeded = await seedQueue();
     await db.update(agents).set({ adapterType: "claude_local",
       runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
     }).where(eq(agents.id, seeded.agentId));
-    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", contextSnapshot: { [contextKey]: seeded.issueId } }).where(eq(heartbeatRuns.id, seeded.runId));
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    testProcesses.set(seeded.runId, child);
+    runningProcesses.set(seeded.runId, { child, graceSec: 1, processGroupId: null });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", processPid: child.pid,
+      contextSnapshot: { [contextKey]: seeded.issueId },
+    }).where(eq(heartbeatRuns.id, seeded.runId));
     // Occupy the only slot: the test must not launch a model or adapter.
     await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
       status: "running", contextSnapshot: { issueId: randomUUID() },
