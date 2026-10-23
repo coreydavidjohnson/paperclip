@@ -35,6 +35,26 @@ describeEmbeddedPostgres("heartbeat list", () => {
     await tempDb?.cleanup();
   });
 
+  it("bounds default history and pages tied timestamps without gaps or foreign cursors", async () => {
+    const companyId = randomUUID(); const agentId = randomUUID();
+    const otherCompany = randomUUID(); const otherAgent = randomUUID();
+    await db.insert(companies).values([companyId, otherCompany].map(id => ({ id, name: "Pagination", issuePrefix: `T${id.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false })));
+    await db.insert(agents).values([{ id: agentId, companyId }, { id: otherAgent, companyId: otherCompany }].map(ids => ({ ...ids, name: "Pagination", role: "engineer", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} })));
+    const sameTime = new Date("2026-10-01T00:00:00Z");
+    await db.insert(heartbeatRuns).values(Array.from({ length: 205 }, () => ({ id: randomUUID(), companyId, agentId, invocationSource: "assignment", status: "succeeded", createdAt: sameTime })));
+    const foreignId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: foreignId, companyId: otherCompany, agentId: otherAgent, invocationSource: "assignment", createdAt: sameTime });
+    const service = heartbeatService(db);
+    expect(await service.list(companyId)).toHaveLength(200);
+    const one = await service.list(companyId, agentId, 100);
+    const two = await service.list(companyId, agentId, 100, { before: one.at(-1)!.id });
+    const three = await service.list(companyId, agentId, 100, { before: two.at(-1)!.id });
+    expect([one.length, two.length, three.length]).toEqual([100, 100, 5]);
+    expect(new Set([...one, ...two, ...three].map(run => run.id)).size).toBe(205);
+    expect(await service.list(companyId, agentId, 100, { before: foreignId })).toEqual([]);
+    expect(await service.list(companyId, agentId, 100, { before: randomUUID() })).toEqual([]);
+  });
+
   it("returns runs even when the linked db schema lacks processGroupId", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

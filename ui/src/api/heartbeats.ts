@@ -1,3 +1,4 @@
+import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@paperclipai/shared";
 import type { AgentAppearance } from "@paperclipai/shared";
 import type { IssueRecoveryAction } from "@paperclipai/shared";
 import type {
@@ -108,6 +109,7 @@ export type RuntimeRequestResolution =
 
 export interface HeartbeatRunListOptions {
   summary?: boolean;
+  before?: string;
 }
 
 export interface ProviderTraceInspection {
@@ -120,12 +122,13 @@ export const heartbeatsApi = {
   list: (
     companyId: string,
     agentId?: string,
-    limit?: number,
+    limit = HEARTBEAT_RUN_LIST_DEFAULT_LIMIT,
     options: HeartbeatRunListOptions = {},
   ) => {
     const searchParams = new URLSearchParams();
     if (agentId) searchParams.set("agentId", agentId);
-    if (limit) searchParams.set("limit", String(limit));
+    searchParams.set("limit", String(Number.isFinite(limit) ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, Math.trunc(limit))) : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT));
+    if (options.before) searchParams.set("before", options.before);
     if (options.summary) searchParams.set("summary", "true");
     const qs = searchParams.toString();
     return api.get<HeartbeatRun[]>(

@@ -503,3 +503,12 @@ This disposable fixture compares the real ownership, recovery-action and status
 delivery queries, including complete positional results and database plans.
 All data is synthetic. Query timings exclude process liveness probes, HTTP and
 provider work.
+
+### Bounded run-history API
+
+`GET /api/companies/:companyId/heartbeat-runs` always limits results: default
+200, maximum 1000. For older results send `limit=50&before=<last-row-id>`.
+`before` is a run UUID within the same company and optional agent filter.
+Rows sort by `createdAt DESC, id DESC`, including timestamp ties. A missing
+or out-of-scope cursor returns an empty page; malformed cursors return 400.
+This is pagination, not retention: detail/recovery records remain intact.

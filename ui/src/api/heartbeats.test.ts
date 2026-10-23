@@ -25,6 +25,16 @@ describe("heartbeatsApi.list", () => {
     mockApi.get.mockResolvedValue([]);
   });
 
+  it("bounds omitted limits for every caller", async () => {
+    await heartbeatsApi.list("company-1", "agent-1");
+    expect(mockApi.get).toHaveBeenCalledWith("/companies/company-1/heartbeat-runs?agentId=agent-1&limit=200");
+  });
+
+  it("passes an older-page cursor", async () => {
+    await heartbeatsApi.list("company-1", undefined, 50, { before: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" });
+    expect(mockApi.get).toHaveBeenCalledWith("/companies/company-1/heartbeat-runs?limit=50&before=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  });
+
   it("requests summary rows for hot-path history consumers", async () => {
     await heartbeatsApi.list("company-1", undefined, 200, { summary: true });
 

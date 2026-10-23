@@ -1066,3 +1066,27 @@ CLI because TypeScript 7 does not expose the old in-process compiler API.
 It compiles the actual two callback blocks and also requires the original
 mutable nullable-handle variant to fail with TS2345. No product behavior,
 compiler pin, timeout relaxation or semantic gate removal.
+
+## Bounded run history (PER-218)
+
+- Read-only upstream check on 2026-10-23: master `5ef783d97` contains
+  `ebeac833a63c2bdd19f9df757d982925b0f7fbd9` (2026-10-14,
+  `perf(runs): bound history and reduce repeated context reads`). This is not
+  in our deployed `12e3abaf9` fork. Backport only its 200-default / 1000-max
+  route, service and client bounds, plus selected-old-run fallback hook.
+- Private extension: `before=<last returned run UUID>` provides keyset pages
+  ordered by created_at DESC, id DESC. Cursor lookup is company/agent-scoped,
+  selects no saved blobs, and absent/foreign cursors return no rows. Invalid
+  cursor syntax returns 400. No new index or retained-data mutation.
+- AgentDetail variants explicitly request 200. Shared API bounds also cover
+  issue-page badge callers. Selected links outside the newest page fetch only
+  that run; normal authorization/redaction stays on the existing detail route.
+- Regression: heartbeat-list-bounds, heartbeat-list (205 tied timestamps),
+  agent-live-run-routes, UI heartbeats and useSelectedHeartbeatRun tests.
+- Remove this carry on adoption of a compatible released upstream bound and
+  deep-link fallback; preserve cursor API compatibility for existing clients.
+- No upstream issue, PR or comment was submitted.
+
+- Qualification reuses the verified 814ca51c test-only correction: two stale
+  20-second database setup hooks use the existing 90-second shared deadline.
+  Assertions and production deadlines are unchanged.

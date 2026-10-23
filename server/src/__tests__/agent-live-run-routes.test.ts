@@ -9,6 +9,7 @@ const mockAgentService = vi.hoisted(() => ({
 }));
 
 const mockHeartbeatService = vi.hoisted(() => ({
+  list: vi.fn(async () => []),
   buildRunOutputSilence: vi.fn(),
   decorateActiveRunStatus: vi.fn(),
   getRunIssueSummary: vi.fn(),
@@ -392,6 +393,17 @@ describe("agent live run routes", () => {
       skipped: 0,
       skipReasons: [],
     });
+  });
+
+  it.each([["", 200], ["?limit=50", 50], ["?limit=99999", 1000], ["?limit=invalid", 200]])("bounds history at the route (%s)", async (suffix, expected) => {
+    const response = await requestApp(await createApp(), url => request(url).get(`/api/companies/company-1/heartbeat-runs${suffix}`));
+    expect(response.status).toBe(200);
+    expect(mockHeartbeatService.list).toHaveBeenCalledWith("company-1", undefined, expected, { summary: false, before: undefined });
+  });
+  it("rejects malformed history cursors before the list query", async () => {
+    const response = await requestApp(await createApp(), url => request(url).get("/api/companies/company-1/heartbeat-runs?before=invalid"));
+    expect(response.status).toBe(400);
+    expect(mockHeartbeatService.list).not.toHaveBeenCalled();
   });
 
   describe("heartbeat run ID validation", () => {

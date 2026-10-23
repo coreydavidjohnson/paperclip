@@ -1,3 +1,4 @@
+import { HEARTBEAT_RUN_LIST_DEFAULT_LIMIT, HEARTBEAT_RUN_LIST_MAX_LIMIT } from "@paperclipai/shared";
 import { createCompletionTiming } from "./completion-timing.js";
 import { runListContextColumns, runListContextJoin } from "./run-history-query.js";
 import { externalObjectService } from "./external-objects.js";
@@ -30076,7 +30077,7 @@ export function heartbeatService(
       companyId: string,
       agentId?: string,
       limit?: number,
-      options: { summary?: boolean } = {},
+      options: { summary?: boolean; before?: string } = {},
     ) => {
       const safeForLegacyEncoding = await hasUnsafeTextProjectionDatabase();
       const summary = options.summary === true;
@@ -30102,16 +30103,22 @@ export function heartbeatService(
         .from(heartbeatRuns)
         .leftJoin(runListContextJoin, sql`true`)
         .where(
-          agentId
-            ? and(
-                eq(heartbeatRuns.companyId, companyId),
-                eq(heartbeatRuns.agentId, agentId),
-              )
-            : eq(heartbeatRuns.companyId, companyId),
+          and(
+            eq(heartbeatRuns.companyId, companyId),
+            agentId ? eq(heartbeatRuns.agentId, agentId) : undefined,
+            options.before ? sql`(${heartbeatRuns.createdAt}, ${heartbeatRuns.id}) < (
+              select cursor.created_at, cursor.id from heartbeat_runs cursor
+              where cursor.id = ${options.before}::uuid and cursor.company_id = ${companyId}::uuid
+                ${agentId ? sql`and cursor.agent_id = ${agentId}::uuid` : sql``}
+            )` : undefined,
+          ),
         )
-        .orderBy(desc(heartbeatRuns.createdAt));
+        .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
 
-      const rows = limit ? await query.limit(limit) : await query;
+      const boundedLimit = Number.isFinite(limit)
+        ? Math.max(1, Math.min(HEARTBEAT_RUN_LIST_MAX_LIMIT, Math.trunc(limit!)))
+        : HEARTBEAT_RUN_LIST_DEFAULT_LIMIT;
+      const rows = await query.limit(boundedLimit);
       return rows.map((row) => {
         const {
           contextIssueId,
