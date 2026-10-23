@@ -865,8 +865,14 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   it.each(["other_issue", "other_agent", "missing", "old_receipt", "discarded", "reassigned", "terminal"])(
     "does not stop a run from an invalid or stale durable interrupt: %s", async (kind) => {
       const seeded = await seedQueue();
-      await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, seeded.agentId));
+      await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+        .where(eq(agents.id, seeded.agentId));
       await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId)))[0].status).toBe("running");
+      // Fence paid dispatch even if a guard regression admits a successor.
+      await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+        status: "running", contextSnapshot: { issueId: randomUUID() },
+      });
       const targetId = ["other_issue", "other_agent", "missing"].includes(kind) ? randomUUID() : seeded.runId;
       const otherAgentId = randomUUID();
       if (kind === "other_agent" || kind === "reassigned") await db.insert(agents).values({
@@ -891,12 +897,34 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     },
   );
 
-  it("resumes the durable original interrupt target after a restart before cancellation", async () => {
+  it.each(["issueId", "taskId"])("keeps a deferred interrupt on its terminal original, not an active successor: %s", async (contextKey) => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+      .where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ status: "cancelled", runtimeMode: "legacy", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, seeded.runId));
+    const [successor] = await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+      status: "running", runtimeMode: "legacy", contextSnapshot: { [contextKey]: seeded.issueId },
+    }).returning();
+    await db.update(issues).set({ executionRunId: successor.id }).where(eq(issues.id, seeded.issueId));
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await db.update(agentWakeupRequests).set({ payload: { ...wake.payload,
+      queuedCommentInterrupt: { actorId: "queue-owner", targetRunId: seeded.runId },
+    } }).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await Promise.all([heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId),
+      heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId)]);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successor.id)))[0].status).toBe("running");
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId)))[0].status)
+      .toBe("deferred_issue_execution");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId))).toHaveLength(2);
+  });
+
+  it.each(["issueId", "taskId"])("resumes the durable original interrupt target after a restart before cancellation: %s", async (contextKey) => {
     const seeded = await seedQueue();
     await db.update(agents).set({ adapterType: "claude_local",
       runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
     }).where(eq(agents.id, seeded.agentId));
-    await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", contextSnapshot: { [contextKey]: seeded.issueId } }).where(eq(heartbeatRuns.id, seeded.runId));
     // Occupy the only slot: the test must not launch a model or adapter.
     await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
       status: "running", contextSnapshot: { issueId: randomUUID() },
@@ -905,8 +933,9 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     // Exact crash boundary: the route committed intent, but never called cancelRun.
     await db.update(agentWakeupRequests).set({ payload: { ...before.payload,
       queuedCommentInterrupt: { actorId: "queue-owner", requestedAt: new Date().toISOString(), targetRunId: seeded.runId },
-    } }).where(eq(agentWakeupRequests.id, seeded.wakeId));
-    await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+    }, updatedAt: new Date(0) }).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    // Use the production periodic scanner, including concurrent fresh controllers.
+    await Promise.all([heartbeatService(db).resumeQueuedRuns(), heartbeatService(db).resumeQueuedRuns()]);
     const [stopped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
     expect(stopped.status).toBe("cancelled");
     expect(stopped.resultJson).toMatchObject({ operatorInterrupted: true,

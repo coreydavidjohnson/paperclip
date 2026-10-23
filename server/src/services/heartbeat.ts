@@ -10435,8 +10435,9 @@ export function heartbeatService(
         const [original] = await tx.select().from(heartbeatRuns).where(and(
           eq(heartbeatRuns.id, targetRunId), eq(heartbeatRuns.companyId, companyId),
           eq(heartbeatRuns.agentId, wake.agentId),
-          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
-        )).for("update");
+          or(sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+            sql`${heartbeatRuns.contextSnapshot}->>'taskId' = ${issueId}`),
+        ));
         if (!original || (original.status !== "running" && !isHeartbeatRunTerminalStatus(original.status))) return false;
         return original.status === "running" ? original.id : null;
       });
@@ -10445,7 +10446,7 @@ export function heartbeatService(
       // workers can only retry the recorded original, not a newer execution.
       if (target) {
         const options = operatorInterruptCancelOptions({ issueId, actor: { actorType: "user", actorId } });
-        await cancelRun(target, "Interrupted to send queued messages", {
+        await cancelRunInternal(target, "Interrupted to send queued messages", {
           ...options, suppressImmediateRecovery: true,
           resultJson: { ...options.resultJson, queuedCommentInterruptQueueId: queueId },
         });
@@ -10456,7 +10457,8 @@ export function heartbeatService(
     const [active] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
       eq(heartbeatRuns.agentId, wake.agentId),
-      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+      or(sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+        sql`${heartbeatRuns.contextSnapshot}->>'taskId' = ${issueId}`),
       inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
     )).limit(1);
     if (active) return;

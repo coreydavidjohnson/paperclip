@@ -7115,7 +7115,6 @@ export function issueRoutes(
     return { activeRun, wake, queueRun, state, queue, queueState };
   }
 
-
   /**
    * Refuse an agent creating a child issue assigned to the agent that created
    * a still-open ancestor in the same chain. That shape is a delegation cycle
