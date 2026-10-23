@@ -41,7 +41,7 @@ describeEmbeddedPostgres("heartbeat list", () => {
     await db.insert(companies).values([companyId, otherCompany].map(id => ({ id, name: "Pagination", issuePrefix: `T${id.replace(/-/g, "").slice(0, 6).toUpperCase()}`, requireBoardApprovalForNewAgents: false })));
     await db.insert(agents).values([{ id: agentId, companyId }, { id: otherAgent, companyId: otherCompany }].map(ids => ({ ...ids, name: "Pagination", role: "engineer", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {} })));
     const sameTime = new Date("2026-10-01T00:00:00Z");
-    await db.insert(heartbeatRuns).values(Array.from({ length: 205 }, () => ({ id: randomUUID(), companyId, agentId, invocationSource: "assignment", status: "succeeded", createdAt: sameTime })));
+    await db.insert(heartbeatRuns).values(Array.from({ length: 205 }, () => ({ id: randomUUID(), companyId, agentId, invocationSource: "assignment" as const, status: "succeeded" as const, createdAt: sameTime })));
     const foreignId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: foreignId, companyId: otherCompany, agentId: otherAgent, invocationSource: "assignment", createdAt: sameTime });
     const service = heartbeatService(db);
