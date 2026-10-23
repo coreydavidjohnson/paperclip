@@ -941,7 +941,9 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(stopped.resultJson).toMatchObject({ operatorInterrupted: true,
       interruptedIssueId: seeded.issueId, queuedCommentInterruptQueueId: seeded.wakeId });
     const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
-    expect(delivered.status).toBe("coalesced");
+    const runStates = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId)))
+      .map(run => ({ id: run.id, status: run.status, context: run.contextSnapshot, result: run.resultJson }));
+    expect(delivered.status, JSON.stringify({ delivered, runStates })).toBe("coalesced");
     const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, delivered.runId!));
     expect(successor).toMatchObject({ status: "queued", agentId: seeded.agentId });
     expect(successor.contextSnapshot?.wakeCommentIds).toEqual(seeded.commentIds);
