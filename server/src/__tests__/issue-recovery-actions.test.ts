@@ -32,6 +32,7 @@ import {
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
+import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
@@ -2043,6 +2044,51 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]!.evidence.continuationDelivery).toBe("pending");
   });
 
+  it("PER-1181 rechecks a success committed between sweep and admission", async () => {
+    const { action, heartbeat, companyId, coderId, sourceIssueId } = await seedReconciledDelivery();
+    const resolvedAt = new Date("2026-10-15T02:35:26.611Z");
+    await db.update(issueRecoveryActions).set({ resolvedAt }).where(eq(issueRecoveryActions.id, action.id));
+    await deliverReconciledExecutions(db, async (...args) => {
+      const runId = randomUUID();
+      await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "succeeded" });
+      await db.update(heartbeatRuns).set({ finishedAt: new Date(resolvedAt.getTime() + 1) }).where(eq(heartbeatRuns.id, runId));
+      return heartbeat.wakeup(...args);
+    });
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]!.evidence.continuationDelivery).toBe("invalidated");
+  });
+
+  it("PER-1181 admits an OmniGenT recovery without a forced fresh session", async () => {
+    const { action, heartbeat, coderId } = await seedReconciledDelivery();
+    await db.update(agents).set({ adapterType: "omnigent" }).where(eq(agents.id, coderId));
+    await deliverReconciledExecutions(db, (...args) => heartbeat.wakeup(args[0], {
+      ...args[1], contextSnapshot: { ...args[1].contextSnapshot, forceFreshSession: false },
+    }));
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action.id}`));
+    expect(wake).toMatchObject({ status: "queued" });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake!.runId!));
+    expect(run!.contextSnapshot?.forceFreshSession).toBe(false);
+  });
+
+  it.each(["queued", "running"] as const)("PER-1181 cancels an overtaken recovery before %s dispatch without releasing another execution", async (status) => {
+    const { action, heartbeat, companyId, coderId, sourceIssueId } = await seedReconciledDelivery();
+    const resolvedAt = new Date("2026-10-15T02:35:26.611Z");
+    await db.update(issueRecoveryActions).set({ resolvedAt }).where(eq(issueRecoveryActions.id, action.id));
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action.id}`));
+    expect(wake).toBeDefined();
+    await db.update(heartbeatRuns).set({ status }).where(eq(heartbeatRuns.id, wake!.runId!));
+    const successId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: successId, issueId: sourceIssueId, status: "succeeded" });
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(resolvedAt.getTime() + 1) }).where(eq(heartbeatRuns.id, successId));
+    await db.update(issues).set({ executionRunId: successId }).where(eq(issues.id, sourceIssueId));
+    const dispatch = createPostgresRunDispatchAdapter(db);
+    const result = await dispatch.cancelStaleQueuedRun({ companyId, runId: wake!.runId!, now: new Date(), expectedStatus: status });
+    expect(result).toMatchObject({ outcome: "cancelled", errorCode: "recovery_continuation_superseded" });
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id)))[0]!.status).toBe("skipped");
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]!.executionRunId).toBe(successId);
+  });
+
   it("delivers a reconciled execution once across concurrent sweeps without a deferred duplicate", async () => {
     const { action, heartbeat } = await seedReconciledDelivery();
     let entered = 0;
@@ -2084,6 +2130,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
   it("reconciles a lost wake acknowledgement after the exact successor has already finished", async () => {
     const { action, heartbeat, companyId, previousRunId } =
       await seedReconciledDelivery();
+    await db.update(issueRecoveryActions).set({ resolvedAt: new Date("2026-10-15T02:35:26.611Z") }).where(eq(issueRecoveryActions.id, action.id));
     let successorId: string | undefined;
     await deliverReconciledExecutions(db, async (...args) => {
       const run = await heartbeat.wakeup(...args);
