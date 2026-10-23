@@ -33,6 +33,20 @@ describe("private API metrics", () => {
     expect(text).not.toMatch(/sensitive|secret-id/);
   });
 
+  it("preserves the matched API template when an app-level error handler sends the response", async () => {
+    const metrics = createApiMetrics();
+    const app = express();
+    const router = express.Router();
+    app.use(metrics.middleware);
+    router.post("/issues/:id/comments", () => { throw new Error("private failure"); });
+    app.use("/api", router);
+    const handler: express.ErrorRequestHandler = (_err, _req, res, _next) => { res.status(500).end(); };
+    app.use(handler);
+    await request(app).post("/api/issues/private-id/comments");
+    expect(metrics.render()).toContain('paperclip_api_request_duration_seconds_count{method="POST",route="/api/issues/:id/comments",status="500"} 1');
+    expect(metrics.render()).not.toContain("private");
+  });
+
   it("exports cumulative buckets, sum, process start and closed failure counters", async () => {
     const metrics = createApiMetrics();
     const app = express();
