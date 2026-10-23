@@ -13,7 +13,13 @@ export function supersededRecoveryContinuationPredicate() {
       and coalesce(recovery_success.native_issue_id::text, recovery_success.context_snapshot->>'issueId') = ${issueRecoveryActions.sourceIssueId}::text
       and recovery_success.status = 'succeeded'
       and recovery_success.finished_at > ${issueRecoveryActions.resolvedAt}
-      and not exists (
+      and not ${exactRecoverySuccessorPredicate()}
+  )`;
+}
+
+// Both callers bind the indexed heartbeat alias recovery_success.
+function exactRecoverySuccessorPredicate() {
+  return sql`exists (
         select 1 from agent_wakeup_requests recovery_ack
         where recovery_ack.id = recovery_success.wakeup_request_id
           and recovery_ack.company_id = ${issueRecoveryActions.companyId}
@@ -27,8 +33,7 @@ export function supersededRecoveryContinuationPredicate() {
           and recovery_ack.payload->>'recoveryActionId' = ${issueRecoveryActions.id}::text
           and recovery_success.context_snapshot->>'recoveryActionId' = ${issueRecoveryActions.id}::text
           and recovery_success.context_snapshot->>'previousRunId' = ${issueRecoveryActions.evidence}->'executionReconciliation'->>'runId'
-      )
-  )`;
+      )`;
 }
 
 /** Caller owns the transaction (and the issue/action locks during admission).
@@ -52,6 +57,14 @@ export async function invalidateSupersededRecoveryContinuations(
     sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
     action ? and(eq(issueRecoveryActions.companyId, action.companyId), eq(issueRecoveryActions.id, action.id)) : undefined,
     supersededRecoveryContinuationPredicate(),
+    // Lost acknowledgements are deliveries, even if another turn later won.
+    // Let the existing idempotent admission path record that committed run.
+    sql`not exists (
+      select 1 from heartbeat_runs recovery_success
+      where recovery_success.company_id = ${issueRecoveryActions.companyId}
+        and coalesce(recovery_success.native_issue_id::text, recovery_success.context_snapshot->>'issueId') = ${issueRecoveryActions.sourceIssueId}::text
+        and ${exactRecoverySuccessorPredicate()}
+    )`,
   )).returning({ id: issueRecoveryActions.id, companyId: issueRecoveryActions.companyId, issueId: issueRecoveryActions.sourceIssueId });
   for (const row of invalidated) {
     await persistActivity(db, {
