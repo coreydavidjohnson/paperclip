@@ -861,6 +861,39 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .toHaveLength(owner === "same" ? 3 : 4);
   });
 
+  it("resumes the durable original interrupt target after a restart before cancellation", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "claude_local",
+      runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
+    }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+    // Occupy the only slot: the test must not launch a model or adapter.
+    await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+      status: "running", contextSnapshot: { issueId: randomUUID() },
+    });
+    const [before] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    // Exact crash boundary: the route committed intent, but never called cancelRun.
+    await db.update(agentWakeupRequests).set({ payload: { ...before.payload,
+      queuedCommentInterrupt: { actorId: "queue-owner", requestedAt: new Date().toISOString(), targetRunId: seeded.runId },
+    } }).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+    const [stopped] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    expect(stopped.status).toBe("cancelled");
+    expect(stopped.resultJson).toMatchObject({ operatorInterrupted: true,
+      interruptedIssueId: seeded.issueId, queuedCommentInterruptQueueId: seeded.wakeId });
+    const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    expect(delivered.status).toBe("coalesced");
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, delivered.runId!));
+    expect(successor).toMatchObject({ status: "queued", agentId: seeded.agentId });
+    expect(successor.contextSnapshot?.wakeCommentIds).toEqual(seeded.commentIds);
+    // Replays through new controllers cannot interrupt that successor.
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, successor.id));
+    await Promise.all([heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId),
+      heartbeatService(db).resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId)]);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successor.id)))[0].status).toBe("running");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId))).toHaveLength(3);
+  });
+
   it.each(["user", "system"])("keeps stopped-run interruption intent on a %s receipt across restart until the process stops, then delivers once", async (actorType) => {
     const seeded = await seedQueue();
     await db.update(agentWakeupRequests).set({ requestedByActorType: actorType })
