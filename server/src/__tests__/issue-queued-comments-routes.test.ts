@@ -919,6 +919,40 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId))).toHaveLength(2);
   });
 
+  it.each([false, true])("does not stop a successor on normal keyed comment replay (conflicting body: %s)", async conflicting => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "claude_local",
+      runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
+    }).where(eq(agents.id, seeded.agentId));
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    testProcesses.set(seeded.runId, child);
+    runningProcesses.set(seeded.runId, { child, graceSec: 1, processGroupId: null });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", processPid: child.pid })
+      .where(eq(heartbeatRuns.id, seeded.runId));
+    // Keep any accidentally admitted follow-up queued; never invoke a model.
+    await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+      status: "running", contextSnapshot: { issueId: randomUUID() },
+    });
+    const clientRequestId = randomUUID();
+    // A prior request already committed this input. The current process is a
+    // successor and must not inherit the old request's authority to interrupt.
+    const saved = await issueService(db).addComment(seeded.issueId, "Saved original input", {
+      userId: "queue-owner",
+    }, { clientRequestId, authorType: "user" });
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+      body: conflicting ? "Different input under the old key" : saved.body,
+      clientRequestId, interrupt: true,
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(conflicting ? 409 : 201);
+    if (!conflicting) expect(response.body.id).toBe(saved.id);
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    expect(successor.status).toBe("running");
+    expect(successor.resultJson).not.toHaveProperty("executionCancellation");
+    const keyedComments = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId));
+    expect(keyedComments).toHaveLength(1);
+    expect(keyedComments[0].body).toBe(saved.body);
+  });
+
   it("keeps durable original interrupt delivery fenced without a verified process stop", async () => {
     const seeded = await seedQueue();
     await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
