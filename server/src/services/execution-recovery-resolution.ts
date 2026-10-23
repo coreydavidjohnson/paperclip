@@ -1,3 +1,4 @@
+import { invalidateSupersededRecoveryContinuations } from "./recovery-continuation-staleness.js";
 import { managedCompressionBlockForTransition } from "./managed-compression-block.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
@@ -8,6 +9,7 @@ import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
 import { and, eq, inArray, isNull, not, or, sql } from "drizzle-orm";
 import {
+  agents,
   chatActions,
   environmentLeases,
   heartbeatRuns,
@@ -206,6 +208,8 @@ export async function deliverReconciledExecutions(
   db: Db,
   wake: ReturnType<typeof import("./heartbeat.js").heartbeatService>["wakeup"],
 ) {
+  const invalidated = await db.transaction(tx => invalidateSupersededRecoveryContinuations(tx as unknown as Db));
+  if (invalidated) logger.info({ invalidated }, "Invalidated superseded recovery continuations");
   const pending = await db
     .select()
     .from(issueRecoveryActions)
@@ -250,6 +254,9 @@ export async function deliverReconciledExecutions(
           .where(pendingDecision);
         continue;
       }
+      const [owner] = await db.select({ adapterType: agents.adapterType }).from(agents).where(and(
+        eq(agents.companyId, action.companyId), eq(agents.id, action.returnOwnerAgentId),
+      ));
       const run = await wake(action.returnOwnerAgentId, {
         source: "automation",
         triggerDetail: "system",
@@ -264,7 +271,9 @@ export async function deliverReconciledExecutions(
           recoveryActionId: action.id,
           previousRunId: decision.runId,
           retryOfRunId: decision.runId,
-          forceFreshSession: true,
+          // OmniGenT owns verified unhealthy-session rotation. A recovery
+          // decision does not authorize replacing a healthy provider session.
+          forceFreshSession: owner?.adapterType !== "omnigent",
           wakeReason: "issue_recovery_action_restored",
           source: "execution.reconciled",
         },

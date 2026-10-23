@@ -1,3 +1,4 @@
+import { supersededRecoveryContinuationPredicate } from "../../../services/recovery-continuation-staleness.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -951,6 +952,19 @@ export function createPostgresRunDispatchAdapter(
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) return { issueId: null, facts: null, decision: { stale: false as const } };
+    if (contextSnapshot.source === "execution.reconciled" && typeof contextSnapshot.recoveryActionId === "string") {
+      const [superseded] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+        eq(issueRecoveryActions.companyId, run.companyId),
+        eq(issueRecoveryActions.sourceIssueId, issueId),
+        sql`${issueRecoveryActions.id}::text = ${contextSnapshot.recoveryActionId}`,
+        supersededRecoveryContinuationPredicate(),
+      )).limit(1);
+      if (superseded) return { issueId, facts: null, decision: { stale: true as const,
+        errorCode: "recovery_continuation_superseded" as const,
+        reason: "Recovery continuation cancelled because this task already completed a newer successful turn.",
+        details: { issueId, recoveryActionId: superseded.id },
+      } };
+    }
     const recovery = await getExecutionBlocker(tx, run.companyId, issueId, { conversationResetCommentId: deriveCommentId(contextSnapshot) });
     if (recovery) return { issueId, facts: null, decision: { stale: true as const,
       errorCode: "execution_reconciliation_required" as const, reason: recovery.nextAction,

@@ -108,6 +108,7 @@ export type ScheduledRetryFacts = {
 };
 
 export type QueuedRunStalenessErrorCode =
+  | "recovery_continuation_superseded"
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
   | "issue_not_found"

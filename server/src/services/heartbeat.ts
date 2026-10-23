@@ -1,3 +1,4 @@
+import { invalidateSupersededRecoveryContinuations } from "./recovery-continuation-staleness.js";
 import { createCompletionTiming } from "./completion-timing.js";
 import { runListContextColumns, runListContextJoin } from "./run-history-query.js";
 import { externalObjectService } from "./external-objects.js";
@@ -27786,7 +27787,7 @@ export function heartbeatService(
               opts.requestedByActorId !== "execution-recovery" ||
               opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
               enrichedContextSnapshot.source !== "execution.reconciled" ||
-              enrichedContextSnapshot.forceFreshSession !== true ||
+              enrichedContextSnapshot.forceFreshSession !== (agent.adapterType !== "omnigent") ||
               payload?.issueId !== issue.id ||
               payload?.recoveryActionId !== actionId ||
               issue.assigneeAgentId !== agentId ||
@@ -27874,6 +27875,10 @@ export function heartbeatService(
               return { kind: "replayed" as const, run: existingRun };
             }
             if (action.evidence.continuationDelivery !== "pending")
+              return { kind: "skipped" as const };
+            // Recheck after idempotent acknowledgement, under issue/action locks.
+            // A clean turn may have committed since the recovery sweep read.
+            if (await invalidateSupersededRecoveryContinuations(tx as unknown as Db, action))
               return { kind: "skipped" as const };
             const [reconciledRun] = await tx.select().from(heartbeatRuns).where(and(
               eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.id, sourceRunId),
