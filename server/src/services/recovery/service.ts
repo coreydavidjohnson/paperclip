@@ -943,6 +943,7 @@ export function recoveryService(
     beforeOrphanedRunTerminalWrite?: (runId: string) => Promise<void>;
   },
 ) {
+  const recoveryDb = db;
   const issuesSvc = issueService(db);
   const recoveryActionsSvc = issueRecoveryActionService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -2551,7 +2552,8 @@ export function recoveryService(
     previousStatus: StrandedPreviousStatus;
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
-  }) {
+  }, db: Db = recoveryDb) {
+    const recoveryActionsSvc = issueRecoveryActionService(db);
     const recoveryCause = resolveStrandedRecoveryCause(
       input.latestRun,
       input.recoveryCause,
@@ -2680,7 +2682,7 @@ export function recoveryService(
     latestRun: LatestIssueRun;
     actionId: string;
     agentId: string;
-  }) {
+  }, db: Db = recoveryDb) {
     const existing = await db
       .select()
       .from(heartbeatRuns)
@@ -2815,83 +2817,86 @@ export function recoveryService(
     previousStatus: StrandedPreviousStatus;
     latestRun: LatestIssueRun;
   }) {
-    const updated = await issuesSvc.update(input.issue.id, {
-      status: "blocked",
-    });
-    if (!updated) return null;
+    return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
+      const issuesSvc = issueService(db);
+      const updated = await issuesSvc.update(input.issue.id, {
+        status: "blocked", companyGuard: input.issue.companyId,
+      }, db, publications, postCommitActions);
+      if (!updated) return null;
 
-    const prefix = await getCompanyIssuePrefix(input.issue.companyId);
-    await issuesSvc.addComment(
-      input.issue.id,
-      buildRecoveryIssueInPlaceEscalationComment({
-        issue: input.issue,
-        previousStatus: input.previousStatus,
-        latestRun: input.latestRun,
-        prefix,
-      }),
-      {},
-      {
-        authorType: "system",
-        presentation: compactRecoveryPresentation(
-          "Recovery: recovery attempt failed — remains blocked",
-        ),
-        metadata: {
-          version: 1,
-          sourceRunId: input.latestRun?.id ?? null,
-          sections: [
-            {
-              title: "Recovery",
-              rows: [
-                {
-                  type: "key_value",
-                  label: "Cause",
-                  value: "recovery_issue_failed",
-                },
-                {
-                  type: "key_value",
-                  label: "Previous status",
-                  value: input.previousStatus,
-                },
-                ...(input.latestRun
-                  ? [
-                      {
-                        type: "run_link" as const,
-                        label: "Latest run",
-                        runId: input.latestRun.id,
-                        title: input.latestRun.status,
-                      },
-                    ]
-                  : []),
-              ],
-            },
-          ],
+      const prefix = await getCompanyIssuePrefix(input.issue.companyId);
+      await issuesSvc.addComment(
+        input.issue.id,
+        buildRecoveryIssueInPlaceEscalationComment({
+          issue: input.issue,
+          previousStatus: input.previousStatus,
+          latestRun: input.latestRun,
+          prefix,
+        }),
+        {},
+        {
+          authorType: "system",
+          presentation: compactRecoveryPresentation(
+            "Recovery: recovery attempt failed — remains blocked",
+          ),
+          metadata: {
+            version: 1,
+            sourceRunId: input.latestRun?.id ?? null,
+            sections: [
+              {
+                title: "Recovery",
+                rows: [
+                  {
+                    type: "key_value",
+                    label: "Cause",
+                    value: "recovery_issue_failed",
+                  },
+                  {
+                    type: "key_value",
+                    label: "Previous status",
+                    value: input.previousStatus,
+                  },
+                  ...(input.latestRun
+                    ? [
+                        {
+                          type: "run_link" as const,
+                          label: "Latest run",
+                          runId: input.latestRun.id,
+                          title: input.latestRun.status,
+                        },
+                      ]
+                    : []),
+                ],
+              },
+            ],
+          },
         },
-      },
-    );
+      );
 
-    await logActivity(db, {
-      companyId: input.issue.companyId,
-      actorType: "system",
-      actorId: "system",
-      agentId: null,
-      runId: null,
-      action: "issue.updated",
-      entityType: "issue",
-      entityId: input.issue.id,
-      details: {
-        identifier: input.issue.identifier,
-        status: "blocked",
-        previousStatus: input.previousStatus,
-        source: "recovery.reconcile_stranded_recovery_issue",
-        latestRunId: input.latestRun?.id ?? null,
-        latestRunStatus: input.latestRun?.status ?? null,
-        latestRunErrorCode: input.latestRun?.errorCode ?? null,
-        originKind: input.issue.originKind,
-        originId: input.issue.originId,
-      },
-    });
+      await logActivity(db, {
+        companyId: input.issue.companyId,
+        actorType: "system",
+        actorId: "system",
+        agentId: null,
+        runId: null,
+        action: "issue.updated",
+        entityType: "issue",
+        entityId: input.issue.id,
+        details: {
+          identifier: input.issue.identifier,
+          status: "blocked",
+          previousStatus: input.previousStatus,
+          source: "recovery.reconcile_stranded_recovery_issue",
+          latestRunId: input.latestRun?.id ?? null,
+          latestRunStatus: input.latestRun?.status ?? null,
+          latestRunErrorCode: input.latestRun?.errorCode ?? null,
+          originKind: input.issue.originKind,
+          originId: input.issue.originId,
+        },
+      }, publications);
 
-    return updated;
+      return updated;
+    }, false, input.latestRun?.id);
   }
 
   async function existingBlockerIssueIds(companyId: string, issueId: string) {
@@ -2972,27 +2977,62 @@ export function recoveryService(
     return openChildren;
   }
 
+  async function mutateUnchangedRecoverySource<T>(
+    observed: typeof issues.$inferSelect,
+    mutate: (tx: Db, current: typeof issues.$inferSelect,
+      publications: ActivityPublication[], actions: IssuePostCommitAction[]) => Promise<T | null>,
+    rejectDurableWait = false,
+    sourceRunId?: string,
+  ) {
+    const publications: ActivityPublication[] = [];
+    const actions: IssuePostCommitAction[] = [];
+    const result = await db.transaction(async tx => {
+      // Queue admission and recovery use the same source lock. Observations
+      // made before this lock cannot revoke a newer accepted execution.
+      const [current] = await tx.select().from(issues).where(and(
+        eq(issues.companyId, observed.companyId), eq(issues.id, observed.id),
+      )).for("update");
+      if (!current || current.hiddenAt
+        || current.status !== observed.status
+        || current.statusVersion !== observed.statusVersion
+        || current.lastStatusDecisionId !== observed.lastStatusDecisionId
+        || current.updatedAt.getTime() !== observed.updatedAt.getTime()
+        || current.assigneeAgentId !== observed.assigneeAgentId
+        || current.assigneeUserId !== observed.assigneeUserId
+        || current.checkoutRunId !== observed.checkoutRunId
+        || current.executionRunId !== observed.executionRunId) return null;
+      // Escalation can retain a failed review stage or a pending question;
+      // those controls are not permission to start work and remain unchanged.
+      // Disposition repair, unlike failure escalation, requires no wait path.
+      // Only the persisted terminal source run can identify a consumed wake.
+      // A wake requeued with a cleared/changed run binding is a new path.
+      const [consumedWake] = sourceRunId ? await tx.select({ id: agentWakeupRequests.id })
+        .from(heartbeatRuns).innerJoin(agentWakeupRequests, and(
+          eq(agentWakeupRequests.id, heartbeatRuns.wakeupRequestId),
+          eq(agentWakeupRequests.runId, heartbeatRuns.id),
+          eq(agentWakeupRequests.companyId, heartbeatRuns.companyId),
+          eq(agentWakeupRequests.agentId, heartbeatRuns.agentId),
+        )).where(and(
+          eq(heartbeatRuns.id, sourceRunId),
+          eq(heartbeatRuns.companyId, current.companyId),
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${current.id}`,
+          inArray(heartbeatRuns.status, [...TERMINAL_HEARTBEAT_RUN_STATUSES]),
+        )).for("update") : [];
+      const paths = await collectDispositionRepairSourceState(tx, {
+        issue: current, excludeWakeupRequestId: consumedWake?.id,
+      });
+      if (paths.hasActiveExecutionPath || (rejectDurableWait && paths.hasDurableWaitingPath)) return null;
+      return mutate(tx as unknown as Db, current, publications, actions);
+    });
+    for (const publication of publications) publishActivity(publication);
+    await executeIssuePostCommitActions(db, actions);
+    return result;
+  }
+
   async function resolveContinuationWaitingOnReview(
     issue: typeof issues.$inferSelect,
   ) {
-    const publications: ActivityPublication[] = [];
-    const postCommitActions: IssuePostCommitAction[] = [];
-    const result = await db.transaction(async (tx) => {
-      // Recovery observes outside this lock. A newer accepted path wins.
-      const [current] = await tx.select().from(issues).where(and(
-        eq(issues.companyId, issue.companyId), eq(issues.id, issue.id),
-      )).for("update");
-      if (!current || current.hiddenAt
-        || current.status !== issue.status
-        || current.statusVersion !== issue.statusVersion
-        || current.lastStatusDecisionId !== issue.lastStatusDecisionId
-        || current.updatedAt.getTime() !== issue.updatedAt.getTime()
-        || current.assigneeAgentId !== issue.assigneeAgentId
-        || current.assigneeUserId !== issue.assigneeUserId
-        || current.checkoutRunId !== issue.checkoutRunId
-        || current.executionRunId !== issue.executionRunId) return null;
-      const paths = await collectDispositionRepairSourceState(tx, { issue: current });
-      if (paths.hasActiveExecutionPath) return null;
+    const result = await mutateUnchangedRecoverySource(issue, async (tx, current, publications, postCommitActions) => {
       // Only explicit current links establish dependencies, never children.
       const blockers = await existingUnresolvedBlockerIssues(current.companyId, current.id, tx);
       if (blockers.length === 0) return null;
@@ -3002,8 +3042,6 @@ export function recoveryService(
       return updated ? { updated, blockers } : null;
     });
     if (!result) return null;
-    for (const publication of publications) publishActivity(publication);
-    await executeIssuePostCommitActions(db, postCommitActions);
     const { updated, blockers } = result;
     const blockedByIssueIds = blockers.map(row => row.id);
     const waitingOn = formatIssueLinksForComment(blockers);
@@ -3123,7 +3161,8 @@ export function recoveryService(
     fingerprint: string;
     attemptCount: number;
     legacyEpisode?: LegacyDispositionEpisode;
-  }) {
+  }, db: Db = recoveryDb) {
+    const recoveryActionsSvc = issueRecoveryActionService(db);
     let active = await recoveryActionsSvc.getActiveForIssue(
       input.issue.companyId,
       input.issue.id,
@@ -3612,141 +3651,144 @@ export function recoveryService(
     terminalReason: string;
     legacyEpisode?: LegacyDispositionEpisode;
   }) {
-    const action = await ensureDispositionRepairAction({
-      issue: input.issue,
-      latestRun: input.latestRun,
-      fingerprint: input.fingerprint,
-      attemptCount: input.attemptCount,
-      legacyEpisode: input.legacyEpisode,
-    });
-    const now = new Date();
-    await db
-      .update(issueRecoveryActions)
-      .set({
-        status: "active",
-        ownerType: "board",
-        ownerAgentId: null,
-        ownerUserId: null,
-        maxAttempts: null,
-        evidence: {
-          ...action.evidence,
-          latestRunId: input.latestRun?.id ?? null,
-          latestRunStatus: input.latestRun?.status ?? null,
-          latestRunErrorCode: input.latestRun?.errorCode ?? null,
-          terminalReason: input.terminalReason,
-          sourceAttemptCount: input.attemptCount,
-          sourceMaxAttempts: input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS,
-          routingPolicy: STRANDED_BOARD_ESCALATION_POLICY,
-        },
-        nextAction:
-          "Inspect the evidence and choose whether to repair, retry the original owner, explicitly reassign, or resolve the source issue.",
-        wakePolicy: {
-          type: "board_escalation",
-          reason: input.terminalReason,
-          preservesSourceAssignee: true,
-        },
-        timeoutAt: null,
-        resolutionNote: input.terminalReason,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(issueRecoveryActions.id, action.id),
-          eq(issueRecoveryActions.companyId, input.issue.companyId),
-        ),
-      );
-
-    const updated = await issuesSvc.update(input.issue.id, {
-      status: "blocked",
-    });
-    if (!updated) return null;
-    const sourceAssigneePreserved =
-      updated.assigneeAgentId === input.issue.assigneeAgentId &&
-      updated.assigneeUserId === input.issue.assigneeUserId;
-
-    await issuesSvc.addComment(
-      input.issue.id,
-      [
-        "Paperclip exhausted the bounded original-owner disposition repair without a durable source-state change.",
-        "",
-        `- Attempts: ${input.attemptCount}/${input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS}`,
-        `- Terminal reason: \`${input.terminalReason}\``,
-        "- Recovery owner: board",
-        "- Source ownership: unchanged; reassignment requires an explicit decision or a policy-defined serious failure.",
-        "",
-        "Next action: repair the liveness disposition or request an explicit source-owner decision.",
-      ].join("\n"),
-      {},
-      {
-        authorType: "system",
-        presentation: compactRecoveryPresentation(
-          "Agent needs attention",
-        ),
-        metadata: {
-          ...recoveryNoticeMetadata({
-            cause: "deliberate_wait_without_target",
-            latestRun: input.latestRun,
-            recoveryActionId: action.id,
-            previousStatus: input.issue.status,
-            recoveryOwner: null,
-          }),
-          recovery: {
-            kind: "disposition_repair_escalated",
-            actionId: action.id,
-            attemptCount: input.attemptCount,
-            maxAttempts: input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS,
+    return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
+      const issuesSvc = issueService(db);
+      const action = await ensureDispositionRepairAction({
+        issue: input.issue,
+        latestRun: input.latestRun,
+        fingerprint: input.fingerprint,
+        attemptCount: input.attemptCount,
+        legacyEpisode: input.legacyEpisode,
+      }, db);
+      const now = new Date();
+      await db
+        .update(issueRecoveryActions)
+        .set({
+          status: "active",
+          ownerType: "board",
+          ownerAgentId: null,
+          ownerUserId: null,
+          maxAttempts: null,
+          evidence: {
+            ...action.evidence,
+            latestRunId: input.latestRun?.id ?? null,
+            latestRunStatus: input.latestRun?.status ?? null,
+            latestRunErrorCode: input.latestRun?.errorCode ?? null,
+            terminalReason: input.terminalReason,
+            sourceAttemptCount: input.attemptCount,
+            sourceMaxAttempts: input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS,
+            routingPolicy: STRANDED_BOARD_ESCALATION_POLICY,
+          },
+          nextAction:
+            "Inspect the evidence and choose whether to repair, retry the original owner, explicitly reassign, or resolve the source issue.",
+          wakePolicy: {
+            type: "board_escalation",
             reason: input.terminalReason,
-            assigneeAgentId: input.issue.assigneeAgentId,
+            preservesSourceAssignee: true,
+          },
+          timeoutAt: null,
+          resolutionNote: input.terminalReason,
+          updatedAt: now,
+        })
+        .where(
+          and(
+            eq(issueRecoveryActions.id, action.id),
+            eq(issueRecoveryActions.companyId, input.issue.companyId),
+          ),
+        );
+
+      const updated = await issuesSvc.update(input.issue.id, {
+        status: "blocked", companyGuard: input.issue.companyId,
+      }, db, publications, postCommitActions);
+      if (!updated) return null;
+      const sourceAssigneePreserved =
+        updated.assigneeAgentId === input.issue.assigneeAgentId &&
+        updated.assigneeUserId === input.issue.assigneeUserId;
+
+      await issuesSvc.addComment(
+        input.issue.id,
+        [
+          "Paperclip exhausted the bounded original-owner disposition repair without a durable source-state change.",
+          "",
+          `- Attempts: ${input.attemptCount}/${input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS}`,
+          `- Terminal reason: \`${input.terminalReason}\``,
+          "- Recovery owner: board",
+          "- Source ownership: unchanged; reassignment requires an explicit decision or a policy-defined serious failure.",
+          "",
+          "Next action: repair the liveness disposition or request an explicit source-owner decision.",
+        ].join("\n"),
+        {},
+        {
+          authorType: "system",
+          presentation: compactRecoveryPresentation(
+            "Agent needs attention",
+          ),
+          metadata: {
+            ...recoveryNoticeMetadata({
+              cause: "deliberate_wait_without_target",
+              latestRun: input.latestRun,
+              recoveryActionId: action.id,
+              previousStatus: input.issue.status,
+              recoveryOwner: null,
+            }),
+            recovery: {
+              kind: "disposition_repair_escalated",
+              actionId: action.id,
+              attemptCount: input.attemptCount,
+              maxAttempts: input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS,
+              reason: input.terminalReason,
+              assigneeAgentId: input.issue.assigneeAgentId,
+            },
           },
         },
-      },
-    );
-
-    await logActivity(db, {
-      companyId: input.issue.companyId,
-      actorType: "system",
-      actorId: "recovery",
-      agentId: null,
-      runId: input.latestRun?.id ?? null,
-      action: "issue.disposition_repair_escalated",
-      entityType: "issue",
-      entityId: input.issue.id,
-      details: {
-        identifier: input.issue.identifier,
-        status: "blocked",
-        previousStatus: input.issue.status,
-        sourceStateFingerprint: input.fingerprint,
-        attemptCount: input.attemptCount,
-        maxAttempts: input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS,
-        terminalReason: input.terminalReason,
-        recoveryActionId: action.id,
-        recoveryOwnerAgentId: null,
-        recoveryOwnerType: "board",
-        routingPolicy: STRANDED_BOARD_ESCALATION_POLICY,
-        sourceAssigneeBefore: {
-          agentId: input.issue.assigneeAgentId,
-          userId: input.issue.assigneeUserId,
-        },
-        sourceAssigneeAfter: {
-          agentId: updated.assigneeAgentId,
-          userId: updated.assigneeUserId,
-        },
-        sourceAssigneePreserved,
-      },
-    });
-    if (!sourceAssigneePreserved) {
-      logger.error(
-        {
-          issueId: input.issue.id,
-          beforeAssigneeAgentId: input.issue.assigneeAgentId,
-          afterAssigneeAgentId: updated.assigneeAgentId,
-          beforeAssigneeUserId: input.issue.assigneeUserId,
-          afterAssigneeUserId: updated.assigneeUserId,
-        },
-        "automatic disposition recovery observed a concurrent source-owner change",
       );
-    }
-    return updated;
+
+      await logActivity(db, {
+        companyId: input.issue.companyId,
+        actorType: "system",
+        actorId: "recovery",
+        agentId: null,
+        runId: input.latestRun?.id ?? null,
+        action: "issue.disposition_repair_escalated",
+        entityType: "issue",
+        entityId: input.issue.id,
+        details: {
+          identifier: input.issue.identifier,
+          status: "blocked",
+          previousStatus: input.issue.status,
+          sourceStateFingerprint: input.fingerprint,
+          attemptCount: input.attemptCount,
+          maxAttempts: input.legacyEpisode?.maxAttempts ?? DISPOSITION_REPAIR_MAX_ATTEMPTS,
+          terminalReason: input.terminalReason,
+          recoveryActionId: action.id,
+          recoveryOwnerAgentId: null,
+          recoveryOwnerType: "board",
+          routingPolicy: STRANDED_BOARD_ESCALATION_POLICY,
+          sourceAssigneeBefore: {
+            agentId: input.issue.assigneeAgentId,
+            userId: input.issue.assigneeUserId,
+          },
+          sourceAssigneeAfter: {
+            agentId: updated.assigneeAgentId,
+            userId: updated.assigneeUserId,
+          },
+          sourceAssigneePreserved,
+        },
+      }, publications);
+      if (!sourceAssigneePreserved) {
+        logger.error(
+          {
+            issueId: input.issue.id,
+            beforeAssigneeAgentId: input.issue.assigneeAgentId,
+            afterAssigneeAgentId: updated.assigneeAgentId,
+            beforeAssigneeUserId: input.issue.assigneeUserId,
+            afterAssigneeUserId: updated.assigneeUserId,
+          },
+          "automatic disposition recovery observed a concurrent source-owner change",
+        );
+      }
+      return updated;
+    }, true, input.latestRun?.id);
   }
 
   async function decidePersistedLegacyContinuation(
@@ -3995,243 +4037,246 @@ export function recoveryService(
       });
     }
 
-    const recoveryCause = resolveStrandedRecoveryCause(
-      input.latestRun,
-      input.recoveryCause,
-    );
-    const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
-      issue: input.issue,
-      previousStatus: input.previousStatus,
-      latestRun: input.latestRun,
-      recoveryCause,
-      successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
-    });
-    const isProviderQuotaWait =
-      recoveryCause === "provider_quota" &&
-      !recoveryAction.ownerAgentId &&
-      Boolean(recoveryAction.returnOwnerAgentId);
-    if (isProviderQuotaWait && recoveryAction.returnOwnerAgentId) {
-      await ensureProviderQuotaWaitRecoveryMonitor({
+    return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
+      const issuesSvc = issueService(db);
+      const recoveryCause = resolveStrandedRecoveryCause(
+        input.latestRun,
+        input.recoveryCause,
+      );
+      const recoveryAction = await ensureSourceScopedStrandedRecoveryAction({
         issue: input.issue,
+        previousStatus: input.previousStatus,
         latestRun: input.latestRun,
-        actionId: recoveryAction.id,
-        agentId: recoveryAction.returnOwnerAgentId,
-      });
-    }
-    const blockerIds = await existingUnresolvedBlockerIssueIds(
-      input.issue.companyId,
-      input.issue.id,
-    );
-    const updated = await issuesSvc.update(input.issue.id, {
-      status: "blocked",
-      blockedByIssueIds: blockerIds,
-    });
-    if (!updated) return null;
-    if (isProviderQuotaWait) return updated;
-    const sourceAssigneePreserved =
-      updated.assigneeAgentId === input.issue.assigneeAgentId &&
-      updated.assigneeUserId === input.issue.assigneeUserId;
+        recoveryCause,
+        successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
+      }, db);
+      const isProviderQuotaWait =
+        recoveryCause === "provider_quota" &&
+        !recoveryAction.ownerAgentId &&
+        Boolean(recoveryAction.returnOwnerAgentId);
+      if (isProviderQuotaWait && recoveryAction.returnOwnerAgentId) {
+        await ensureProviderQuotaWaitRecoveryMonitor({
+          issue: input.issue,
+          latestRun: input.latestRun,
+          actionId: recoveryAction.id,
+          agentId: recoveryAction.returnOwnerAgentId,
+        }, db);
+      }
+      // Audit current explicit links under the source lock; never rewrite them
+      // from a previously observed dependency or child snapshot.
+      const blockerIds = (await existingUnresolvedBlockerIssues(
+        input.issue.companyId, input.issue.id, db,
+      )).map(row => row.id);
+      const updated = await issuesSvc.update(input.issue.id, {
+        status: "blocked", companyGuard: input.issue.companyId,
+      }, db, publications, postCommitActions);
+      if (!updated) return null;
+      if (isProviderQuotaWait) return updated;
+      const sourceAssigneePreserved =
+        updated.assigneeAgentId === input.issue.assigneeAgentId &&
+        updated.assigneeUserId === input.issue.assigneeUserId;
 
-    const recoveryOwner = recoveryAction.ownerAgentId
-      ? await getAgent(recoveryAction.ownerAgentId)
-      : null;
-    const sourceAssignee = input.issue.assigneeAgentId
-      ? await getAgent(input.issue.assigneeAgentId)
-      : null;
-    let notice: SuccessfulRunHandoffNotice | null = null;
-    if (
-      input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON &&
-      input.successfulRunHandoffEvidence
-    ) {
-      const [sourceRun] = input.successfulRunHandoffEvidence.sourceRunId
-        ? await db
-            .select({
-              id: heartbeatRuns.id,
-              status: heartbeatRuns.status,
-              agentId: heartbeatRuns.agentId,
-            })
-            .from(heartbeatRuns)
-            .where(
-              and(
-                eq(
-                  heartbeatRuns.id,
-                  input.successfulRunHandoffEvidence.sourceRunId,
+      const recoveryOwner = recoveryAction.ownerAgentId
+        ? await getAgent(recoveryAction.ownerAgentId)
+        : null;
+      const sourceAssignee = input.issue.assigneeAgentId
+        ? await getAgent(input.issue.assigneeAgentId)
+        : null;
+      let notice: SuccessfulRunHandoffNotice | null = null;
+      if (
+        input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON &&
+        input.successfulRunHandoffEvidence
+      ) {
+        const [sourceRun] = input.successfulRunHandoffEvidence.sourceRunId
+          ? await db
+              .select({
+                id: heartbeatRuns.id,
+                status: heartbeatRuns.status,
+                agentId: heartbeatRuns.agentId,
+              })
+              .from(heartbeatRuns)
+              .where(
+                and(
+                  eq(
+                    heartbeatRuns.id,
+                    input.successfulRunHandoffEvidence.sourceRunId,
+                  ),
+                  eq(heartbeatRuns.companyId, input.issue.companyId),
                 ),
-                eq(heartbeatRuns.companyId, input.issue.companyId),
-              ),
-            )
-            .limit(1)
-        : [];
-      notice = buildSuccessfulRunHandoffExhaustedNotice({
-        issue: input.issue,
-        sourceRun: sourceRun ?? null,
-        correctiveRun: input.latestRun
+              )
+              .limit(1)
+          : [];
+        notice = buildSuccessfulRunHandoffExhaustedNotice({
+          issue: input.issue,
+          sourceRun: sourceRun ?? null,
+          correctiveRun: input.latestRun
+            ? {
+                id: input.latestRun.id,
+                status: input.latestRun.status,
+                agentId: input.latestRun.agentId,
+              }
+            : null,
+          sourceAssignee,
+          recoveryIssue: null,
+          recoveryActionId: recoveryAction.id,
+          recoveryOwner,
+          latestIssueStatus: input.issue.status,
+          latestHandoffRunStatus: input.latestRun?.status ?? "unknown",
+          missingDisposition:
+            input.successfulRunHandoffEvidence.missingDisposition,
+        });
+      }
+      const escalationNotice = buildStrandedRecoveryEscalationNotice({
+        seed: input.notice,
+        fallbackBody: input.comment,
+        recoveryCause,
+        recoveryActionId: recoveryAction.id,
+        recoveryOwner:
+          recoveryAction.ownerAgentId && recoveryOwner
+            ? { id: recoveryOwner.id, name: recoveryOwner.name }
+            : null,
+        sourceRun: input.latestRun
           ? {
               id: input.latestRun.id,
-              status: input.latestRun.status,
               agentId: input.latestRun.agentId,
+              status: input.latestRun.status,
+              errorCode: input.latestRun.errorCode,
+              errorSummary: input.latestRun.error
+                ? redactSensitiveText(input.latestRun.error)
+                : null,
             }
           : null,
-        sourceAssignee,
-        recoveryIssue: null,
-        recoveryActionId: recoveryAction.id,
-        recoveryOwner,
-        latestIssueStatus: input.issue.status,
-        latestHandoffRunStatus: input.latestRun?.status ?? "unknown",
-        missingDisposition:
-          input.successfulRunHandoffEvidence.missingDisposition,
       });
-    }
-    const escalationNotice = buildStrandedRecoveryEscalationNotice({
-      seed: input.notice,
-      fallbackBody: input.comment,
-      recoveryCause,
-      recoveryActionId: recoveryAction.id,
-      recoveryOwner:
-        recoveryAction.ownerAgentId && recoveryOwner
-          ? { id: recoveryOwner.id, name: recoveryOwner.name }
-          : null,
-      sourceRun: input.latestRun
-        ? {
-            id: input.latestRun.id,
-            agentId: input.latestRun.agentId,
-            status: input.latestRun.status,
-            errorCode: input.latestRun.errorCode,
-            errorSummary: input.latestRun.error
-              ? redactSensitiveText(input.latestRun.error)
-              : null,
+
+      const shouldPostEscalationComment =
+        recoveryAction.attemptCount === 1 ||
+        input.recoveryCause === "workspace_validation_failed" ||
+        input.recoveryCause === "configuration_incomplete";
+      if (shouldPostEscalationComment) {
+        const escalationCommentMarker = `Recovery action: \`${recoveryAction.id}\``;
+
+        const hasEscalationComment = await db
+          .select({
+            id: issueComments.id,
+            body: issueComments.body,
+            metadata: issueComments.metadata,
+          })
+          .from(issueComments)
+          .where(
+            and(
+              eq(issueComments.issueId, input.issue.id),
+              eq(issueComments.authorType, "system"),
+            ),
+          )
+          .orderBy(desc(issueComments.createdAt))
+          .limit(50)
+          .then((rows) =>
+            rows.some(
+              (row) =>
+                (noticeMetadataReferencesRecoveryAction(
+                  row.metadata,
+                  recoveryAction.id,
+                ) || (row.body ?? "").includes(escalationCommentMarker))
+                // Task threads attach notices to runs. A reused incident needs
+                // one notice for each failed run so its latest repair stays visible.
+                && (readConfigurationIncompletePayload(input.latestRun)?.reason !== "workspace_base_ref_unresolved"
+                  || row.metadata?.sourceRunId === input.latestRun?.id),
+            ),
+          );
+
+        if (!hasEscalationComment) {
+          if (notice) {
+            await issuesSvc.addComment(
+              input.issue.id,
+              notice.body,
+              {},
+              {
+                authorType: "system",
+                presentation: notice.presentation,
+                metadata: notice.metadata,
+              },
+            );
+          } else {
+            await issuesSvc.addComment(
+              input.issue.id,
+              escalationNotice.body,
+              {},
+              {
+                authorType: "system",
+                presentation: escalationNotice.presentation,
+                metadata: escalationNotice.metadata,
+              },
+            );
           }
-        : null,
-    });
-
-    const shouldPostEscalationComment =
-      recoveryAction.attemptCount === 1 ||
-      input.recoveryCause === "workspace_validation_failed" ||
-      input.recoveryCause === "configuration_incomplete";
-    if (shouldPostEscalationComment) {
-      const escalationCommentMarker = `Recovery action: \`${recoveryAction.id}\``;
-
-      const hasEscalationComment = await db
-        .select({
-          id: issueComments.id,
-          body: issueComments.body,
-          metadata: issueComments.metadata,
-        })
-        .from(issueComments)
-        .where(
-          and(
-            eq(issueComments.issueId, input.issue.id),
-            eq(issueComments.authorType, "system"),
-          ),
-        )
-        .orderBy(desc(issueComments.createdAt))
-        .limit(50)
-        .then((rows) =>
-          rows.some(
-            (row) =>
-              (noticeMetadataReferencesRecoveryAction(
-                row.metadata,
-                recoveryAction.id,
-              ) || (row.body ?? "").includes(escalationCommentMarker))
-              // Task threads attach notices to runs. A reused incident needs
-              // one notice for each failed run so its latest repair stays visible.
-              && (readConfigurationIncompletePayload(input.latestRun)?.reason !== "workspace_base_ref_unresolved"
-                || row.metadata?.sourceRunId === input.latestRun?.id),
-          ),
-        );
-
-      if (!hasEscalationComment) {
-        if (notice) {
-          await issuesSvc.addComment(
-            input.issue.id,
-            notice.body,
-            {},
-            {
-              authorType: "system",
-              presentation: notice.presentation,
-              metadata: notice.metadata,
-            },
-          );
-        } else {
-          await issuesSvc.addComment(
-            input.issue.id,
-            escalationNotice.body,
-            {},
-            {
-              authorType: "system",
-              presentation: escalationNotice.presentation,
-              metadata: escalationNotice.metadata,
-            },
-          );
         }
       }
-    }
 
-    await logActivity(db, {
-      companyId: input.issue.companyId,
-      actorType: "system",
-      actorId: "system",
-      agentId: null,
-      runId: null,
-      action:
-        input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
-          ? "issue.successful_run_handoff_escalated"
-          : "issue.updated",
-      entityType: "issue",
-      entityId: input.issue.id,
-      details: {
-        identifier: input.issue.identifier,
-        status: "blocked",
-        previousStatus: input.previousStatus,
-        source:
+      await logActivity(db, {
+        companyId: input.issue.companyId,
+        actorType: "system",
+        actorId: "system",
+        agentId: null,
+        runId: null,
+        action:
           input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
-            ? "recovery.reconcile_successful_run_handoff_missing_state"
-            : input.recoveryCause === "workspace_validation_failed"
-              ? "recovery.reconcile_workspace_validation_failed"
-              : input.recoveryCause === "configuration_incomplete"
-                ? "recovery.reconcile_configuration_incomplete"
-                : input.recoveryCause ===
-                    "execution_review_participant_recovery"
-                  ? "recovery.reconcile_execution_review_participant"
-                  : "recovery.reconcile_stranded_assigned_issue",
-        recoveryCause: input.recoveryCause ?? "stranded_assigned_issue",
-        latestRunId: input.latestRun?.id ?? null,
-        latestRunStatus: input.latestRun?.status ?? null,
-        latestRunErrorCode: input.latestRun?.errorCode ?? null,
-        recoveryActionId: recoveryAction.id,
-        recoveryOwnerType: recoveryAction.ownerType,
-        recoveryOwnerAgentId: recoveryAction.ownerAgentId,
-        previousOwnerAgentId: recoveryAction.previousOwnerAgentId,
-        returnOwnerAgentId: recoveryAction.returnOwnerAgentId,
-        routingPolicy:
-          parseObject(recoveryAction.evidence).routingPolicy ?? null,
-        sourceAssigneeBefore: {
-          agentId: input.issue.assigneeAgentId,
-          userId: input.issue.assigneeUserId,
+            ? "issue.successful_run_handoff_escalated"
+            : "issue.updated",
+        entityType: "issue",
+        entityId: input.issue.id,
+        details: {
+          identifier: input.issue.identifier,
+          status: "blocked",
+          previousStatus: input.previousStatus,
+          source:
+            input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
+              ? "recovery.reconcile_successful_run_handoff_missing_state"
+              : input.recoveryCause === "workspace_validation_failed"
+                ? "recovery.reconcile_workspace_validation_failed"
+                : input.recoveryCause === "configuration_incomplete"
+                  ? "recovery.reconcile_configuration_incomplete"
+                  : input.recoveryCause ===
+                      "execution_review_participant_recovery"
+                    ? "recovery.reconcile_execution_review_participant"
+                    : "recovery.reconcile_stranded_assigned_issue",
+          recoveryCause: input.recoveryCause ?? "stranded_assigned_issue",
+          latestRunId: input.latestRun?.id ?? null,
+          latestRunStatus: input.latestRun?.status ?? null,
+          latestRunErrorCode: input.latestRun?.errorCode ?? null,
+          recoveryActionId: recoveryAction.id,
+          recoveryOwnerType: recoveryAction.ownerType,
+          recoveryOwnerAgentId: recoveryAction.ownerAgentId,
+          previousOwnerAgentId: recoveryAction.previousOwnerAgentId,
+          returnOwnerAgentId: recoveryAction.returnOwnerAgentId,
+          routingPolicy:
+            parseObject(recoveryAction.evidence).routingPolicy ?? null,
+          sourceAssigneeBefore: {
+            agentId: input.issue.assigneeAgentId,
+            userId: input.issue.assigneeUserId,
+          },
+          sourceAssigneeAfter: {
+            agentId: updated.assigneeAgentId,
+            userId: updated.assigneeUserId,
+          },
+          sourceAssigneePreserved,
+          blockerIssueIds: blockerIds,
         },
-        sourceAssigneeAfter: {
-          agentId: updated.assigneeAgentId,
-          userId: updated.assigneeUserId,
-        },
-        sourceAssigneePreserved,
-        blockerIssueIds: blockerIds,
-      },
-    });
+      }, publications);
 
-    if (!sourceAssigneePreserved) {
-      logger.error(
-        {
-          issueId: input.issue.id,
-          beforeAssigneeAgentId: input.issue.assigneeAgentId,
-          afterAssigneeAgentId: updated.assigneeAgentId,
-          beforeAssigneeUserId: input.issue.assigneeUserId,
-          afterAssigneeUserId: updated.assigneeUserId,
-        },
-        "automatic stranded recovery observed a concurrent source-owner change",
-      );
-    }
+      if (!sourceAssigneePreserved) {
+        logger.error(
+          {
+            issueId: input.issue.id,
+            beforeAssigneeAgentId: input.issue.assigneeAgentId,
+            afterAssigneeAgentId: updated.assigneeAgentId,
+            beforeAssigneeUserId: input.issue.assigneeUserId,
+            afterAssigneeUserId: updated.assigneeUserId,
+          },
+          "automatic stranded recovery observed a concurrent source-owner change",
+        );
+      }
 
-    return updated;
+      return updated;
+    }, false, input.latestRun?.id);
   }
 
   async function persistAdapterFailureRecoveryClassification(
@@ -4306,69 +4351,73 @@ export function recoveryService(
     if (!targetAgentId || input.latestRun.agentId !== targetAgentId)
       return null;
 
-    const previousPolicy = normalizeIssueExecutionPolicy(
-      input.issue.executionPolicy ?? null,
-    );
-    const retryTargetDescription =
-      input.issue.status === "in_review"
-        ? "the active review participant"
-        : "the original assignee";
-    const policy = {
-      ...(previousPolicy ?? {
-        mode: "normal" as const,
-        commentRequired: true,
-        stages: [],
-      }),
-      monitor: {
-        nextCheckAt: input.classification.retryAt.toISOString(),
-        notes: input.classification.parsedResetTime
-          ? `Provider usage quota reached; retry ${retryTargetDescription} at the provider reset time.`
-          : `Provider usage quota reached; retry ${retryTargetDescription} after the default recovery backoff.`,
-        scheduledBy: "assignee" as const,
-        kind: "external_service" as const,
-        serviceName: PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
-        externalRef: input.latestRun.id,
-        timeoutAt: null,
-        maxAttempts: null,
-        recoveryPolicy: "wake_owner" as const,
-      },
-    };
-    const transition = applyIssueMonitorPolicyTransition({
-      issue: input.issue,
-      policy,
-      previousPolicy,
-      requestedStatus: input.issue.status,
-      requestedAssigneePatch: {},
-      actor: { agentId: null, userId: null },
-      monitorExplicitlyUpdated: true,
-    });
-    const updated = await issuesSvc.update(input.issue.id, {
-      ...transition.patch,
-      executionPolicy: policy,
-    });
-    if (!updated) return null;
+    return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
+      const issuesSvc = issueService(db);
+      const previousPolicy = normalizeIssueExecutionPolicy(
+        input.issue.executionPolicy ?? null,
+      );
+      const retryTargetDescription =
+        input.issue.status === "in_review"
+          ? "the active review participant"
+          : "the original assignee";
+      const policy = {
+        ...(previousPolicy ?? {
+          mode: "normal" as const,
+          commentRequired: true,
+          stages: [],
+        }),
+        monitor: {
+          nextCheckAt: input.classification.retryAt.toISOString(),
+          notes: input.classification.parsedResetTime
+            ? `Provider usage quota reached; retry ${retryTargetDescription} at the provider reset time.`
+            : `Provider usage quota reached; retry ${retryTargetDescription} after the default recovery backoff.`,
+          scheduledBy: "assignee" as const,
+          kind: "external_service" as const,
+          serviceName: PROVIDER_QUOTA_MONITOR_SERVICE_NAME,
+          externalRef: input.latestRun.id,
+          timeoutAt: null,
+          maxAttempts: null,
+          recoveryPolicy: "wake_owner" as const,
+        },
+      };
+      const transition = applyIssueMonitorPolicyTransition({
+        issue: input.issue,
+        policy,
+        previousPolicy,
+        requestedStatus: input.issue.status,
+        requestedAssigneePatch: {},
+        actor: { agentId: null, userId: null },
+        monitorExplicitlyUpdated: true,
+      });
+      const updated = await issuesSvc.update(input.issue.id, {
+        ...transition.patch,
+        executionPolicy: policy,
+        companyGuard: input.issue.companyId,
+      }, db, publications, postCommitActions);
+      if (!updated) return null;
 
-    await logActivity(db, {
-      companyId: input.issue.companyId,
-      actorType: "system",
-      actorId: "recovery",
-      agentId: null,
-      runId: input.latestRun.id,
-      action: "issue.monitor_scheduled",
-      entityType: "issue",
-      entityId: input.issue.id,
-      details: {
-        identifier: input.issue.identifier,
-        source: "recovery.provider_quota",
-        latestRunId: input.latestRun.id,
-        errorCode: "provider_quota",
-        nextCheckAt: input.classification.retryAt.toISOString(),
-        parsedResetTime: input.classification.parsedResetTime,
-        targetAgentId,
-      },
-    });
+      await logActivity(db, {
+        companyId: input.issue.companyId,
+        actorType: "system",
+        actorId: "recovery",
+        agentId: null,
+        runId: input.latestRun.id,
+        action: "issue.monitor_scheduled",
+        entityType: "issue",
+        entityId: input.issue.id,
+        details: {
+          identifier: input.issue.identifier,
+          source: "recovery.provider_quota",
+          latestRunId: input.latestRun.id,
+          errorCode: "provider_quota",
+          nextCheckAt: input.classification.retryAt.toISOString(),
+          parsedResetTime: input.classification.parsedResetTime,
+          targetAgentId,
+        },
+      }, publications);
 
-    return updated;
+      return updated;
+    }, false, input.latestRun?.id);
   }
 
   function getAdapterFailureRecoveryTargetAgentId(

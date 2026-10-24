@@ -7369,6 +7369,72 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(await sourceBlockerIssueIds(companyId, issueId)).toEqual([]);
   });
 
+  it.each([false, true])("PER-95 recovery distinguishes a consumed source wake from a requeued wake (requeued: %s)", async requeued => {
+    const { issueId, runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
+    await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(),
+      errorCode: "adapter_failed", error: "Fixture failure" }).where(eq(heartbeatRuns.id, runId));
+    if (requeued) await db.update(agentWakeupRequests).set({ runId: null })
+      .where(eq(agentWakeupRequests.id, wakeupRequestId));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    const result = await recoveryService(db, { enqueueWakeup: vi.fn() }).escalateStrandedAssignedIssue({
+      issue, previousStatus: "in_progress", latestRun: run,
+    });
+    const [current] = await db.select().from(issues).where(eq(issues.id, issueId));
+    if (requeued) {
+      expect(result).toBeNull();
+      expect(current).toMatchObject({ status: "in_progress", checkoutRunId: runId, executionRunId: runId });
+      expect(await selectRecoveryActionsForIssue(issueId)).toEqual([]);
+    } else {
+      expect(result).not.toBeNull();
+      expect(current).toMatchObject({ status: "blocked", checkoutRunId: null, executionRunId: null });
+      expect(await selectRecoveryActionsForIssue(issueId)).toHaveLength(1);
+    }
+  });
+
+  it.each(["disposition", "failed_run", "provider_quota"] as const)("PER-95 %s escalation cannot overwrite a source accepted while it waits for the mutation lock", async kind => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress", runStatus: kind === "disposition" ? "succeeded" : "failed",
+      ...(kind === "disposition" ? { retryReason: "issue_continuation_needed",
+        runSource: "issue.productive_terminal_continuation_recovery", livenessState: "advanced" }
+        : kind === "provider_quota" ? { runErrorCode: "adapter_failed", runError: "Provider quota exceeded for this model." }
+        : { runErrorCode: "budget_blocked", runError: "Budget exceeded; refusing to dispatch." }),
+    });
+    const nextRunId = randomUUID();
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const locked = new Promise<void>(resolve => { entered = resolve; });
+    let writerPid = 0;
+    const writer = db.transaction(async tx => {
+      writerPid = Number((await tx.execute(sql`select pg_backend_pid() as pid`))[0].pid);
+      await tx.select().from(issues).where(eq(issues.id, issueId)).for("update");
+      entered();
+      await gate;
+      await tx.insert(heartbeatRuns).values({ id: nextRunId, companyId, agentId,
+        status: "running", invocationSource: "assignment", startedAt: new Date(), contextSnapshot: { issueId } });
+      await tx.update(issues).set({ checkoutRunId: nextRunId, executionRunId: nextRunId,
+        updatedAt: new Date() }).where(eq(issues.id, issueId));
+    });
+    await locked;
+    const sweep = recoveryService(db, { enqueueWakeup: vi.fn() }).reconcileStrandedAssignedIssues();
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where ${writerPid} = any(pg_blocking_pids(pid)) and wait_event_type = 'Lock'`);
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 10_000 });
+    } finally {
+      release();
+      await writer;
+      await sweep;
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({
+      status: "in_progress", checkoutRunId: nextRunId, executionRunId: nextRunId, monitorNextCheckAt: null,
+    });
+    expect(await selectRecoveryActionsForIssue(issueId)).toEqual([]);
+    expect(await selectRecoveryCommentsForIssue(issueId)).toEqual([]);
+  });
+
   it.each([false, "receipt", "launch", "provider", "cleanup"])("converts a continuation parked for review into a dependency wait on its explicitly linked sub-tasks (dispatch receipt: %s)", async dispatchReceipt => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",

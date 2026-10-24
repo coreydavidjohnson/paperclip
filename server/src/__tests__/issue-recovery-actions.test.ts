@@ -549,7 +549,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       livenessState: "needs_followup",
     } as const;
 
-    await Promise.all([
+    const outcomes = await Promise.all([
       recovery.escalateStrandedAssignedIssue({
         issue: sourceIssue,
         previousStatus: "in_progress",
@@ -564,6 +564,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       }),
     ]);
 
+    expect(outcomes.filter(Boolean)).toHaveLength(1);
     const actionRows = await db
       .select()
       .from(issueRecoveryActions)
@@ -578,7 +579,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       previousOwnerAgentId: coderId,
       returnOwnerAgentId: coderId,
       cause: "stranded_assigned_issue",
-      attemptCount: 2,
+      attemptCount: 1,
       evidence: expect.objectContaining({
         routingPolicy: "board_escalation_no_takeover_v1",
       }),
@@ -635,7 +636,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       recoveryCause: "configuration_incomplete",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0],
       previousStatus: "in_progress",
       latestRun: makeRun("fix/foo", "origin/fix/foo"),
       recoveryCause: "configuration_incomplete",
@@ -676,7 +677,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       recoveryCause: "configuration_incomplete",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0],
       previousStatus: "in_progress",
       latestRun: secondRun,
       recoveryCause: "configuration_incomplete",
@@ -700,7 +701,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     // Each run gets one notice bound to the same action; reconciling the
     // latest run again must not duplicate its notice.
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue, previousStatus: "in_progress", latestRun: secondRun,
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0], previousStatus: "in_progress", latestRun: secondRun,
       recoveryCause: "configuration_incomplete",
     });
     const notices = await db
@@ -733,7 +734,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       recoveryCause: "configuration_incomplete",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0],
       previousStatus: "in_progress",
       latestRun: makeRun("fix/bar", "origin/fix/bar"),
       recoveryCause: "configuration_incomplete",
@@ -1480,7 +1481,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       comment: "Automatic continuation recovery failed.",
     });
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      // A later reconciliation must observe the current source version.
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0],
       previousStatus: "in_progress",
       latestRun: secondLatestRun,
       comment: "Automatic continuation recovery failed.",
@@ -1561,7 +1563,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .set({ body: "Workspace recovery was already escalated." })
       .where(eq(issueComments.issueId, sourceIssue.id));
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      // A later reconciliation must observe the current source version.
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0],
       previousStatus: "in_progress",
       latestRun: secondLatestRun,
       comment: "Workspace failed validation.",
@@ -1651,7 +1654,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       id: randomUUID(),
     };
     await recovery.escalateStrandedAssignedIssue({
-      issue: sourceIssue,
+      // A later reconciliation must observe the current source version.
+      issue: (await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0],
       previousStatus: "in_progress",
       latestRun: secondLatestRun,
       comment: "Automatic continuation recovery failed.",
