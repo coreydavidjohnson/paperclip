@@ -1,3 +1,4 @@
+import { createCompletionTiming } from "../completion-timing.js";
 import { agents, companies, createDb, heartbeatRuns, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, type Db } from "@paperclipai/db";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -37,7 +38,7 @@ describe.skipIf(!support.supported)("external run legacy dispatch integration", 
       config: { runtimeConfig: {}, resolvedConfig: {}, resolvedInstanceSettings: { experimental: {} }, runtimeEnv: {}, githubSelection: {} },
       session: { sessionConfigMetadata: {}, goalCheckpointSession: { current: null } },
       instructions: { getInstructionSave: () => null, releaseInstructionCopy: async () => {} },
-      trace: {}, control: { executionControl: { controller: new AbortController(), phases: { enter: vi.fn() } },
+      trace: { completionTiming: createCompletionTiming(run.id, () => {}),}, control: { executionControl: { controller: new AbortController(), phases: { enter: vi.fn() } },
         dispatchResolvedInteractionContinuationWithAtomicGate: async (dispatch: any) => ({ dispatched: true, resultPromise: dispatch(vi.fn()) }) },
       output: { identityRedactor: createAgentIdentityRedactor(), onLog: vi.fn(), onAdapterEvent: vi.fn(), onAdapterMeta: vi.fn(), appendIdentityRedactedLog: vi.fn() },
       services: { recordCurrentHeartbeatRunRuntimeProgress: vi.fn(), persistRunProcessMetadata: vi.fn(), executionWorkspacesSvc: {}, instanceSettings: {} },

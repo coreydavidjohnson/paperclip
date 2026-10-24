@@ -12,6 +12,7 @@ import {
   authUsers,
   companyMemberships,
   createDb,
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   documentRevisions,
   documents,
   environmentLeases,
@@ -102,28 +103,12 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await db.insert(authUsers).values({ id: "responsible-user", name: "Fixture owner", email: "owner@example.test", createdAt: new Date(), updatedAt: new Date() });
     heartbeat = heartbeatService(db);
     await ensureIssueRelationsTable(db);
-  }, 20_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
-    let idlePolls = 0;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const runs = await db
-        .select({ status: heartbeatRuns.status })
-        .from(heartbeatRuns);
-      const hasActiveRun = runs.some((run) => run.status === "queued" || run.status === "running");
-      if (!hasActiveRun) {
-        idlePolls += 1;
-        if (idlePolls >= 3) break;
-      } else {
-        idlePolls = 0;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    const runIds = await db
-      .select({ id: heartbeatRuns.id })
-      .from(heartbeatRuns)
-      .then((runs) => runs.map((run) => run.id));
-    await Promise.all(runIds.map((runId) => heartbeat.waitForRunExecutionDrain(runId)));
+    // Terminal status and the per-run live marker precede trailing event writes.
+    // Await wake prologues and complete executor promises before deleting fixtures.
+    await heartbeat.drainActiveRunExecutions();
     mockAdapterExecute.mockReset();
     mockAdapterExecute.mockImplementation(async () => ({
       exitCode: 0,
@@ -173,6 +158,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
   });
 
   afterAll(async () => {
+    await heartbeat?.drainActiveRunExecutions();
     await tempDb?.cleanup();
   });
 
@@ -1431,4 +1417,50 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       },
     });
   });
+
+  it.each([
+    ['high', 'Huron', 'blocked', false, false, true],
+    ['critical', 'Huron', 'blocked', false, false, true],
+    ['medium', 'Huron', 'blocked', false, false, false],
+    ['high', 'Internal', 'blocked', false, false, false],
+    ['high', 'Huron', 'done', false, false, false],
+    ['high', 'Huron', 'blocked', true, false, false],
+    ['high', 'Huron', 'blocked', false, true, true],
+  ] as const)('orders %s dependency for %s %s (hidden=%s cycle=%s boost=%s) without preemption', async (priority, clientName, clientStatus, hidden, cycle, boosted) => {
+    const companyId = randomUUID(), agentId = randomUUID(), clientId = randomUUID();
+    const activeId = randomUUID(), internalId = randomUUID(), candidateId = randomUUID(), middleId = randomUUID(), clientIssueId = randomUUID();
+    await db.insert(companies).values({id: companyId, name: 'Client queue', issuePrefix: `C${companyId.slice(0, 6)}`, defaultResponsibleUserId: 'responsible-user'});
+    await db.insert(agents).values([
+      {id: agentId, companyId, name: 'Home Lab', role: 'engineer', status: 'active', adapterType: 'codex_local', runtimeConfig: {heartbeat: {wakeOnDemand: true, maxConcurrentRuns: 1}}},
+      {id: clientId, companyId, name: clientName, role: 'general', status: 'active'},
+    ]);
+    await db.insert(issues).values([
+      {id: activeId, companyId, title: 'Already working', status: 'todo', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
+      {id: internalId, companyId, title: 'Older critical internal', status: 'in_progress', priority: 'critical', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
+      {id: candidateId, companyId, title: 'Ready client blocker', status: 'todo', priority, assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
+      {id: middleId, companyId, title: 'Intermediate blocker', status: 'blocked', assigneeAgentId: agentId},
+      {id: clientIssueId, companyId, title: 'Client deliverable', status: clientStatus, hiddenAt: hidden ? new Date() : null, assigneeAgentId: clientId},
+    ]);
+    await db.insert(issueRelations).values([
+      {companyId, issueId: candidateId, relatedIssueId: middleId, type: 'blocks'},
+      {companyId, issueId: middleId, relatedIssueId: clientIssueId, type: 'blocks'},
+    ]);
+    if (cycle) await db.insert(issueRelations).values({companyId, issueId: clientIssueId, relatedIssueId: middleId, type: 'blocks'});
+    let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    const order: string[] = [];
+    const result = {exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: 'queue regression', provider: 'test', model: 'test'};
+    mockAdapterExecute.mockImplementation(async (context: any) => { order.push(context.context.issueId); if (order.length === 1) await gate; await db.update(issues).set({status: 'done'}).where(eq(issues.id, context.context.issueId)); return result; });
+    const wake = (issueId: string) => heartbeat.wakeup(agentId, {source: 'assignment', triggerDetail: 'system', reason: 'issue_assigned', payload: {issueId}, contextSnapshot: {issueId}});
+    try {
+      await wake(activeId);
+      expect(await waitForCondition(async () => order.length === 1, 10000)).toBe(true);
+      await wake(internalId);
+      await wake(candidateId);
+      expect(order).toEqual([activeId]);
+    } finally { finish(); }
+    expect(await waitForCondition(async () => order.length === 3, 15000)).toBe(true);
+    await heartbeat.drainActiveRunExecutions();
+    expect(order.slice(0, 3)).toEqual(boosted ? [activeId, candidateId, internalId] : [activeId, internalId, candidateId]);
+  }, 60000);
 });

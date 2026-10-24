@@ -1,3 +1,4 @@
+import { managedCompressionBlockForTransition } from "./managed-compression-block.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
 import { canonicalExecutionUuid } from "./execution-identity.js";
@@ -562,6 +563,7 @@ export async function settleUnrecoverableExecutions(
             ? "Workspace repair required. Verify safe staging or repair before continuing. Saved work and approval decisions remain in force."
             : "Automatic recovery stopped. Recorded work is preserved; actions with unverified outcomes will not be repeated."
           : "Recovery closed because the task's owner, execution, or status changed. No work was replayed.";
+        let managedCompressionBlock: ReturnType<typeof managedCompressionBlockForTransition> = null;
         let nativeFailureBlock = action.evidence.nativeFailureBlock;
         let nativeBootstrapFailureBlock = action.evidence.nativeBootstrapFailureBlock;
         if (current) {
@@ -574,6 +576,7 @@ export async function settleUnrecoverableExecutions(
               updatedAt: now,
             })
             .where(eq(issues.id, task.id)).returning();
+          managedCompressionBlock = managedCompressionBlockForTransition(task, projected!, run);
           // Only a transition owned by this failure grants a recovery receipt.
           // An already-blocked task may have a separate human/dependency hold.
           if (task.status !== "blocked" && run.runtimeMode === "native") {
@@ -597,6 +600,7 @@ export async function settleUnrecoverableExecutions(
             monitorPolicy: null,
             evidence: {
               ...action.evidence,
+              ...(managedCompressionBlock ? { managedCompressionBlock } : {}),
               ...(nativeFailureBlock ? { nativeFailureBlock } : {}),
               ...(nativeBootstrapFailureBlock ? { nativeBootstrapFailureBlock } : {}),
               automaticRecovery: {

@@ -5867,6 +5867,46 @@ describe("IssueDetail", () => {
     expect(mockPushToast).not.toHaveBeenCalled();
   });
 
+  it.each([false, true])("acknowledged comment reads replace inferred queued state (live refresh: %s)", async (liveRefresh) => {
+    const queue = createQueuedCommentQueue({ protocol: "legacy", steeringDisposition: "unsupported" });
+    const deliveredQueue = { ...queue, queueId: null, state: null, targetRunId: null, entries: [], revision: "delivered" };
+    const receipt = {
+      id: "read-receipt", companyId: "company-1", entityType: "issue", entityId: "issue-1",
+      action: "issue.queued_comments_delivered", runId: "run-active-1",
+      createdAt: new Date("2026-04-21T00:00:06.000Z"),
+      details: { commentIds: ["queued-comment-1"], delivery: "issue_comments_read" },
+    };
+    mockIssuesApi.get.mockResolvedValue(createIssue({ status: "in_progress", assigneeAgentId: "agent-1", executionRunId: "run-active-1" }));
+    mockAgentsApi.list.mockResolvedValue([createAgent({ adapterType: "omnigent" })]);
+    mockIssuesApi.listComments.mockResolvedValue([queue.entries[0].comment]);
+    mockIssuesApi.getQueuedComments.mockResolvedValue(liveRefresh ? queue : deliveredQueue);
+    mockActivityApi.forIssue.mockResolvedValue(liveRefresh ? [] : [receipt]);
+    mockHeartbeatsApi.activeRunForIssue.mockResolvedValue({
+      id: "run-active-1", runtimeMode: "legacy", status: "running", invocationSource: "issue",
+      triggerDetail: null, contextCommentId: null, contextWakeCommentId: null,
+      startedAt: "2026-04-21T00:00:00.000Z", finishedAt: null, createdAt: "2026-04-21T00:00:00.000Z",
+      agentId: "agent-1", agentName: "Home Lab", adapterType: "omnigent", issueId: "issue-1",
+    });
+    await act(async () => { root.render(<QueryClientProvider client={queryClient}><IssueDetail /></QueryClientProvider>); });
+    if (liveRefresh) {
+      await waitForAssertion(() => expect(mockIssueChatThreadRender.mock.calls.at(-1)?.[0]?.queuedCommentQueue?.entries).toHaveLength(1));
+      await act(async () => {
+        queryClient.setQueryData(queryKeys.issues.activity("PAP-1"), [receipt]);
+        queryClient.setQueryData(queryKeys.issues.activity("issue-1"), [receipt]);
+        queryClient.setQueryData(queryKeys.issues.queuedComments("issue-1"), deliveredQueue);
+      });
+    }
+    await waitForAssertion(() => {
+      const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0];
+      expect(props?.queuedCommentQueue).toBeNull();
+      const comment = props?.comments?.find((item: { id: string }) => item.id === "queued-comment-1");
+      expect(comment).toMatchObject({ consumedByRunId: "run-active-1", conversationAnchorAt: "2026-04-21T00:00:06.000Z" });
+      expect(comment?.queueState).not.toBe("queued");
+      expect(comment?.clientStatus).not.toBe("queued");
+      expect(comment?.steeredIntoRunId).toBeUndefined();
+    });
+  });
+
   it("promotes a steered message immediately while its durable timeline position refreshes", async () => {
     const queue = createQueuedCommentQueue();
     const steeredQueue = createQueuedCommentQueue({

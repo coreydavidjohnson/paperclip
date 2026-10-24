@@ -250,6 +250,24 @@ heartbeat.ts.
   action retains continuation ownership and its existing idempotency key.
   Regression suites: heartbeat-process-recovery and issue-recovery-actions,
   including a real lock-wait race, board resolution and lost-ACK admission.
+- Production carry audit (PER-1009): preserve the net changes through production
+  `12e3abaf98baa25ae58bf53dcc3f4d10594b6293` without restoring obsolete observer,
+  admission-suspension or observer-retirement controllers. The split heartbeat
+  modules retain claimed-lease adoption, isolated renewal pools, queued-comment
+  delivery acknowledgements, staleness checks and explicit client-path priority.
+  Retain scoped comment attribution, default projects, whole-note audit identity,
+  typed routing-child cleanup, managed-compression provenance, owner handback,
+  bounded readiness, attention/dashboard queries and UI refresh/read receipts.
+  Upstream work-signal ownership, indexed issue identity, authorization and the
+  split-module boundaries remain authoritative. The private migration 0294 was
+  absent from the final production tree and is not reintroduced; lifecycle uses
+  migration 0355. Completion timing follows explicit runtime/completion contracts,
+  not an obsolete post-return controller assertion. Reattached completion uses a
+  new local monotonic origin, never the old process clock.
+  Regression fixtures model current query chains, indexed issue_id and encoded
+  JWTs rather than public dotted domains. Access-hidden agents still receive 404.
+  All carried changed server suites, UI read/refresh suites and Node checks are
+  registered in the existing image gate; no existing gate is removed.
 - Deployment coupling: PER-1009 owns the schema-gated old-controller drain,
   OmniGenT adapter, parked-wake cutover, real staging matrix and combined release.
   Do not deploy the rebased fork before those gates pass.

@@ -560,9 +560,9 @@ describeEmbeddedPostgres("attention service", () => {
         contextSnapshot: { issueId: reviewUserIssueId },
         scheduledRetryAttempt: 4,
         scheduledRetryReason: "transient_failure",
-        createdAt: new Date("2026-07-09T12:09:00.000Z"),
-        updatedAt: new Date("2026-07-09T12:09:00.000Z"),
-        finishedAt: new Date("2026-07-09T12:09:00.000Z"),
+        createdAt: new Date(Date.now() - 86_400_000),
+        updatedAt: new Date(Date.now() - 86_400_000),
+        finishedAt: new Date(Date.now() - 86_400_000),
       },
       {
         id: transientRunId,
@@ -988,7 +988,7 @@ describeEmbeddedPostgres("attention service", () => {
     });
     const [failedId, timedOutId, succeededId, terminatedId, foreignId, noReceiptId] =
       Array.from({ length: 6 }, () => randomUUID());
-    const createdAt = new Date("2026-07-09T12:00:00.000Z");
+    const createdAt = new Date(Date.now() - 86_400_000);
     await db.insert(heartbeatRuns).values([
       { id: failedId, companyId, agentId: workerId, status: "failed", contextSnapshot: { issueId, prompt: "x".repeat(32_000) } },
       { id: timedOutId, companyId, agentId: workerId, status: "timed_out", contextSnapshot: { taskId, prompt: "y".repeat(32_000) } },
@@ -1042,7 +1042,7 @@ describeEmbeddedPostgres("attention service", () => {
       status: "in_progress",
     });
     const failedRunId = randomUUID();
-    const failedAt = new Date("2026-07-09T12:00:00.000Z");
+    const failedAt = new Date(Date.now() - 86_400_000);
 
     await db.insert(heartbeatRuns).values([
       {
@@ -1064,9 +1064,9 @@ describeEmbeddedPostgres("attention service", () => {
         invocationSource: "automation",
         status: "succeeded",
         contextSnapshot: { issueId },
-        createdAt: new Date("2026-07-09T12:01:00.000Z"),
-        updatedAt: new Date("2026-07-09T12:01:00.000Z"),
-        finishedAt: new Date("2026-07-09T12:01:00.000Z"),
+        createdAt: new Date(failedAt.getTime() + 60_000),
+        updatedAt: new Date(failedAt.getTime() + 60_000),
+        finishedAt: new Date(failedAt.getTime() + 60_000),
       },
     ]);
     await db.insert(heartbeatRunEvents).values({

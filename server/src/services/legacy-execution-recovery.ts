@@ -5,7 +5,7 @@ import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNull, or, sql, type SQL } from "drizzle-orm";
+import { SQL, is, and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { issueRecoveryActionService } from "./issue-recovery-actions.js";
 import { parseIssueExecutionState } from "./issue-execution-policy.js";
@@ -18,6 +18,20 @@ type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
 
 /** Error families describe availability, not whether earlier actions happened. */
+/**
+ * PER-847: Paperclip cancels a suppressed disposition repair before the adapter
+ * is entered, so no provider work started. Record that as bootstrap evidence;
+ * without it the generic cancelled-run rule places a reconciliation hold.
+ */
+export function suppressedLegacyRepairPatch(block: string) {
+  return {
+    finishedAt: new Date(),
+    errorCode: "legacy_disposition_repair_suppressed",
+    error: `Disposition repair suppressed: ${block}`,
+    resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+  };
+}
+
 export function legacyExecutionNeedsReconciliation(
   run: Pick<Run, "runtimeMode" | "status" | "errorCode" | "resultJson"> & Partial<Pick<Run, "scheduledRetryAttempt" | "scheduledRetryReason" | "contextSnapshot">>,
 ): boolean {
@@ -70,6 +84,15 @@ export async function legacyExecutionNeedsReconciliationWithEvidence(db: Db, run
 }
 
 /** Persist the failed legacy run, owned lock release and operator decision together. */
+/** Delivery can commit after an adapter's last snapshot; retain receipts in the SQL write. */
+export function preserveQueuedSteeringAcknowledgements(resultJson: Record<string, unknown> | null | SQL) {
+  const payload = is(resultJson, SQL) ? resultJson : sql`${JSON.stringify(resultJson)}::jsonb`;
+  return sql`case when ${heartbeatRuns.resultJson} ? 'queuedSteeringAcknowledgements'
+    then coalesce(${payload}, '{}'::jsonb) ||
+      jsonb_build_object('queuedSteeringAcknowledgements', ${heartbeatRuns.resultJson}->'queuedSteeringAcknowledgements')
+    else ${payload} end`;
+}
+
 export async function terminalizeLegacyExecution(input: {
   db: Db;
   run: Run;
@@ -125,6 +148,7 @@ export async function terminalizeLegacyExecution(input: {
           ? { runnerProfileJson: { ...current.runnerProfileJson, externalSettlement: {
               runId: current.id, observerEpoch: current.observerEpoch, terminalEpoch: current.observerEpoch + 1, status,
             } } } : {}),
+        ...(patch?.resultJson !== undefined ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
         executionStatusDeliveryId: randomUUID(),
         updatedAt: new Date(),
       })

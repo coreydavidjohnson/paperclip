@@ -1,3 +1,5 @@
+import type { createCompletionTiming } from "../completion-timing.js";
+import { preserveQueuedSteeringAcknowledgements } from "../legacy-execution-recovery.js";
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
@@ -95,6 +97,7 @@ interface RunCompletionSession {
 }
 
 interface RunCompletionInput {
+  completionTiming: ReturnType<typeof createCompletionTiming>;
   run: Run;
   agent: Agent;
   issueId: string | null;
@@ -398,7 +401,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
   }
 
   async function completeRun(input: CompleteHeartbeatRunInput) {
-    const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
+    const { completionTiming, run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, adapterResult, sessionCodec, taskSessionForRun, sessionCompaction,
       configFreshnessResultMetadata, runLedgerScope, currentUserRedactionOptions,
       providerTraceCapture, onProviderTraceFinalized, issueContext, onLog } = input;
     const maySettle = (current: typeof heartbeatRuns.$inferSelect | null) => {
@@ -417,7 +420,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       failedProcessRunCancellations.get(run.id);
     await processCancellation?.settled;
     let outcome: RunSessionOutcome;
-    const latestRun = await getRun(run.id);
+    const latestRun = await completionTiming.measure("run_query", () => getRun(run.id));
     if (!maySettle(latestRun)) return;
     if (isHeartbeatRunTerminalStatus(latestRun?.status)) {
       outcome = latestRun.status;
@@ -457,14 +460,14 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       previousLegacySessionId: runtimeForAdapter.sessionId,
     });
     const rawUsage = normalizeUsageTotals(adapterResult.usage);
-    const sessionUsageResolution = await resolveNormalizedUsageForSession({
+    const sessionUsageResolution = await completionTiming.measure("usage_query", () => resolveNormalizedUsageForSession({
       agentId: agent.id,
       runId: run.id,
       sessionId:
         nextSessionState.displayId ?? nextSessionState.legacySessionId,
       rawUsage,
       usageBasis: adapterResult.usageBasis ?? null,
-    });
+    }));
     const normalizedUsage = sessionUsageResolution.normalizedUsage;
     const runErrorMessage =
       outcome === "cancelled"
@@ -491,7 +494,10 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
 
     const finalLog: { summary: Awaited<ReturnType<typeof runLogStore.finalize>> | null } = { summary: null };
     const finalizeOutput = async () => {
-      if (handle) finalLog.summary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle));
+      if (handle) {
+        const logHandle = handle;
+        finalLog.summary = await completionTiming.measure("log_finalize", () => measureRunPhase("completion.output", () => runLogStore.finalize(logHandle)));
+      }
     };
     // Hold the generation lock during non-transactional log closure. Output
     // callbacks inherit this transaction, so late output cannot deadlock it.
@@ -502,7 +508,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     if (outputProgressState.pending && typeof finalLogBytes === "number") {
       outputProgressState.pending.bytes = finalLogBytes;
     }
-    await flushOutputProgress({ force: true });
+    await completionTiming.measure("output_progress_flush", () => flushOutputProgress({ force: true }));
 
     if (providerTraceCapture) {
       try {
@@ -611,7 +617,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     ), runErrorCode, runErrorMessage);
 
     const ledgerScope = runLedgerScope;
-    const finalRunPatch: Partial<typeof heartbeatRuns.$inferInsert> = {
+    const finalRunPatch = completionTiming.measureSync("final_patch_construction", (): Partial<typeof heartbeatRuns.$inferInsert> => ({
       // Accounting must acknowledge even a proven pre-provider failure:
       // that transaction releases the reservation without creating a charge.
       costAccountingPending: true,
@@ -629,7 +635,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       logBytes: logSummary?.bytes,
       logSha256: logSummary?.sha256,
       logCompressed: logSummary?.compressed ?? false,
-    };
+    }));
     const persistedRunWrite = await measureRunPhase("completion.terminal_write", () => setRunStatusIfRunning(
       run.id,
       status,
@@ -659,9 +665,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           .update(heartbeatRuns)
           .set({
             ...finalRunPatch,
-            resultJson: preserveWorkspaceRestoreRecoveryMetadataSql(
+            resultJson: preserveQueuedSteeringAcknowledgements(preserveWorkspaceRestoreRecoveryMetadataSql(
               cancellationResultJson(persistedRunWrite.run, status, finalRunPatch.resultJson, runErrorCode, runErrorMessage) ?? null,
-            ),
+            )),
 
             usageJson: { ...parseObject(persistedRunWrite.run.usageJson), ...parseObject(finalRunPatch.usageJson) },
             finishedAt:
@@ -1068,7 +1074,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
   }
 
   async function failRun(input: FailHeartbeatRunInput) {
-    const { run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, runId, err, identityRedactor, requiredWorkspaceRestoreEvidence,
+    const { completionTiming, run, agent, issueId, issueRef, signal, output, session, readFailureReportSecrets, runId, err, identityRedactor, requiredWorkspaceRestoreEvidence,
       legacyAdapterEntered, goalCheckpointSession, previousSessionDisplayId, taskSession } = input;
     if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
     const { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata } = session;
@@ -1125,7 +1131,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     const finalLog: { summary: Awaited<ReturnType<typeof runLogStore.finalize>> | null } = { summary: null };
     const finalized = await withOutputAuthority(run, output, async () => {
       if (handle) {
-        try { finalLog.summary = await measureRunPhase("completion.output", () => runLogStore.finalize(handle)); }
+        const logHandle = handle;
+        try { finalLog.summary = await completionTiming.measure("log_finalize", () => measureRunPhase("completion.output", () => runLogStore.finalize(logHandle))); }
         catch (err) { logger.warn({ err, runId }, "failed to finalize run log after error"); }
       }
     });
@@ -1135,7 +1142,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     if (outputProgressState.pending && typeof finalLogBytes === "number") {
       outputProgressState.pending.bytes = finalLogBytes;
     }
-    await flushOutputProgress({ force: true }).catch((flushErr) => {
+    await completionTiming.measure("output_progress_flush", () => flushOutputProgress({ force: true })).catch((flushErr) => {
       logger.warn(
         { err: flushErr, runId },
         "failed to flush run output progress after error",

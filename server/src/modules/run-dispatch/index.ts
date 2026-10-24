@@ -73,6 +73,10 @@ export function createRunDispatch(db: Db, deps: RunDispatchDeps = {}) {
     cancelStaleQueuedRun: createCancelStaleQueuedRun({
       writer: adapter,
     }),
+    queuedRunNeedsLockedStalenessCheck: (input: { runId: string; companyId: string; now?: Date }) =>
+      adapter.queuedRunNeedsLockedStalenessCheck
+        ? adapter.queuedRunNeedsLockedStalenessCheck({ ...input, now: input.now ?? new Date() })
+        : Promise.resolve(true),
     dispatchResolvedInteractionIfCurrent: createDispatchResolvedInteractionIfCurrent({
       writer: adapter,
     }),

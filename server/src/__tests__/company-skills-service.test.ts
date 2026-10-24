@@ -1558,7 +1558,8 @@ describeEmbeddedPostgres("companySkillService.list", () => {
     ]);
   });
 
-  it("forks external source types and deduplicates fork slugs", async () => {
+  // Keep each source type within the normal per-test budget: every case performs two DB/filesystem forks.
+  it.each(["github", "skills_sh", "url", "catalog"] as const)("forks %s source and deduplicates fork slugs", async (sourceType) => {
     const companyId = randomUUID();
     await db.insert(companies).values({
       id: companyId,
@@ -1566,8 +1567,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false,
     });
-    const sourceTypes = ["github", "skills_sh", "url", "catalog"] as const;
-    await db.insert(companySkills).values(sourceTypes.map((sourceType) => ({
+    await db.insert(companySkills).values({
       id: randomUUID(),
       companyId,
       key: `company/${companyId}/${sourceType}-skill`,
@@ -1588,7 +1588,7 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       metadata: sourceType === "github" || sourceType === "skills_sh"
         ? { sourceKind: sourceType, owner: "acme", repo: `${sourceType}-skill`, ref: "main", repoSkillDir: "." }
         : { sourceKind: sourceType },
-    })));
+    });
 
     const remoteReads: string[] = [];
     vi.stubGlobal("fetch", async (url: string | URL) => {
@@ -1596,26 +1596,23 @@ describeEmbeddedPostgres("companySkillService.list", () => {
       return new Response("# Remote Skill\n", { status: 200 });
     });
     try {
-      for (const sourceType of sourceTypes) {
-        const source = await svc.getByKey(companyId, `company/${companyId}/${sourceType}-skill`);
-        expect(source).not.toBeNull();
-        const first = await svc.forkSkill(companyId, source!.id, { slug: `${sourceType}-skill-fork` }, { type: "user", userId: "board" });
-        const second = await svc.forkSkill(companyId, source!.id, { slug: `${sourceType}-skill-fork` }, { type: "user", userId: "board" });
-        const normalizedForkSlug = `${sourceType.replace("_", "-")}-skill-fork`;
-        expect(first.skill).toMatchObject({
-          slug: normalizedForkSlug,
-          sourceType: "local_path",
-          forkedFromSkillId: source!.id,
-        });
-        expect(second.skill.slug).toBe(`${normalizedForkSlug}-2`);
-      }
+      const source = await svc.getByKey(companyId, `company/${companyId}/${sourceType}-skill`);
+      expect(source).not.toBeNull();
+      const first = await svc.forkSkill(companyId, source!.id, { slug: `${sourceType}-skill-fork` }, { type: "user", userId: "board" });
+      const second = await svc.forkSkill(companyId, source!.id, { slug: `${sourceType}-skill-fork` }, { type: "user", userId: "board" });
+      const normalizedForkSlug = `${sourceType.replace("_", "-")}-skill-fork`;
+      expect(first.skill).toMatchObject({
+        slug: normalizedForkSlug,
+        sourceType: "local_path",
+        forkedFromSkillId: source!.id,
+      });
+      expect(second.skill.slug).toBe(`${normalizedForkSlug}-2`);
     } finally {
       vi.unstubAllGlobals();
     }
-    expect(remoteReads).toEqual(expect.arrayContaining([
-      "https://raw.githubusercontent.com/acme/github-skill/main/SKILL.md",
-      "https://raw.githubusercontent.com/acme/skills_sh-skill/main/SKILL.md",
-    ]));
+    if (sourceType === "github" || sourceType === "skills_sh") {
+      expect(remoteReads).toContain(`https://raw.githubusercontent.com/acme/${sourceType}-skill/main/SKILL.md`);
+    }
   });
 
   it("validates version-aware desired skill selections", async () => {

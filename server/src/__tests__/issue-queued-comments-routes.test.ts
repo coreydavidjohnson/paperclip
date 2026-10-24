@@ -192,6 +192,86 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     return { companyId, agentId, issueId, runId, wakeId, commentIds };
   }
 
+  it("delivers queued comments to their live external run and empties the deferred wake", async () => {
+    const seeded = await seedQueue();
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, seeded.runId));
+    await db.update(agents).set({ adapterType: "omnigent" }).where(eq(agents.id, seeded.agentId));
+    const agentApp = app(seeded.companyId, "queue-owner", seeded);
+    const response = await request(agentApp).post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(response.status).toBe(200);
+    expect(response.body.comments.map((c: { id: string }) => c.id).sort()).toEqual([...seeded.commentIds].sort());
+    expect(response.body.deliveredCommentIds.sort()).toEqual([...seeded.commentIds].sort());
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    expect(run.status).toBe("running");
+    for (const id of seeded.commentIds) expect((run.resultJson as any).queuedSteeringAcknowledgements[id]).toMatchObject({
+      status: "acknowledged", queueId: seeded.wakeId, delivery: "issue_comments_read",
+    });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    expect(wake.status).toBe("cancelled");
+    const queue = await request(app(seeded.companyId)).get(`/api/issues/${seeded.issueId}/queued-comments`);
+    expect(queue.body.entries).toEqual([]);
+    const retry = await request(agentApp).post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(retry.status).toBe(200);
+    expect(retry.body.comments).toHaveLength(2);
+    expect(retry.body.deliveredCommentIds).toEqual([]);
+    expect(steerNativeSessionMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["board", "wrong_run", "wrong_agent", "cancelled", "cancelling", "expired", "other_issue", "malformed", "missing_boot", "missing_lease"])(
+    "does not acknowledge queued comments for %s", async mode => {
+      const seeded = await seedQueue();
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, seeded.runId));
+      if (mode === "missing_boot") await db.update(heartbeatRuns).set({ controllerBootId: null }).where(eq(heartbeatRuns.id, seeded.runId));
+      if (mode === "missing_lease") await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: null }).where(eq(heartbeatRuns.id, seeded.runId));
+      if (mode === "cancelled") await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, seeded.runId));
+      if (mode === "cancelling") await db.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, seeded.runId));
+      if (mode === "expired") await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date(0) }).where(eq(heartbeatRuns.id, seeded.runId));
+      if (mode === "other_issue") await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: randomUUID() } }).where(eq(heartbeatRuns.id, seeded.runId));
+      const actor = mode === "board" ? undefined : {
+        agentId: mode === "wrong_agent" ? randomUUID() : seeded.agentId,
+        runId: mode === "malformed" ? "not-a-run" : mode === "wrong_run" ? randomUUID() : seeded.runId,
+      };
+      const response = await request(app(seeded.companyId, "queue-owner", actor))
+        .post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+      // An inaccessible agent must not learn that the issue exists.
+      if (mode === "wrong_agent") expect(response.status).toBe(404);
+      else expect([403, 409, 422]).toContain(response.status);
+      const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+      expect(wake.status).toBe("deferred_issue_execution");
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+      expect((run.resultJson as any)?.queuedSteeringAcknowledgements).toBeUndefined();
+    },
+  );
+
+  it("acknowledges every ordinary deferred queue included in the delivered snapshot", async () => {
+    const seeded = await seedQueue();
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, seeded.runId));
+    const id = randomUUID();
+    await db.insert(issueComments).values({ id, companyId: seeded.companyId, issueId: seeded.issueId,
+      authorType: "user", authorUserId: "queue-owner", body: "Another wake" });
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await db.insert(agentWakeupRequests).values({ ...wake, id: randomUUID(),
+      payload: { issueId: seeded.issueId, _paperclipWakeContext: { wakeCommentIds: [id] } },
+    });
+    const response = await request(app(seeded.companyId, "queue-owner", seeded))
+      .post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(response.status).toBe(200);
+    expect(response.body.deliveredCommentIds.sort()).toEqual([...seeded.commentIds, id].sort());
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId));
+    expect(wakes.map(w => w.status)).toEqual(["cancelled", "cancelled"]);
+  });
+
+  it("does not consume a fresh-session approval when its comments are read", async () => {
+    const seeded = await seedResponseQueue();
+    const response = await request(app(seeded.companyId, "queue-owner", seeded))
+      .post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
+    expect(response.status).toBe(200);
+    expect(response.body.deliveredCommentIds).toEqual([]);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    expect(wake.status).toBe("deferred_issue_execution");
+    expect(wake.payload?.interactionId).toBe(seeded.interactionId);
+  });
+
   it.each(["cancelled", "running"])("rejects a late Done from an interrupted %s task run at the write boundary", async status => {
     const seeded = await seedQueue();
     await db.update(heartbeatRuns).set({ status, resultJson: { executionCancellation: { state: "requested" } } })
@@ -309,7 +389,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
       if (runtime === "legacy") {
         await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, seeded.agentId));
-        await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+        await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, seeded.runId));
       }
       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
       testProcesses.set(seeded.runId, child);
@@ -372,7 +452,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       await db.update(agents).set({ adapterType: "claude_local",
         runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
       }).where(eq(agents.id, seeded.agentId));
-      await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, seeded.runId));
     }
     return { ...seeded, interactionId, context };
   }
@@ -590,7 +670,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       const seeded = await seedQueue();
       if (scenario !== "native run") {
         await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, seeded.agentId));
-        await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+        await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, seeded.runId));
       }
       const client = app(seeded.companyId);
       const queue = await request(client).get(`/api/issues/${seeded.issueId}/queued-comments`).expect(200);
@@ -610,7 +690,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await db.update(agents).set({ adapterType: "claude_local",
       runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
     }).where(eq(agents.id, seeded.agentId));
-    await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) }).where(eq(heartbeatRuns.id, seeded.runId));
     await heartbeatService(db).wakeup(seeded.agentId, {
       source: "on_demand", reason: "issue_commented",
       requestedByActorType: "agent", requestedByActorId: seeded.agentId,
@@ -1434,7 +1514,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const queueRunId = await promoteQueue(seeded);
     await db
       .update(heartbeatRuns)
-      .set({ runtimeMode: "legacy" })
+      .set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) })
       .where(eq(heartbeatRuns.id, queueRunId));
 
     const queued = await request(app(seeded.companyId))
@@ -1498,7 +1578,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .where(eq(agents.id, seeded.agentId));
     await db
       .update(heartbeatRuns)
-      .set({ runtimeMode: "legacy" })
+      .set({ runtimeMode: "legacy", controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000) })
       .where(eq(heartbeatRuns.id, queueRunId));
     const heartbeat = heartbeatService(db, { runtimeEnv: {} });
 

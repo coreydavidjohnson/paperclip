@@ -1,3 +1,4 @@
+import { preserveQueuedSteeringAcknowledgements } from "../legacy-execution-recovery.js";
 import {
   DEFERRED_WAKE_CONTEXT_KEY,
   EXECUTION_PATH_HEARTBEAT_RUN_STATUSES,
@@ -1052,6 +1053,8 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             .set({
               status,
               ...patch,
+              ...(previousStatus?.runtimeMode === "legacy" && patch?.resultJson !== undefined
+                ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
               ...(isHeartbeatRunTerminalStatus(status) && !isHeartbeatRunTerminalStatus(previousStatus?.status)
                 ? { observerEpoch: patch?.observerEpoch ?? sql`${heartbeatRuns.observerEpoch} + 1`,
                     livenessVersion: patch?.livenessVersion ?? sql`${heartbeatRuns.livenessVersion} + 1` }
@@ -1157,6 +1160,8 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             .set({
               status,
               ...patch,
+              ...(previousStatus?.runtimeMode === "legacy" && patch?.resultJson !== undefined
+                ? { resultJson: preserveQueuedSteeringAcknowledgements(patch.resultJson) } : {}),
               ...(isHeartbeatRunTerminalStatus(status) && !isHeartbeatRunTerminalStatus(previousStatus?.status)
                 ? { observerEpoch: patch?.observerEpoch ?? sql`${heartbeatRuns.observerEpoch} + 1`,
                     livenessVersion: patch?.livenessVersion ?? sql`${heartbeatRuns.livenessVersion} + 1` }

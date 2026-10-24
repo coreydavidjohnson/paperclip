@@ -1,3 +1,4 @@
+import { createCompletionTiming } from "../completion-timing.js";
 import type { Db } from "@paperclipai/db";
 import { agents, agentWakeupRequests, companies, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
@@ -97,6 +98,7 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
     const deps = callbacks(db);
     const controller = new AbortController();
     const input: CompleteHeartbeatRunInput = {
+      completionTiming: createCompletionTiming(run.id, () => {}),
       run, agent, issueId: null, issueRef: null, signal: controller.signal,
       output: { handle: { store: "local_file", logRef: "test-log" }, outputProgressState: { pending: { bytes: 7 } }, flushOutputProgress: vi.fn(async () => {}), stdoutExcerpt: "answer", stderrExcerpt: "diagnostic" },
       session: { runtimeForAdapter: { sessionId: null, sessionDisplayId: null }, previousSessionParams: null, taskKey: "completion-task", configuredModel: "test-model",

@@ -1,3 +1,4 @@
+import { issueRunIdsCondition } from "./run-history-query.js";
 import { authorizeHomeLabChild } from "./home-lab-delegation.js";
 import { measureRunTransaction } from "./execution-transaction-timing.js";
 import { measureRunPhase } from "./execution-preparation-timing.js";
@@ -1979,6 +1980,7 @@ type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" |
   onDeduplicated?: (reason: "idempotency_key" | "recent_open_title") => void;
 };
 type IssueChildCreateInput = IssueCreateInput & {
+  childPurpose?: "implementation" | "coordination" | "routing";
   homeLabDelegationActor?: Express.Request["actor"];
   acceptanceCriteria?: string[];
   blockParentUntilDone?: boolean;
@@ -6689,6 +6691,18 @@ export async function readIssueCommentRunLogText(run: {
   return content;
 }
 
+async function agentDefaultIssueProject(db: Db, companyId: string, agentId: string | null | undefined) {
+  if (!agentId) return null;
+  const [agent] = await db.select({ runtimeConfig: agents.runtimeConfig }).from(agents)
+    .where(and(eq(agents.id, agentId), eq(agents.companyId, companyId)));
+  const configured = (agent?.runtimeConfig as Record<string, unknown> | null)?.defaultIssueProjectId;
+  if (typeof configured !== "string" || !isUuidLike(configured)) return null;
+  const [project] = await db.select({ id: projects.id }).from(projects).where(and(
+    eq(projects.id, configured), eq(projects.companyId, companyId), isNull(projects.archivedAt),
+  ));
+  return project?.id ?? null;
+}
+
 export function issueService(db: Db) {
   const instanceSettings = instanceSettingsService(db);
   const treeControlSvc = issueTreeControlService(db);
@@ -7088,17 +7102,7 @@ export function issueService(db: Db) {
           eq(heartbeatRuns.companyId, companyId),
           or(
             and(
-              or(
-                sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
-                sql`exists (
-                  select 1
-                  from ${activityLog}
-                  where ${activityLog.companyId} = ${companyId}
-                    and ${activityLog.entityType} = 'issue'
-                    and ${activityLog.entityId} = ${issueId}
-                    and ${activityLog.runId} = ${heartbeatRuns.id}
-                )`,
-              ),
+              issueRunIdsCondition(companyId, issueId),
               sql`coalesce(${heartbeatRuns.finishedAt}, ${heartbeatRuns.createdAt}) >= ${minCommentCreatedAt}::timestamptz`,
               sql`coalesce(${heartbeatRuns.startedAt}, ${heartbeatRuns.createdAt}) <= ${maxCommentCreatedAt}::timestamptz`,
             ),
@@ -7510,7 +7514,7 @@ export function issueService(db: Db) {
             FOR UPDATE`,
       );
       const relatedIssues = await dbOrTx
-        .select({ id: issues.id })
+        .select({ id: issues.id, parentId: issues.parentId, originKind: issues.originKind })
         .from(issues)
         .where(
           and(eq(issues.companyId, companyId), inArray(issues.id, deduped)),
@@ -7519,6 +7523,9 @@ export function issueService(db: Db) {
         throw unprocessable(
           "Blocked-by issues must belong to the same company",
         );
+      }
+      if (relatedIssues.some((child: { parentId: string | null; originKind: string }) => child.parentId === issueId && ["routing_child", "coordination_child"].includes(child.originKind))) {
+        throw unprocessable("Routing or coordination children cannot block their parent");
       }
       await assertNoBlockingCycles(companyId, issueId, deduped, dbOrTx);
     }
@@ -9481,6 +9488,7 @@ export function issueService(db: Db) {
       const {
         homeLabDelegationActor,
         acceptanceCriteria,
+        childPurpose = "implementation",
         blockParentUntilDone,
         executionWorkspaceInheritanceMode = "linkage",
         actorAgentId,
@@ -9488,6 +9496,7 @@ export function issueService(db: Db) {
         ...issueData
       } = data;
 
+      const mayBlockParent = Boolean(blockParentUntilDone) && childPurpose === "implementation";
       const inheritStrategyOnly =
         executionWorkspaceInheritanceMode === "strategy_only";
       // A child may target another project. Parent workspace identity is only
@@ -9508,6 +9517,7 @@ export function issueService(db: Db) {
           : null;
       let child = await issueService(db).create(parent.companyId, {
         ...issueData,
+        ...(childPurpose !== "implementation" ? { originKind: `${childPurpose}_child` } : {}),
         parentId: parent.id,
         projectId: childProjectId,
         projectWorkspaceId:
@@ -9541,7 +9551,7 @@ export function issueService(db: Db) {
           : { inheritExecutionWorkspaceFromIssueId: parent.id }),
       }, dbOrTx);
 
-      if (blockParentUntilDone) {
+      if (mayBlockParent) {
         const existingBlockers = await dbOrTx
           .select({ blockerIssueId: issueRelations.issueId })
           .from(issueRelations)
@@ -9573,7 +9583,7 @@ export function issueService(db: Db) {
 
       return {
         issue: child,
-        parentBlockerAdded: Boolean(blockParentUntilDone),
+        parentBlockerAdded: mayBlockParent,
       };
       };
       return data.homeLabDelegationActor && dbOrTx === db
@@ -10116,6 +10126,10 @@ export function issueService(db: Db) {
         let executionWorkspaceSettings =
           (issueData.executionWorkspaceSettings as
             Record<string, unknown> | null | undefined) ?? null;
+        // Explicit project/workspace choices win over the assignee default.
+        if (issueData.projectId === undefined && !projectWorkspaceId && !executionWorkspaceId) {
+          issueData.projectId = await agentDefaultIssueProject(tx as unknown as Db, companyId, issueData.assigneeAgentId);
+        }
         let inheritedWorkspaceSelection = false;
         const workspaceInheritanceIssueId = skipExecutionWorkspaceInheritance
           ? null
@@ -11092,6 +11106,16 @@ export function issueService(db: Db) {
           existing.companyId,
           issueData.assigneeUserId,
         );
+      }
+      if (issueData.projectId === undefined && !existing.projectId &&
+          issueData.assigneeAgentId && issueData.assigneeAgentId !== existing.assigneeAgentId &&
+          !existing.projectWorkspaceId && !existing.executionWorkspaceId &&
+          !issueData.projectWorkspaceId && !issueData.executionWorkspaceId) {
+        const defaultProject = await agentDefaultIssueProject(dbOrTx as Db, existing.companyId, issueData.assigneeAgentId);
+        if (defaultProject) {
+          issueData.projectId = defaultProject;
+          patch.projectId = defaultProject;
+        }
       }
       let nextProjectId =
         issueData.projectId !== undefined

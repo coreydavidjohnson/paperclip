@@ -155,6 +155,7 @@ import {
   createOptimisticIssueComment,
   flattenIssueCommentPages,
   getNextIssueCommentPageParam,
+  getIssueCommentReadReceipts,
   ISSUE_COMMENT_PAGE_SIZE,
   isQueuedIssueComment,
   loadRemainingIssueCommentPages,
@@ -1681,7 +1682,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         anchorAt: string;
         sequence: number;
         anchorMs: number;
-        kind: "run_start" | "steer";
+        kind: "run_start" | "steer" | "read";
         queueIds: Set<string>;
       }
     >();
@@ -1782,6 +1783,12 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         sequence,
         anchorMs,
         kind: "steer",
+        queueIds: inputPlacementByCommentId.get(commentId)?.queueIds ?? new Set(),
+      });
+    }
+    for (const [commentId, receipt] of getIssueCommentReadReceipts(resolvedActivity)) {
+      inputPlacementByCommentId.set(commentId, {
+        ...receipt, anchorMs: new Date(receipt.anchorAt).getTime(), kind: "read",
         queueIds: inputPlacementByCommentId.get(commentId)?.queueIds ?? new Set(),
       });
     }
@@ -2113,7 +2120,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
         consumedQueuedCommentIds.has(comment.id) ||
         deliveredCommentRunIds.has(comment.id) ||
         discardedQueuedCommentIds.has(comment.id) ||
-        comment.steeredIntoRunId
+        comment.consumedByRunId
       ) {
         return [];
       }

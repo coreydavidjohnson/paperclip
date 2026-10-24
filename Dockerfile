@@ -158,6 +158,10 @@ RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && n
 # BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
 RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
 RUN pnpm check:token-gates
+# Retained production checks use the same Node 24 runtime as the image.
+RUN node --experimental-vm-modules --test scripts/comment-read-receipts.test.mjs \
+    scripts/health-readiness.test.mjs scripts/managed-compression-block.test.mjs \
+    server/test/completion-timing.node.ts server/test/completion-timing-semantic.node.cjs
 RUN pnpm --filter @paperclipai/ui exec vitest run \
     src/components/task-chat/composer-run-settings.test.ts \
     src/components/task-chat/ComposerRunSettingsPicker.test.tsx \
@@ -166,6 +170,8 @@ RUN pnpm --filter @paperclipai/ui exec vitest run \
     src/lib/query-invalidation-batcher.test.ts \
     src/lib/issue-refresh-budget.test.ts \
     src/context/LiveUpdatesProvider.test.ts \
+    src/context/LiveUpdatesProvider.hook.test.tsx \
+    src/pages/IssueDetail.test.tsx \
     src/hooks/useTaskBrowsers.test.ts \
     src/components/WorkspaceFileMarkdownBody.availability.test.tsx
 RUN pnpm --filter @paperclipai/adapter-utils exec vitest run src/server-utils.test.ts
@@ -216,6 +222,24 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/services/company-skills-cache.test.ts \
     src/__tests__/company-skills-routes.test.ts \
     src/__tests__/adapter-model-refresh-routes.test.ts \
+    src/__tests__/attention-failure-history-db.test.ts \
+    src/__tests__/company-skills-service.test.ts \
+    src/__tests__/dashboard-service.test.ts \
+    src/__tests__/heartbeat-context-summary.test.ts \
+    src/__tests__/heartbeat-dependency-scheduling.test.ts \
+    src/__tests__/heartbeat-direct-adapter-native-isolation.test.ts \
+    src/__tests__/heartbeat-stale-queue-invalidation.test.ts \
+    src/__tests__/issue-agent-mutation-ownership-routes.test.ts \
+    src/__tests__/issue-agent-project.test.ts \
+    src/__tests__/issue-comment-attribution-db.test.ts \
+    src/__tests__/issue-comment-attribution-query.test.ts \
+    src/__tests__/issue-comment-redaction.test.ts \
+    src/__tests__/issue-queued-comments-routes.test.ts \
+    src/__tests__/legacy-continuation-authority.test.ts \
+    src/__tests__/legacy-repair-suppressed.test.ts \
+    src/__tests__/run-context-keys-db.test.ts \
+    src/services/conversation-continuation.test.ts \
+    src/services/native-runtime/native-safe-replacement.test.ts \
   && chown -R root:root /app
 
 # Remote OpenCode and ACPX runs require a controller-owned provider pack to

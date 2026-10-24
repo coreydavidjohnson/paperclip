@@ -8,7 +8,7 @@ import {
   it,
   vi,
 } from "vitest";
-import { sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import {
   agents,
   companies,
@@ -139,7 +139,11 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
       const agentId = randomUUID();
       const directProofJson =
         '{"schema":"direct-proof.v1","value":"byte-stable"}';
-      execute.mockResolvedValue({
+      const receipt = { comment: { status: "acknowledged", delivery: "issue_comments_read" } };
+      execute.mockImplementation(async (context) => {
+        await db.update(heartbeatRuns).set({ resultJson: { queuedSteeringAcknowledgements: receipt } })
+          .where(eq(heartbeatRuns.id, context.runId));
+        return {
         exitCode: 0,
         signal: null,
         timedOut: false,
@@ -147,6 +151,7 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
         model: `test-${provider}`,
         summary: "Direct adapter summary.",
         resultJson: { directProofJson },
+        };
       });
 
       await db.insert(companies).values({
@@ -170,7 +175,9 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
 
       const queued = await heartbeat.invoke(agentId, "on_demand", {}, "manual");
       expect(queued).not.toBeNull();
-      const finished = await waitForRunToFinish(heartbeat, queued!.id);
+      await waitForRunToFinish(heartbeat, queued!.id);
+      await heartbeat.drainActiveRunExecutions();
+      const finished = await heartbeat.getRun(queued!.id);
 
       expect(execute).toHaveBeenCalledOnce();
       expect(finished).toMatchObject({
@@ -185,6 +192,7 @@ describeEmbeddedPostgres("direct adapter native-runner isolation", () => {
         unknown
       > | null;
       expect(persistedResult?.directProofJson).toBe(directProofJson);
+      expect(persistedResult?.queuedSteeringAcknowledgements).toEqual(receipt);
 
       const nativeRows = await Promise.all([
         db.select().from(completionContracts),

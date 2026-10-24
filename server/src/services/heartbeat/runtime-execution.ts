@@ -1,3 +1,4 @@
+import type { createCompletionTiming } from "../completion-timing.js";
 import { externalObserverCondition, persistExternalRunDispatchDeadline, persistExternalRunHandle, recordExternalRunProgress } from "./external-run-state.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { measureRunPhase } from "../execution-preparation-timing.js";
@@ -154,6 +155,7 @@ export interface HeartbeatRuntimeExecutionInput {
     releaseInstructionCopy: () => Promise<void>;
   };
   trace: {
+    completionTiming: ReturnType<typeof createCompletionTiming>;
     providerTraceCapture: { path: string } | null;
     nativeRunnerPreparationSpans: NonNullable<NativeSessionInput["preparationSpans"]>;
     attestedQuestionResponseAtMs: Parameters<typeof buildNativeWakeIngressSpan>[0]["attestedQuestionResponseAtMs"];
@@ -231,7 +233,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
   const { runtimeConfig, resolvedConfig, resolvedInstanceSettings, configuredTaskEnvironment, adapterEnv, agentIdentity, managedAiRuntime, runtimeEnv, useHostGitHub, githubSelection } = input.config;
   const { runtimeSessionParamsForAdapter, configuredModel, sessionConfigMetadata, goalCheckpointSession } = input.session;
   const { nativeInstructionWorkingCopy, collectStoppedInstructions, nativeInstructionReservation, releaseInstructionCopy } = input.instructions;
-  const { providerTraceCapture, nativeRunnerPreparationSpans, attestedQuestionResponseAtMs, attemptStartedAtMs, environmentAcquireStartedAtMs, environmentRealizeEndedAtMs } = input.trace;
+  const { completionTiming, providerTraceCapture, nativeRunnerPreparationSpans, attestedQuestionResponseAtMs, attemptStartedAtMs, environmentAcquireStartedAtMs, environmentRealizeEndedAtMs } = input.trace;
   const { executionControl, executionPhaseContext, dispatchResolvedInteractionContinuationWithAtomicGate } = input.control;
   const dispatchWithTiming: HeartbeatRuntimeExecutionInput["control"]["dispatchResolvedInteractionContinuationWithAtomicGate"] = dispatch => {
     const providerDispatch = AsyncLocalStorage.bind(dispatch);
@@ -891,7 +893,11 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           },
         );
       if (!guardedDispatch.dispatched) return { dispatched: false };
-      adapterResult = await guardedDispatch.resultPromise;
+      try {
+        adapterResult = await guardedDispatch.resultPromise;
+      } finally {
+        completionTiming.mark("adapter_return");
+      }
     }
     adapterResult = identityRedactor.redact(adapterResult);
     if (run.runtimeMode === "legacy" && hasWorkspaceRestoreFailure(adapterResult.resultJson)
@@ -1158,19 +1164,19 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
     throw adapterErr;
   } finally {
     try {
-      if (!preserveRunGatewayTokens) await revokeHeartbeatRunGatewayTokens({
+      if (!preserveRunGatewayTokens) await completionTiming.measure("gateway_token_release", () => revokeHeartbeatRunGatewayTokens({
         db,
         companyId: agent.companyId,
         runId: run.id,
-      });
+      }));
     } catch (revokeErr) {
       logger.warn(
         { err: revokeErr, runId: run.id, companyId: agent.companyId },
         "failed to revoke heartbeat-run MCP gateway tokens",
       );
     }
-    await nativeInstructionReservation?.release();
-    await withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy);
+    await completionTiming.measure("instruction_reservation_release", async () => { await nativeInstructionReservation?.release(); });
+    await completionTiming.measure("instruction_copy_release", () => withAdapterExecutionPhase(executionPhaseContext, "instruction_cleanup", releaseInstructionCopy));
   }
   return { dispatched: true, adapterResult };
 }

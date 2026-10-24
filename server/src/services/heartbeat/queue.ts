@@ -1,3 +1,4 @@
+import { startClaimedLegacyControllerLease } from "../legacy-controller-lease.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
@@ -189,7 +190,7 @@ export interface HeartbeatQueueDependencies extends Pick<HeartbeatRetryDependenc
   treeControlSvc: Pick<ReturnType<typeof issueTreeControlService>, "getActivePauseHoldGate">;
   budgets: Pick<ReturnType<typeof budgetService>, "getInvocationBlock">;
   instanceSettings: Pick<ReturnType<typeof instanceSettingsService>, "getExperimental">;
-  runDispatch: Pick<ReturnType<typeof createRunDispatch>, "cancelStaleQueuedRun">;
+  runDispatch: Pick<ReturnType<typeof createRunDispatch>, "cancelStaleQueuedRun" | "queuedRunNeedsLockedStalenessCheck">;
   wakeQueue: Pick<ReturnType<typeof createWakeQueue>, "createAdmissionTransactionScope" | "admitWakeBehindIssueExecution">;
   activeRunExecutions: Set<string>;
   activeRunExecutionPromises: Set<Promise<void>>;
@@ -655,6 +656,35 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
   }
 
+  async function listQueuedClientPathIssueIds(companyId: string, issueIds: string[]) {
+    if (issueIds.length === 0) return new Set<string>();
+    // UNION over only (root_id, id) terminates malformed dependency cycles.
+    // Follow native blocks edges, not parenthood or resolved dependencies.
+    const rows = await db.execute<{ id: string }>(sql`
+      with recursive client_paths(root_id, id) as (
+        select candidate.id, candidate.id from ${issues} candidate
+        where candidate.company_id = ${companyId}
+          and candidate.id in (${sql.join(issueIds.map(id => sql`${id}::uuid`), sql`, `)})
+          and candidate.priority in ('critical', 'high')
+          and candidate.status not in ('done', 'cancelled') and candidate.hidden_at is null
+        union
+        select path.root_id, dependent.id from client_paths path
+        join ${issueRelations} relation on relation.issue_id = path.id
+          and relation.company_id = ${companyId} and relation.type = 'blocks'
+        join ${issues} dependent on dependent.id = relation.related_issue_id
+          and dependent.company_id = ${companyId}
+          and dependent.status not in ('done', 'cancelled') and dependent.hidden_at is null
+      )
+      select distinct path.root_id as id from client_paths path
+      join ${issues} client_issue on client_issue.id = path.id and client_issue.company_id = ${companyId}
+      join ${agents} client_agent on client_agent.id = client_issue.assignee_agent_id
+        and client_agent.company_id = ${companyId}
+      where path.root_id <> path.id and client_agent.name in
+        ('Co-Intelligence', 'Huron', 'AC Foods', 'AffirmedRx', 'Paragon', 'North Labs')
+    `);
+    return new Set(rows.map(row => row.id));
+  }
+
   async function listQueuedRunDependencyReadiness(
     companyId: string,
     queuedRuns: Array<typeof heartbeatRuns.$inferSelect>,
@@ -964,6 +994,26 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       !["committed", "applied", "terminal_failure"].includes(finalization.phase))));
   }
 
+  async function queuedRunDeferredByLiveIssueOwner(
+    run: typeof heartbeatRuns.$inferSelect,
+    issueId: string,
+    context: Record<string, unknown>,
+  ) {
+    if (context.wakeReason === "source_scoped_recovery_action") return false;
+    const [owner] = await db.select({
+      status: issues.status,
+      assigneeAgentId: issues.assigneeAgentId,
+      executionRunId: issues.executionRunId,
+    }).from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)));
+    if (!owner || owner.assigneeAgentId !== run.agentId) return false;
+    if (owner.status === "done" || owner.status === "cancelled") return false;
+    if (!owner.executionRunId || owner.executionRunId === run.id) return false;
+    if (liveRunExecutions.has(owner.executionRunId)) return true;
+    const [previous] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+      .where(and(eq(heartbeatRuns.id, owner.executionRunId), eq(heartbeatRuns.companyId, run.companyId)));
+    return Boolean(previous) && !isHeartbeatRunTerminalStatus(previous?.status);
+  }
+
   async function claimQueuedRun(
     run: typeof heartbeatRuns.$inferSelect,
     companyAgents?: AgentOrgRow[],
@@ -1136,6 +1186,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         return null;
       }
 
+      if (await runDispatch.queuedRunNeedsLockedStalenessCheck({ runId: run.id, companyId: run.companyId })) {
       const staleness = await runDispatch.cancelStaleQueuedRun({
         runId: run.id,
         companyId: run.companyId,
@@ -1154,6 +1205,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         );
         return null;
       }
+      }
+      if (await queuedRunDeferredByLiveIssueOwner(run, issueId, context)) return null;
     }
 
     const claimedAt = new Date();
@@ -1178,7 +1231,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         checkoutRunId: issues.checkoutRunId,
       }).from(issues).where(and(
         eq(issues.id, issueId), eq(issues.companyId, run.companyId),
-      )).for("update") : [];
+      )).for("update", { skipLocked: true }) : [];
+      if (issueId && !owner) return { ownsIssue: false, blocked: true };
       const ownsIssue = owner?.assigneeAgentId === run.agentId &&
         context.wakeReason !== "source_scoped_recovery_action";
       if (ownsIssue && ["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? "") &&
@@ -1573,6 +1627,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           });
         });
     if (!claimed) return null;
+    startClaimedLegacyControllerLease(db, claimed);
 
     publishLiveEvent({
       companyId: claimed.companyId,
@@ -2016,6 +2071,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             : sql`false`,
         );
       const issueById = new Map(issueRows.map((row) => [row.id, row]));
+      const clientPathIssueIds = agent.name === "Home Lab"
+        ? await listQueuedClientPathIssueIds(agent.companyId, queuedIssueIds) : new Set<string>();
       const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
       const prioritizedRuns = [...queuedRuns].sort((left, right) => {
         const leftIssueId = readNonEmptyString(
@@ -2038,6 +2095,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           : true;
         const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
         const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
+        const leftClientPath = leftReady && Boolean(leftIssueId && clientPathIssueIds.has(leftIssueId));
+        const rightClientPath = rightReady && Boolean(rightIssueId && clientPathIssueIds.has(rightIssueId));
+        if (leftClientPath !== rightClientPath) return leftClientPath ? -1 : 1;
         const leftRank = leftIssueId
           ? leftReady
             ? leftIssue?.status === "in_progress"

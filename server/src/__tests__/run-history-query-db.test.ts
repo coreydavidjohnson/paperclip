@@ -31,4 +31,41 @@ describe("run history database contracts", () => {
     expect(actual).toEqual(old);
     expect(actual.map(r => r.id)).toEqual([ids[2], ids[1], ids[0]]);
   });
+  it("preserves attribution windows and own-run bypass without widening company membership", async () => {
+    const company = randomUUID(), other = randomUUID(), issue = randomUUID();
+    const ids = Array.from({ length: 9 }, () => randomUUID());
+    // context-only, activity-only, both, explicit own-run outside the window,
+    // cross-company own-run, too early, too late, unrelated, and null times.
+    const contexts = [issue, "unrelated", issue, "unrelated", issue, issue, issue, "unrelated", issue];
+    const runs = sql.join(ids.map((id, i) => sql`(
+      ${id}::uuid, ${i === 4 ? other : company}::uuid,
+      ${JSON.stringify({ issueId: contexts[i] })}::jsonb,
+      ${contexts[i] === issue ? issue : null}::uuid,
+      ${i === 3 || i === 5 ? "2026-01-01" : i === 6 ? "2026-01-04" : "2026-01-02"}::timestamptz,
+      ${i === 8 ? null : i === 6 ? "2026-01-04" : "2026-01-02"}::timestamptz,
+      ${i === 8 ? null : i === 3 || i === 5 ? "2026-01-01" : "2026-01-03"}::timestamptz
+    )`), sql`, `);
+    const activities = sql.join([1, 2, 2, 7].map(i => sql`(
+      ${i === 7 ? other : company}::uuid, 'issue'::text, ${issue}::text, ${ids[i]}::uuid
+    )`), sql`, `);
+    const window = sql`coalesce(finished_at, created_at) >= '2026-01-02'::timestamptz
+      and coalesce(started_at, created_at) <= '2026-01-03'::timestamptz`;
+    const oldMembership = sql`context_snapshot ->> 'issueId' = ${issue} or exists (
+      select 1 from activity_log where company_id = ${company} and entity_type = 'issue'
+        and entity_id = ${issue} and run_id = heartbeat_runs.id)`;
+    for (const ownIds of [[], [ids[3], ids[4]]]) {
+      const own = ownIds.length ? sql`id in (${sql.join(ownIds.map(id => sql`${id}::uuid`), sql`, `)})` : sql`false`;
+      const select = async (membership: ReturnType<typeof sql>) => db.execute(sql`
+        with heartbeat_runs(id, company_id, context_snapshot, issue_id, created_at, started_at, finished_at) as (values ${runs}),
+        activity_log(company_id, entity_type, entity_id, run_id) as (values ${activities})
+        select id, company_id, created_at, started_at, finished_at from heartbeat_runs
+        where company_id = ${company} and (((${membership}) and ${window}) or ${own})
+        order by created_at desc, id desc`);
+      const old = await select(oldMembership);
+      const actual = await select(issueRunIdsCondition(company, issue));
+      expect([...actual]).toEqual([...old]);
+      expect(actual.map(row => row.id).sort()).toEqual([ids[0], ids[1], ids[2], ids[8], ...(ownIds.length ? [ids[3]] : [])].sort());
+    }
+  });
+
 });

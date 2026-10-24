@@ -981,7 +981,7 @@ export function createPostgresRunDispatchAdapter(
       };
   }
 
-  async function decideCurrentRunStaleness(tx: Db, run: HeartbeatRun, now: Date) {
+  async function decideCurrentRunStaleness(tx: Db, run: HeartbeatRun, now: Date, locked = true) {
     const contextSnapshot = parseObject(run.contextSnapshot);
     const issueId = readNonEmptyString(contextSnapshot.issueId);
     if (!issueId) return { issueId: null, facts: null, executionBlocker: null, decision: { stale: false as const } };
@@ -1002,7 +1002,7 @@ export function createPostgresRunDispatchAdapter(
         scheduledRetryReason: run.scheduledRetryReason,
       },
       now,
-      tx,
+      locked ? tx : undefined,
     );
     return { issueId, facts, executionBlocker: null, decision: decideQueuedRunStaleness(facts, now) };
   }
@@ -1065,6 +1065,17 @@ export function createPostgresRunDispatchAdapter(
       });
     }
     return { outcome: "deferred" as const, postCommitEffects: [statusEffect(waiting, run.status)] };
+  }
+
+  /** Lock-free preview for the hot promotion path. Only a stale preview, or an
+   * interaction wake whose authority must be recorded under the locks, needs
+   * cancelStaleQueuedRun; that call re-decides under issue -> run locks. */
+  async function queuedRunNeedsLockedStalenessCheck(input: { runId: string; companyId: string; now: Date }) {
+    const [run] = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)));
+    if (!run || run.status !== "queued") return true;
+    const { facts, decision } = await decideCurrentRunStaleness(db, run, input.now, false);
+    return decision.stale || Boolean(facts?.isInteractionWake);
   }
 
   async function cancelStaleQueuedRun(
@@ -1182,6 +1193,7 @@ export function createPostgresRunDispatchAdapter(
     evaluateScheduledRetryGate,
     listDueRetries,
     cancelStaleQueuedRun,
+    queuedRunNeedsLockedStalenessCheck,
     dispatchResolvedInteractionIfCurrent,
     promoteOrCancelDueRetry,
   };

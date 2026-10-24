@@ -1,3 +1,5 @@
+import { createCompletionTiming } from "./completion-timing.js";
+import { suppressedLegacyRepairPatch } from "./legacy-execution-recovery.js";
 import { boundedExternalRunOperation, createExternalRunLivenessWorker } from "./heartbeat/external-run-liveness.js";
 import { persistExternalRunHandle, recordedExternalRunConfiguration } from "./heartbeat/external-run-state.js";
 import type { AdapterExecutionResult, ExternalRunHandle } from "@paperclipai/adapter-utils";
@@ -1834,7 +1836,11 @@ export function heartbeatService(
       const previousSessionParams = taskSession?.sessionParamsJson ?? null;
       // No new preparation occurred: retain the recorded session metadata.
       const sessionConfigMetadata = null;
-      await runCompletion.completeRun({ run, agent, issueId,
+      await runCompletion.completeRun({
+        // A reattached observer has its own local diagnostic origin, not the
+        // original controller process's monotonic clock.
+        completionTiming: createCompletionTiming(run.id, event => logger.info({ completionTiming: event }, "run completion stage")),
+        run, agent, issueId,
         issueRef: issueContext ? { workMode: issueContext.workMode, identifier: issueContext.identifier, title: issueContext.title } : null,
         signal: controller.signal, output,
         session: { runtimeForAdapter: { sessionId: run.sessionIdBefore, sessionDisplayId: run.sessionIdBefore },
@@ -1906,6 +1912,9 @@ export function heartbeatService(
     }
 
     let legacyAdapterEntered = false;
+    const completionTiming = createCompletionTiming(runId, (event) => {
+      if (legacyAdapterEntered) logger.info({ completionTiming: event }, "run completion stage");
+    });
     let persistUsageCaptureFailure: (() => Promise<void>) | undefined;
     let run = await getRun(runId);
     if (!run) return;
@@ -2909,8 +2918,8 @@ export function heartbeatService(
         const repairBlock = await recovery.legacyRepairDispatchBlock(run.id);
         if (repairBlock) {
           const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
-            finishedAt: new Date(), errorCode: "legacy_disposition_repair_suppressed",
-            error: `Disposition repair suppressed: ${repairBlock}`,
+            ...suppressedLegacyRepairPatch(repairBlock),
+            resultJson: { ...parseObject(run.resultJson), ...suppressedLegacyRepairPatch(repairBlock).resultJson },
           });
           if (cancelled.updated) {
             await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: new Date(), error: repairBlock });
@@ -3507,6 +3516,7 @@ export function heartbeatService(
             getInstructionSave: preparedInstructions.getInstructionSave,
           },
           trace: {
+            completionTiming,
             providerTraceCapture,
             nativeRunnerPreparationSpans,
             attestedQuestionResponseAtMs,
@@ -3592,6 +3602,7 @@ export function heartbeatService(
           adapterResult, runtimeServices,
         });
         await measureRunPhase("completion.run", () => runCompletion.completeRun({
+          completionTiming,
           run, agent, issueId, issueRef, signal: executionControl.controller.signal,
           output: runOutput,
           session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata },
@@ -3725,6 +3736,7 @@ export function heartbeatService(
         }
         if (!(await preserveNativeWorkspaceOnFailure())) return;
         await runCompletion.failRun({
+          completionTiming,
           run, agent, issueId, issueRef, signal: executionControl.controller.signal,
           output: runOutput,
           session: { runtimeForAdapter, previousSessionParams, taskKey, configuredModel, sessionConfigMetadata },

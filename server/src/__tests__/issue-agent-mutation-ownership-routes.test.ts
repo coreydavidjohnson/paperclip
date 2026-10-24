@@ -2595,6 +2595,141 @@ describe("agent issue mutation checkout ownership", () => {
     });
   });
 
+  describe("handing back a current agent-owned disposition repair (PER-1091)", () => {
+    const repairAction = (overrides: Record<string, unknown> = {}) => ({
+      id: recoveryActionId, status: "active", kind: "deliberate_wait_without_target",
+      ownerType: "agent", ownerAgentId, returnOwnerAgentId: ownerAgentId,
+      wakePolicy: { type: "bounded_owner_disposition_repair", retryAgentId: ownerAgentId, attempt: 2, maxAttempts: 5 },
+      ...overrides,
+    });
+    function seed(issue: Record<string, unknown>, action: Record<string, unknown> | null = repairAction()) {
+      const source = makeIssue({ assigneeAgentId: ownerAgentId, ...issue });
+      mockIssueService.getById.mockResolvedValue(source);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...source, ...patch }));
+      mockIssueRecoveryActionService.getActiveForIssue.mockResolvedValue(action);
+      mockAgentService.getById.mockResolvedValue(makeAgent(ownerAgentId, { status: "idle" }));
+    }
+    const send = (actor: Record<string, unknown>, db?: unknown) => request(createApp(actor, db))
+      .post(`/api/issues/${issueId}/recovery-actions/resolve`)
+      .send({ actionId: recoveryActionId, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "Owner work path restored" });
+
+    it.each([
+      ["owner run", "in_progress", { checkoutRunId: ownerRunId, executionRunId: ownerRunId }],
+      ["board", "in_progress", {}],
+      ["board", "blocked", {}],
+      ["owner run", "blocked", { checkoutRunId: ownerRunId, executionRunId: ownerRunId }],
+    ])("lets the %s hand a freshly read %s repair back to its owner once", async (who, status, locks) => {
+      seed({ status, ...locks });
+      const res = await send(who === "board" ? boardActor() : ownerActor());
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalledTimes(1);
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status: "todo" }), expect.anything(), expect.any(Array));
+      expect(mockIssueRecoveryActionService.resolveActiveForIssue).toHaveBeenCalledWith(
+        expect.objectContaining({ actionId: recoveryActionId, outcome: "handed_back", status: "resolved" }), expect.anything());
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledTimes(1);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(ownerAgentId, expect.objectContaining({ reason: "issue_recovery_action_restored" }));
+    });
+
+    it.each([
+      ["reassigned source", { status: "in_progress", assigneeAgentId: peerAgentId }, repairAction()],
+      ["terminal source", { status: "done" }, repairAction()],
+      ["review source", { status: "in_review" }, repairAction()],
+      ["todo source", { status: "todo" }, repairAction()],
+      ["replaced repair owner", { status: "in_progress" }, repairAction({ ownerAgentId: peerAgentId })],
+      ["other wake policy", { status: "in_progress" }, repairAction({ wakePolicy: { type: "bounded_recovery_owner" } })],
+      ["board non-escalation", { status: "in_progress" }, repairAction({ ownerType: "board", ownerAgentId: null })],
+    ])("still rejects a %s as stale without writes or wakes", async (_case, issue, action) => {
+      seed(issue, action);
+      const res = await send(boardActor());
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      expect(res.body.details?.code).toBe("disposition_recovery_retry_stale");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("rejects the old action id after the repair was replaced", async () => {
+      seed({ status: "in_progress" }, repairAction({ id: "99999999-9999-4999-8999-999999999999" }));
+      const res = await send(boardActor());
+      expect(res.status, JSON.stringify(res.body)).toBe(404);
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it.each(["run", "executionRun", "budget", "stage", "blocker", "approval", "pause", "pausedAgent"])("keeps the %s gate for an agent-owned hand-back", async gate => {
+      seed({ status: "in_progress", ...(gate === "run" ? { checkoutRunId: "66666666-6666-4666-8666-666666666666" } : {}) });
+      if (gate === "executionRun") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId, executionRunId: "66666666-6666-4666-8666-666666666666" }));
+      if (gate === "budget") mockBudgetService.getInvocationBlock.mockResolvedValue({ scope: "agent", reason: "hard_limit_reached" });
+      if (gate === "stage") mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: ownerAgentId, executionState: { status: "pending", currentStageId: recoveryActionId, currentStageIndex: 0, currentStageType: "review", currentParticipant: { type: "agent", agentId: peerAgentId }, returnAssignee: { type: "agent", agentId: ownerAgentId }, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } }));
+      if (gate === "blocker") mockIssueService.getDependencyReadiness.mockResolvedValue({ unresolvedBlockerCount: 1 });
+      if (gate === "approval") mockIssueApprovalService.listApprovalsForIssue.mockResolvedValue([{ status: "pending" }]);
+      if (gate === "pause") mockIssueTreeControlService.getActivePauseHoldGate.mockResolvedValue({ holdId: "hold", mode: "pause" });
+      if (gate === "pausedAgent") mockAgentService.getById.mockResolvedValue(makeAgent(ownerAgentId, { status: "paused" }));
+      const res = await send(ownerActor());
+      expect(res.status, JSON.stringify(res.body)).toBe(409);
+      const expectedCodes: Record<string, string> = {
+        run: "recovery_source_run_lock",
+        executionRun: "recovery_source_run_lock",
+        budget: "recovery_safe_hand_back_budget_blocked",
+        stage: "recovery_governed_stage_pending",
+        blocker: "disposition_recovery_retry_blocked",
+        approval: "recovery_governed_approval_pending",
+        pausedAgent: "disposition_recovery_owner_unavailable",
+      };
+      if (gate === "pause") {
+        expect(res.body.error).toContain("active subtree pause hold");
+        expect(res.body.details?.holdId).toBe("hold");
+      } else {
+        expect(res.body.details?.code, JSON.stringify(res.body)).toBe(expectedCodes[gate]);
+      }
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("requires run context for an in-progress owner hand-back even without stored locks", async () => {
+      seed({ status: "in_progress", checkoutRunId: null, executionRunId: null });
+      const res = await send({ ...ownerActor(), runId: undefined });
+      expect(res.status, JSON.stringify(res.body)).toBe(401);
+      expect(res.body.error).toBe("Agent run id required");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+
+    it("replays a lost-response retry without another write or wake", async () => {
+      seed({ status: "todo" }, null);
+      const settled = {
+        id: recoveryActionId, companyId, sourceIssueId: issueId, recoveryIssueId: null,
+        kind: "deliberate_wait_without_target", status: "resolved", ownerType: "agent", ownerAgentId,
+        ownerUserId: null, previousOwnerAgentId: ownerAgentId, returnOwnerAgentId: ownerAgentId,
+        cause: "deliberate_wait_without_target", fingerprint: "disposition_repair:v1:test", evidence: {},
+        nextAction: "repair", wakePolicy: { type: "bounded_owner_disposition_repair" }, monitorPolicy: null,
+        attemptCount: 2, maxAttempts: 5, timeoutAt: null, lastAttemptAt: null, outcome: "handed_back",
+        resolutionNote: "Owner work path restored", resolvedAt: new Date(), createdAt: new Date(), updatedAt: new Date(),
+      };
+      const db = createRunContextDb({}, ownerAgentId, ownerRunId);
+      const select = db.select;
+      (db as any).select = vi.fn((selection?: Record<string, unknown>) => {
+        const base = select(selection);
+        // Model both the workspace evidence lock and settled-receipt lookup.
+        const receiptQuery = {
+          limit: vi.fn(() => receiptQuery),
+          for: vi.fn(() => receiptQuery),
+          then: (resolve: (rows: typeof settled[]) => unknown) => Promise.resolve([settled]).then(resolve),
+        };
+        return { from: vi.fn((table: Parameters<typeof getTableName>[0]) => getTableName(table) === "issue_recovery_actions"
+          ? { where: vi.fn(() => receiptQuery) } : base.from(table)) };
+      });
+      const res = await send(ownerActor(), db);
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.recoveryAction?.outcome).toBe("handed_back");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+      expect(mockIssueRecoveryActionService.resolveActiveForIssue).not.toHaveBeenCalled();
+      expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    });
+  });
+
   it.each(["done", "in_review"])(
     "keeps non-retry %s recovery resolution available for chat tasks",
     async (sourceIssueStatus) => {

@@ -1,3 +1,5 @@
+import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
+import { managedCompressionBlockUnchanged } from "../services/managed-compression-block.js";
 import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
 import { parseObject } from "../adapters/utils.js";
 import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
@@ -9510,19 +9512,23 @@ export function issueRoutes(
       trigger: "read_projection",
       actor: getActorInfo(req),
     });
-    const retainedHolds = await db.select().from(issueRecoveryActions).where(and(
-      eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
-      sql`${issueRecoveryActions.evidence}->'automaticRecovery'->>'replay' = 'blocked'`,
-      or(
-        sql`${issueRecoveryActions.evidence}->'workspaceRestoreRecovery'->>'schema' = ${LEGACY_WORKSPACE_RECOVERY_SCHEMA}`,
-        inArray(issueRecoveryActions.cause, [...EXECUTION_RECONCILIATION_CAUSES]),
-      ),
-    )).orderBy(desc(issueRecoveryActions.createdAt));
-    res.json({
-      active,
-      actions: [...(active ? [active] : []), ...retainedHolds
-        .filter(action => action.id !== active?.id).map(issueRecoveryActionReadModel)],
-    });
+    const actionId = req.query.actionId;
+    if (actionId !== undefined && (typeof actionId !== "string" || !isUuidLike(actionId))) {
+      throw badRequest("actionId must be a UUID");
+    }
+    // A restored wake refers to an already settled action. Keep active semantics
+    // unchanged, but expose bounded history or the exact source-scoped record.
+    const rows = await db.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.companyId, issue.companyId),
+      eq(issueRecoveryActions.sourceIssueId, issue.id),
+      ...(actionId ? [eq(issueRecoveryActions.id, actionId)] : []),
+    )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(actionId ? 1 : 51);
+    if (actionId && rows.length === 0) throw notFound("Recovery action not found");
+    const history = rows.map(issueRecoveryActionReadModel);
+    const actions = !actionId && active
+      ? [active, ...history.filter(action => action.id !== active.id)].slice(0, 50)
+      : history.slice(0, 50);
+    res.json({ active, actions, hasMore: rows.length > 50 });
   });
 
   router.post("/issues/:id/recovery-actions/resume-workspace-finalization", validate(resumeWorkspaceFinalizationSchema), async (req, res) => {
@@ -9616,6 +9622,10 @@ export function issueRoutes(
       }
       const actor = getActorInfo(req);
       const actionStatus = outcome === "cancelled" ? "cancelled" : "resolved";
+      // Identity is over the exact whole note, never its redacted audit presentation.
+      const resolutionNoteDigest = resolutionNote
+        ? createHash("sha256").update(resolutionNote).digest("hex")
+        : null;
       const postCommitActivityPublications: ActivityPublication[] = [];
       const postCommitIssueActions: IssuePostCommitAction[] = [];
       const result = await db.transaction(async (tx) => {
@@ -9705,6 +9715,13 @@ export function issueRoutes(
                   "Verified outcomes must restore this source recovery without replacing another active recovery action.",
                 );
               }
+              // A managed compression continuation can restore only the exact
+              // block projected by its failure, never a later human hold/edit.
+              // The issue lock closes the helper's last-read/resolve race.
+              if (settled.evidence.originalFailureCode === "omnigent_context_compression_failed" &&
+                  !managedCompressionBlockUnchanged(lockedIssue, settled, executionReconciliation.runId)) {
+                throw conflict("The managed compression block changed or lacks server-owned provenance; preserve the hold.");
+              }
               const [reopened] = await tx
                 .update(issueRecoveryActions)
                 .set({ status: "active", outcome: null, resolvedAt: null })
@@ -9712,6 +9729,46 @@ export function issueRoutes(
                 .returning();
               activeRecoveryAction = issueRecoveryActionReadModel(reopened!);
             } else {
+              if (settled.kind === "deliberate_wait_without_target" && resolutionNote) {
+                // Whole-note audit identity survives later annotations and paragraph
+                // boundaries. The issue lock serializes this lookup with the append.
+                const [recordedNote] = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
+                  eq(activityLog.companyId, lockedIssue.companyId),
+                  eq(activityLog.entityType, "issue"),
+                  eq(activityLog.entityId, lockedIssue.id),
+                  inArray(activityLog.action, ["issue.recovery_action_resolved", "issue.recovery_action_note_added"]),
+                  eq(sql`${activityLog.details}->>'recoveryActionId'`, settled.id),
+                  eq(sql`${activityLog.details}->>'resolutionNoteDigest'`, resolutionNoteDigest),
+                )).limit(1);
+                if (settled.resolutionNote === resolutionNote || recordedNote) {
+                  return { issue: lockedIssue, recoveryAction: settled, replayed: true };
+                }
+                // An authorized replay is read-only; only the board may append
+                // new evidence to a settled disposition action.
+                assertBoard(req);
+                // Late disposition evidence is annotation, not another resolution:
+                // retain the original outcome, timestamps and note; never replay.
+                if (activeRecoveryAction || sourceIssueStatus !== lockedIssue.status ||
+                    settled.status !== "resolved" || settled.kind !== "deliberate_wait_without_target") {
+                  throw conflict("Late recovery notes require the current source disposition, a settled disposition action and no newer active recovery.");
+                }
+                const note = settled.resolutionNote
+                  ? settled.resolutionNote + String.fromCharCode(10, 10) + resolutionNote
+                  : resolutionNote;
+                if (note.length > 12000) throw unprocessable("Recovery resolution notes exceed the retained note limit");
+                const [annotated] = await tx.update(issueRecoveryActions).set({ resolutionNote: note })
+                  .where(and(eq(issueRecoveryActions.id, settled.id), eq(issueRecoveryActions.companyId, lockedIssue.companyId),
+                    eq(issueRecoveryActions.sourceIssueId, lockedIssue.id), eq(issueRecoveryActions.status, "resolved")))
+                  .returning();
+                if (!annotated) throw conflict("Recovery action changed before annotation");
+                await logActivity(tx as unknown as Db, {
+                  companyId: lockedIssue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+                  agentId: actor.agentId, runId: actor.runId, action: "issue.recovery_action_note_added",
+                  entityType: "issue", entityId: lockedIssue.id,
+                  details: { recoveryActionId: settled.id, sourceIssueStatus, outcome, resolutionNote, resolutionNoteDigest },
+                }, postCommitActivityPublications);
+                return { issue: lockedIssue, recoveryAction: annotated, replayed: true };
+              }
               return {
                 issue: lockedIssue,
                 recoveryAction: settled,
@@ -9799,10 +9856,20 @@ export function issueRoutes(
           sourceIssueStatus === "todo" &&
           (activeRecoveryAction.kind === "deliberate_wait_without_target" || workspaceBaseRef)
         ) {
+          // A bounded owner repair is the recorded owner's own lane: the owner
+          // (or board) may hand the parked task back while that same owner is
+          // still assigned. Any other owner, policy or source state is stale.
+          const currentOwnerRepair =
+            activeRecoveryAction.ownerType === "agent" &&
+            activeRecoveryAction.wakePolicy?.type === "bounded_owner_disposition_repair" &&
+            (lockedIssue.status === "blocked" || lockedIssue.status === "in_progress") &&
+            activeRecoveryAction.ownerAgentId === activeRecoveryAction.returnOwnerAgentId;
+          const currentBoardEscalation =
+            lockedIssue.status === "blocked" &&
+            activeRecoveryAction.ownerType === "board" &&
+            activeRecoveryAction.wakePolicy?.type === "board_escalation";
           if (
-            lockedIssue.status !== "blocked" ||
-            activeRecoveryAction.ownerType !== "board" ||
-            (!workspaceBaseRef && activeRecoveryAction.wakePolicy?.type !== "board_escalation") ||
+            !(currentOwnerRepair || currentBoardEscalation || (workspaceBaseRef && lockedIssue.status === "blocked" && activeRecoveryAction.ownerType === "board")) ||
             !activeRecoveryAction.returnOwnerAgentId ||
             lockedIssue.assigneeAgentId !== activeRecoveryAction.returnOwnerAgentId
           ) {
@@ -10118,8 +10185,32 @@ export function issueRoutes(
         );
         if (!recoveryAction) throw notFound("Active recovery action not found");
 
+        // Persist whole-note identity with the disposition, before fallible post-commit work.
+        await logActivity(tx as unknown as Db, {
+          companyId: issue.companyId,
+          actorType: actor.actorType,
+          actorId: actor.actorId,
+          agentId: actor.agentId,
+          runId: actor.runId,
+          agentApiKeyId: actor.agentApiKeyId,
+          action: "issue.recovery_action_resolved",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            recoveryActionId: recoveryAction.id,
+            recoveryActionStatus: recoveryAction.status,
+            outcome: recoveryAction.outcome,
+            sourceIssueStatus: sourceIssueStatus ?? null,
+            resolutionNote: recoveryAction.resolutionNote,
+            resolutionNoteDigest,
+          },
+        }, postCommitActivityPublications);
+
         return { issue, recoveryAction, chatRetry };
       });
+      for (const publication of postCommitActivityPublications)
+        publishActivity(publication);
       if (result.replayed) {
         res.json({
           issue: "workspaceRepairOnly" in result
@@ -10129,8 +10220,6 @@ export function issueRoutes(
         });
         return;
       }
-      for (const publication of postCommitActivityPublications)
-        publishActivity(publication);
       await flushIssuePostCommitActions(postCommitIssueActions);
 
       await routinesSvc.syncRunStatusForIssue(result.issue.id);
@@ -10158,26 +10247,7 @@ export function issueRoutes(
         });
       }
 
-      await logActivity(db, {
-        companyId: result.issue.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        runId: actor.runId,
-        agentApiKeyId: actor.agentApiKeyId,
-        action: "issue.recovery_action_resolved",
-        entityType: "issue",
-        entityId: result.issue.id,
-        details: {
-          identifier: result.issue.identifier,
-          recoveryActionId: result.recoveryAction.id,
-          recoveryActionStatus: result.recoveryAction.status,
-          outcome: result.recoveryAction.outcome,
-          sourceIssueStatus: sourceIssueStatus ?? null,
-          resolutionNote: result.recoveryAction.resolutionNote,
-          ...(workspaceBaseRef ? { workspaceBaseRef } : {}),
-        },
-      });
+
 
       if (result.chatRetry) {
         // The intent is committed with recovery resolution. A lost immediate
@@ -16216,6 +16286,91 @@ export function issueRoutes(
     res.json(
       await runRedactions.redactForIssue(issue.companyId, issue.id, comments),
     );
+  });
+
+  // External runtimes cannot use native-session steering. Deliver a comment
+  // snapshot and its queue receipt together; a plain GET remains read-only.
+  router.post("/issues/:id/comments/delivery", validate(z.object({}).strict()), async (req, res) => {
+    if (req.actor.type !== "agent" || !req.actor.agentId || !z.string().uuid().safeParse(req.actor.runId).success) {
+      throw forbidden("Comment delivery requires an authenticated agent run");
+    }
+    const issue = await getAccessibleResource(req, res, getIssueById(req, req.params.id as string), "Issue not found");
+    if (!issue || !(await assertIssueReadAllowed(req, res, issue))) return;
+    const actor = getActorInfo(req);
+    const publications: ActivityPublication[] = [];
+    const result = await db.transaction(async tx => {
+      const [current] = await tx.select().from(issueRows).where(and(
+        eq(issueRows.id, issue.id), eq(issueRows.companyId, issue.companyId),
+      )).for("update");
+      const [run] = await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, req.actor.runId!), eq(heartbeatRuns.companyId, issue.companyId),
+        eq(heartbeatRuns.agentId, req.actor.agentId!),
+      )).for("update");
+      const context = readObject(run?.contextSnapshot);
+      const runResult = readObject(run?.resultJson);
+      if (!current || !run || current.assigneeAgentId !== req.actor.agentId ||
+          current.executionRunId !== run.id || run.status !== "running" || run.finishedAt ||
+          (context.issueId !== current.id && context.taskId !== current.id) ||
+          readObject(runResult.executionCancellation).state) {
+        throw forbidden("Comment delivery must target this issue's active, uncancelled run");
+      }
+      if (run.runtimeMode !== "legacy" || current.conversationAgentId) {
+        throw conflict("This runtime must deliver messages through its ordered steering path");
+      }
+      if (!(await hasLiveLegacyController(tx as unknown as Db, run))) {
+        throw forbidden("Comment delivery requires a live external controller");
+      }
+      // Reuse the ordinary reader's historical projection, author attribution
+      // and username/secret redaction; never expose raw comment rows here.
+      const comments = await svc.listComments(current.id);
+      const deliveredCommentIds: string[] = [];
+      const acknowledgements = { ...readObject(runResult.queuedSteeringAcknowledgements) };
+      const wakes = await tx.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, current.companyId), eq(agentWakeupRequests.agentId, run.agentId),
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        sql`${agentWakeupRequests.payload}->>'issueId' = ${current.id}`,
+      )).for("update");
+      for (const wake of wakes) {
+        if (queuedInteractionId(wake.payload) || !queuedCommentIdsFromWakePayload(wake.payload).length) continue;
+        const locked = await lockQueuedCommentState({ tx, issue: current, actor,
+          queueId: wake.id, targetRunId: run.id });
+        const queueDeliveredIds: string[] = [];
+        const returned = new Map(comments.map(comment => [comment.id, comment]));
+        for (const entry of locked.queue.entries) {
+          const comment = returned.get(entry.comment.id);
+          if (comment && !comment.deletedAt &&
+              new Date(comment.updatedAt).getTime() === new Date(entry.comment.updatedAt).getTime()) {
+            queueDeliveredIds.push(comment.id);
+          }
+        }
+        if (queueDeliveredIds.length) {
+          deliveredCommentIds.push(...queueDeliveredIds);
+          const delivered = new Set(queueDeliveredIds);
+          const remaining = locked.queue.entries.map(entry => entry.comment.id).filter(id => !delivered.has(id));
+          const now = new Date();
+          await tx.update(agentWakeupRequests).set(remaining.length
+            ? { payload: withQueuedCommentIdsInWakePayload(locked.wake.payload, remaining), updatedAt: now }
+            : { status: "cancelled", finishedAt: now, updatedAt: now }
+          ).where(eq(agentWakeupRequests.id, locked.wake.id));
+          for (const id of queueDeliveredIds) acknowledgements[id] = {
+            status: "acknowledged", queueId: locked.wake.id, turnId: null,
+            delivery: "issue_comments_read", acknowledgedAt: now.toISOString(),
+          };
+        }
+      }
+      if (deliveredCommentIds.length) await tx.update(heartbeatRuns).set({ resultJson: {
+        ...runResult, queuedSteeringAcknowledgements: acknowledgements,
+      }, updatedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+      if (deliveredCommentIds.length) await logActivity(tx as unknown as Db, {
+        companyId: issue.companyId, actorType: actor.actorType, actorId: actor.actorId,
+        agentId: actor.agentId, runId: actor.runId, agentApiKeyId: actor.agentApiKeyId,
+        action: "issue.queued_comments_delivered", entityType: "issue", entityId: issue.id,
+        details: { commentIds: deliveredCommentIds, delivery: "issue_comments_read" },
+      }, publications);
+      return { comments, deliveredCommentIds };
+    });
+    for (const publication of publications) publishActivity(publication);
+    res.json(await runRedactions.redactForIssue(issue.companyId, issue.id, result));
   });
 
   /** Maps a wake-queue queued-comment mutation error onto the same HTTP error the route threw before this mutation moved into the module. */

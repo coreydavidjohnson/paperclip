@@ -18,6 +18,7 @@ import {
 import {
   createCoalescingQueryClient,
   createInvalidationBatcher,
+  reconcileActiveQueries,
 } from "../lib/query-invalidation-batcher";
 import {
   patchRunStatusInList,
@@ -1393,6 +1394,9 @@ function invalidateActivityQueries(
             : undefined;
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(ref), ...invalidationOptions });
         queryClient.invalidateQueries({ queryKey: queryKeys.issues.activity(ref), ...invalidationOptions });
+        if (action === "issue.queued_comments_delivered") {
+          queryClient.invalidateQueries({ queryKey: queryKeys.issues.queuedComments(ref) });
+        }
         if (action === "issue.comment_added" || action === "issue.conversation_session_started") {
           queryClient.invalidateQueries({ queryKey: queryKeys.issues.comments(ref), ...invalidationOptions });
         }
@@ -1973,7 +1977,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
     if (wasHidden.current) {
       wasHidden.current = false;
       // Reconcile events missed while hidden, including completed runs/issues.
-      void queryClient.invalidateQueries({ type: "active" }, { cancelRefetch: false });
+      reconcileActiveQueries(queryClient, invalidationBatcher, liveCompanyId);
     }
 
     let closed = false;
@@ -2000,7 +2004,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
       if (closed || pollTimer !== null) return;
       // Visible queries still need fresh state when realtime is unavailable.
       pollTimer = window.setInterval(() => {
-        void queryClient.invalidateQueries({ type: "active" }, { cancelRefetch: false });
+        reconcileActiveQueries(queryClient, invalidationBatcher, liveCompanyId);
       }, DISCONNECTED_POLL_INTERVAL_MS);
     };
 
@@ -2041,7 +2045,7 @@ export function LiveUpdatesProvider({ children }: { children: ReactNode }) {
         }
         // The initial page queries can finish before the first subscription,
         // too. Reconcile that gap as well as reconnects: events are not replayed.
-        void queryClient.invalidateQueries({ type: "active" }, { cancelRefetch: false });
+        reconcileActiveQueries(queryClient, invalidationBatcher, liveCompanyId);
         reconnectAttempt = 0;
       };
 

@@ -1,3 +1,4 @@
+import { createCompletionTiming } from "../completion-timing.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -97,7 +98,7 @@ describe.skipIf(!support.supported)("heartbeat runtime execution boundary", () =
         collectStoppedInstructions: async () => { instructionSave = { state: "saved", revisionId: "during-execution" }; },
         nativeInstructionReservation: null, releaseInstructionCopy: vi.fn(async () => {}),
       },
-      trace: { providerTraceCapture: null, nativeRunnerPreparationSpans: [], attestedQuestionResponseAtMs: null, attemptStartedAtMs: Date.now(), environmentAcquireStartedAtMs: Date.now(), environmentRealizeEndedAtMs: Date.now() },
+      trace: { completionTiming: createCompletionTiming(run.id, () => {}), providerTraceCapture: null, nativeRunnerPreparationSpans: [], attestedQuestionResponseAtMs: null, attemptStartedAtMs: Date.now(), environmentAcquireStartedAtMs: Date.now(), environmentRealizeEndedAtMs: Date.now() },
       control: { executionControl, executionPhaseContext: { onExecutionPhase: executionControl.phases.enter },
         dispatchResolvedInteractionContinuationWithAtomicGate: async dispatch => ({ dispatched: true, resultPromise: dispatch(vi.fn()) }),
       },

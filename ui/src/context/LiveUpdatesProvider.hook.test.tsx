@@ -317,7 +317,14 @@ describe("LiveUpdatesProvider socket run notification scope", () => {
       document.dispatchEvent(new Event("visibilitychange"));
     });
     await vi.waitFor(() => expect(sockets).toHaveLength(2));
-    expect(invalidate).toHaveBeenCalledExactlyOnceWith({ type: "active" }, { cancelRefetch: false });
+    expect(invalidate).toHaveBeenCalledExactlyOnceWith(
+      { type: "active", predicate: expect.any(Function) }, { cancelRefetch: false },
+    );
+    const predicate = invalidate.mock.calls[0]![0]!.predicate!;
+    expect(predicate({ queryKey: ["issues", "company-1"] } as never)).toBe(false);
+    expect(predicate({ queryKey: ["attention", "company-1"] } as never)).toBe(false);
+    expect(predicate({ queryKey: ["issues", "company-2"] } as never)).toBe(true);
+    expect(predicate({ queryKey: ["issue", "child-task"] } as never)).toBe(true);
   });
 
   it.each(["parent-agent", "child-agent"])("shows an unrelated retryable failure without issueId for %s", async (agentId) => {

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +38,9 @@ import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
+import * as routineServices from "../services/routines.js";
+import { instanceSettingsService } from "../services/instance-settings.js";
+import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { recoveryService } from "../services/recovery/service.js";
 import { issueService } from "../services/issues.js";
 import { withNativeWorkspaceFinalizationOwnership } from "../services/native-runtime/native-workspace-finalization-ownership.js";
@@ -1935,6 +1938,44 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await getExecutionBlocker(db, companyId, sourceIssueId)).not.toBeNull();
   });
 
+  it.each(["unchanged", "human_reblock", "human_edit", "no_proof"])("guards resolved compression restoration under the issue lock (%s)", async (mode) => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", errorCode: "omnigent_context_compression_failed" }).where(eq(heartbeatRuns.id, runId));
+    const [blocked] = await db.update(issues).set({ status: "blocked", updatedAt: new Date() }).where(eq(issues.id, sourceIssueId)).returning();
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", status: "resolved", outcome: "blocked", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+      nextAction: "Preserve the stopped compression session.", evidence: { runId,
+        originalFailureCode: "omnigent_context_compression_failed",
+        ...(mode === "no_proof" ? {} : { managedCompressionBlock: {
+          runId, statusVersion: blocked!.statusVersion, updatedAt: blocked!.updatedAt.toISOString(),
+        } }), automaticRecovery: { policy: "preserve_without_replay_v1", replay: "blocked" } } }).returning();
+    // The helper's earlier read saw `blocked`. A later edit must win even if
+    // restoration arrives with otherwise valid source and provider evidence.
+    if (mode === "human_reblock") {
+      await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+      await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    } else if (mode === "human_edit") {
+      await db.update(issues).set({ updatedAt: new Date(blocked!.updatedAt.getTime() + 1000) }).where(eq(issues.id, sourceIssueId));
+    }
+    const body = { actionId: action!.id, outcome: "restored", sourceIssueStatus: "todo",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "mixed",
+        outcomeEvidence: "The original session completed managed compaction; prior work remains preserved and must not be replayed." } };
+    const app = createApp();
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(mode === "unchanged" ? 200 : 409);
+    const [after] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
+    if (mode === "unchanged") {
+      expect(after!.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "pending" });
+      await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(after);
+    } else {
+      expect(after).toEqual(action);
+      expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]!.status).toBe("blocked");
+    }
+  });
+
   it("reconciles a settled execution hold while preserving dependencies and approvals without replay", async () => {
     const { companyId, coderId, managerId, sourceIssueId, prefix } = await seedCompany();
     const runId = randomUUID();
@@ -2306,6 +2347,231 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(receipt!.evidence).toEqual(newerEvidence);
   });
 
+  it("bounds recovery history and never returns another source or company action", async () => {
+    const fixture = await seedCompany();
+    const other = await seedCompany();
+    const rows = Array.from({ length: 51 }, (_, index) => makeRecoveryActionRow({
+      companyId: fixture.companyId, sourceIssueId: fixture.sourceIssueId, ownerAgentId: fixture.coderId,
+      status: "resolved", outcome: "restored", fingerprint: `per422:history:${index}`,
+    }));
+    await db.insert(issueRecoveryActions).values(rows as any);
+    const foreign = makeRecoveryActionRow({ companyId: other.companyId, sourceIssueId: other.sourceIssueId, ownerAgentId: other.coderId,
+      status: "resolved", outcome: "restored", resolutionNote: "Other company evidence" });
+    await db.insert(issueRecoveryActions).values(foreign as any);
+    const app = createApp();
+    const history = await request(app).get(`/api/issues/${fixture.sourceIssueId}/recovery-actions`).expect(200);
+    expect(history.body.active).toBeNull();
+    expect(history.body.actions).toHaveLength(50);
+    expect(history.body.hasMore).toBe(true);
+    expect(history.body.actions.every((row: any) => row.companyId === fixture.companyId && row.sourceIssueId === fixture.sourceIssueId)).toBe(true);
+    await request(app).get(`/api/issues/${fixture.sourceIssueId}/recovery-actions`).query({ actionId: foreign.id }).expect(404);
+    await request(app).post(`/api/issues/${fixture.sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: foreign.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "Must not alter another company record.",
+    }).expect(404);
+  });
+
+  it("keeps restored wake actions discoverable and records a late disposition note without replay", async () => {
+    const { companyId, coderId, sourceIssueId, prefix } = await seedCompany();
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));
+    const service = issueRecoveryActionService(db);
+    const action = await service.upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "per422:fixture",
+      nextAction: "Repair the disposition.", wakePolicy: { type: "board_escalation" },
+    });
+    const wake = vi.fn(async () => null);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const originalNote = "Restored to the original owner for disposition repair.";
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: originalNote,
+    }).expect(200);
+    for (const ref of [sourceIssueId, `${prefix}-1`]) {
+      const history = await request(app).get(`/api/issues/${ref}/recovery-actions`).expect(200);
+      expect(history.body.active).toBeNull();
+      expect(history.body.actions).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: action.id, status: "resolved", resolutionNote: originalNote }),
+      ]));
+      const exact = await request(app).get(`/api/issues/${ref}/recovery-actions`).query({ actionId: action.id }).expect(200);
+      expect(exact.body.actions.map((row: any) => row.id)).toEqual([action.id]);
+    }
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: {
+      owner: { agentId: coderId }, action: "Complete the separate prerequisite delivery task.",
+    }}).where(eq(issues.id, sourceIssueId));
+    const lateNote = "Source now waits for the prerequisite delivery task; no execution was repeated.";
+    const payload = { actionId: action.id, outcome: "blocked", sourceIssueStatus: "blocked", resolutionNote: lateNote };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(payload).expect(200);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(payload).expect(200);
+    const exact = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: action.id }).expect(200);
+    expect(exact.body.actions[0]).toMatchObject({
+      id: action.id, status: "resolved", outcome: "handed_back", resolutionNote: originalNote + String.fromCharCode(10, 10) + lateNote,
+    });
+    const source = await request(app).get(`/api/issues/${sourceIssueId}`).expect(200);
+    expect(source.body).toMatchObject({ status: "blocked", assigneeAgentId: coderId,
+      unblockDescriptor: { owner: { agentId: coderId } } });
+    expect(wake).toHaveBeenCalledTimes(1);
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(logs.filter(entry => entry.action === "issue.recovery_action_note_added")).toHaveLength(1);
+    await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: randomUUID() }).expect(404);
+    await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: "invalid" }).expect(400);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "New request must not change the source.",
+    }).expect(409);
+    const newer = await service.upsertSourceScoped({ companyId, sourceIssueId, kind: "missing_disposition",
+      cause: "successful_run_missing_issue_disposition", fingerprint: "per422:newer", nextAction: "Preserve this new action." });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ ...payload,
+      resolutionNote: "Must not write while a different recovery action is active." }).expect(409);
+    expect(await service.getActiveForIssue(companyId, sourceIssueId)).toMatchObject({ id: newer.id });
+  });
+
+  it("retains original empty paragraphs and deduplicates whole late notes across intervening annotations", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    await db.update(issues).set({ status: "blocked", assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "per436:late-notes",
+      nextAction: "Repair the disposition.", wakePolicy: { type: "board_escalation" },
+    });
+    const wake = vi.fn(async () => null);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const separator = String.fromCharCode(10, 10);
+    const originalNote = "Original disposition." + separator + separator + "Retain the original empty paragraph.";
+    const endpoint = `/api/issues/${sourceIssueId}/recovery-actions/resolve`;
+    await request(app).post(endpoint).send({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: originalNote,
+    }).expect(200);
+    const [originalAction] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const [originalIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    expect(originalAction.resolutionNote).toBe(originalNote);
+    const firstNote = "Verified the source disposition." + separator + "No execution was repeated.";
+    // This distinct note contains the first verbatim; containment is not identity.
+    const secondNote = firstNote + " A separate observation.";
+    const payload = (resolutionNote: string) => ({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote,
+    });
+    await request(app).post(endpoint).send(payload(firstNote)).expect(200);
+    await request(app).post(endpoint).send(payload(secondNote)).expect(200);
+    // Concurrent retries must also share the durable identity under the issue lock.
+    await Promise.all([firstNote, firstNote, secondNote, originalNote].map(async (note) => {
+      await request(app).post(endpoint).send(payload(note)).expect(200);
+    }));
+    const [annotated] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const [source] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect.soft(annotated.resolutionNote).toBe(originalNote + separator + firstNote + separator + secondNote);
+    expect.soft(annotated).toEqual({ ...originalAction, resolutionNote: annotated.resolutionNote });
+    expect.soft(source).toEqual(originalIssue);
+    expect.soft(wake).toHaveBeenCalledTimes(1);
+    const annotations = logs.filter(entry => entry.action === "issue.recovery_action_note_added");
+    expect.soft(annotations).toHaveLength(2);
+    for (const note of [firstNote, secondNote]) {
+      expect.soft(annotations.filter(entry => entry.details?.resolutionNote === note && entry.details?.recoveryActionId === action.id)).toHaveLength(1);
+    }
+    expect.soft(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
+  });
+
+  async function seedDispositionNoteRecovery() {
+    const fixture = await seedCompany();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, fixture.sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId: fixture.companyId, sourceIssueId: fixture.sourceIssueId,
+      kind: "deliberate_wait_without_target", ownerType: "board", returnOwnerAgentId: fixture.coderId,
+      cause: "deliberate_wait_without_target", fingerprint: "per436:note-digest",
+      nextAction: "Repair the disposition.", wakePolicy: { type: "board_escalation" },
+    });
+    const wake = vi.fn(async () => null);
+    return { ...fixture, action, wake, endpoint: `/api/issues/${fixture.sourceIssueId}/recovery-actions/resolve` };
+  }
+
+  it.each(["synthetic JWT", "current username"])("deduplicates whole notes after audit redaction of %s", async (redaction) => {
+    const { companyId, sourceIssueId, action, wake, endpoint } = await seedDispositionNoteRecovery();
+    const settings = instanceSettingsService(db);
+    const priorSettings = await settings.getGeneral();
+    await settings.updateGeneral({ censorUsernameInLogs: true });
+    try {
+      const username = os.userInfo().username;
+      const jwtHeader = Buffer.from('{"alg":"HS256","typ":"JWT"}').toString("base64url");
+      const syntheticJwt = (subject: string) => `${jwtHeader}.${Buffer.from(JSON.stringify({ sub: subject })).toString("base64url")}.c3ludGhldGlj`;
+      const originalNote = redaction === "synthetic JWT" ? syntheticJwt("original") : `Original disposition by ${username} (operator).`;
+      const firstNote = redaction === "synthetic JWT" ? syntheticJwt("first") : `Verified disposition by ${username} (operator).`;
+      const secondNote = redaction === "synthetic JWT" ? syntheticJwt("second") : "A separate observation.";
+      const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+      const payload = (resolutionNote: string) => ({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote });
+      await request(app).post(endpoint).send(payload(originalNote)).expect(200);
+      const [originalAction] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      const [originalIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+      await request(app).post(endpoint).send(payload(firstNote)).expect(200);
+      await request(app).post(endpoint).send(payload(secondNote)).expect(200);
+      await Promise.all([firstNote, firstNote, originalNote, secondNote].map(async note => {
+        await request(app).post(endpoint).send(payload(note)).expect(200);
+      }));
+      const [annotated] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      const [source] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+      const logs = await db.select().from(activityLog).where(and(eq(activityLog.companyId, companyId), eq(activityLog.entityId, sourceIssueId)));
+      expect.soft(annotated.resolutionNote).toBe([originalNote, firstNote, secondNote].join("\n\n"));
+      expect.soft(annotated).toEqual({ ...originalAction, resolutionNote: annotated.resolutionNote });
+      expect.soft(source).toEqual(originalIssue);
+      expect.soft(wake).toHaveBeenCalledTimes(1);
+      const resolved = logs.filter(entry => entry.action === "issue.recovery_action_resolved");
+      const annotations = logs.filter(entry => entry.action === "issue.recovery_action_note_added");
+      expect.soft(resolved).toHaveLength(1);
+      expect.soft(annotations).toHaveLength(2);
+      // Read the persisted digest, not just its pre-sanitization input.
+      for (const [note, entries] of [[originalNote, resolved], [firstNote, annotations], [secondNote, annotations]] as const) {
+        const digest = createHash("sha256").update(note).digest("hex");
+        expect.soft(entries.filter(entry => entry.details?.resolutionNoteDigest === digest && entry.details?.recoveryActionId === action.id)).toHaveLength(1);
+      }
+      expect.soft(resolved[0]?.details?.resolutionNote).not.toBe(originalNote);
+      expect.soft(annotations.every(entry => entry.details?.resolutionNote !== firstNote)).toBe(true);
+    } finally {
+      await settings.updateGeneral({ censorUsernameInLogs: priorSettings.censorUsernameInLogs });
+    }
+  });
+
+  it("retains original whole-note identity across a real route post-commit failure and A/B/A retry", async () => {
+    const { companyId, sourceIssueId, action, wake, endpoint } = await seedDispositionNoteRecovery();
+    const originalFactory = routineServices.routineService;
+    const sync = vi.fn(async () => { throw new Error("fixture post-commit routines failure"); });
+    const factory = vi.spyOn(routineServices, "routineService").mockImplementation((...args) => ({
+      ...originalFactory(...args), syncRunStatusForIssue: sync,
+    }));
+    const publishedReads: Promise<unknown>[] = [];
+    const unsubscribe = subscribeCompanyLiveEvents(companyId, event => {
+      if (event.type === "activity.logged" && event.payload.action === "issue.recovery_action_resolved") {
+        publishedReads.push(db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)).then(rows => rows[0]));
+      }
+    });
+    try {
+      const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+      const originalNote = "Original committed disposition.";
+      const lateNote = "Later evidence without another execution.";
+      const payload = (resolutionNote: string) => ({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote });
+      await request(app).post(endpoint).send(payload(originalNote)).expect(500);
+      expect(sync).toHaveBeenCalledTimes(1);
+      const [originalAction] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      const [originalIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+      expect(originalAction).toMatchObject({ status: "resolved", outcome: "handed_back", resolutionNote: originalNote });
+      // B commits after A, while A's response failed before its old audit write.
+      await request(app).post(endpoint).send(payload(lateNote)).expect(200);
+      await request(app).post(endpoint).send(payload(originalNote)).expect(200);
+      const [annotated] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      const [source] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+      const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+      expect.soft(annotated.resolutionNote).toBe(originalNote + "\n\n" + lateNote);
+      expect.soft(annotated).toEqual({ ...originalAction, resolutionNote: annotated.resolutionNote });
+      expect.soft(source).toEqual(originalIssue);
+      const resolved = logs.filter(entry => entry.action === "issue.recovery_action_resolved");
+      expect.soft(resolved).toHaveLength(1);
+      expect.soft(resolved[0]?.details?.resolutionNoteDigest).toBe(createHash("sha256").update(originalNote).digest("hex"));
+      expect.soft(logs.filter(entry => entry.action === "issue.recovery_action_note_added")).toHaveLength(1);
+      expect.soft(await Promise.all(publishedReads)).toEqual([originalAction]);
+      expect.soft(wake).not.toHaveBeenCalled();
+      expect.soft(sync).toHaveBeenCalledTimes(1);
+    } finally {
+      factory.mockRestore();
+      unsubscribe();
+    }
+  });
+
   it("resolves an active recovery action and removes it from active projections", async () => {
     const { companyId, managerId, sourceIssueId } = await seedCompany();
     const recoveryActionSvc = issueRecoveryActionService(db);
@@ -2396,6 +2662,64 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     // A settled interaction must not leave a permanent retry veto.
     await db.update(issueThreadInteractions).set({ status: "resolved", resolvedAt: new Date() }).where(eq(issueThreadInteractions.id, interaction!.id));
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands a current agent-owned disposition repair back once with persisted history (PER-1091)", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, issueId: sourceIssueId, runId });
+    await db.update(issues).set({ checkoutRunId: runId, executionRunId: runId }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "agent",
+      ownerAgentId: coderId, previousOwnerAgentId: coderId, returnOwnerAgentId: coderId,
+      cause: "deliberate_wait_without_target", fingerprint: "disposition_repair:v1:per1091",
+      evidence: { reason: "deliberate_wait_without_target", sourceRunId: runId },
+      nextAction: "Restore the owner's work path.",
+      wakePolicy: { type: "bounded_owner_disposition_repair", retryAgentId: coderId, attempt: 1, maxAttempts: 2 },
+      maxAttempts: 2,
+    });
+    const wake = vi.fn(async () => null);
+    const app = createApp({ type: "agent", companyId, agentId: coderId, runId, source: "agent_key" }, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "Owner work path restored." };
+    const first = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(first.body.issue).toMatchObject({ status: "todo", assigneeAgentId: coderId, activeRecoveryAction: null });
+    expect(first.body.issue).toMatchObject({ checkoutRunId: null, executionRunId: null });
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toMatchObject({ checkoutRunId: null, executionRunId: null });
+    expect(first.body.recoveryAction).toMatchObject({ id: action.id, status: "resolved", outcome: "handed_back", fingerprint: action.fingerprint, evidence: action.evidence });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith(coderId, expect.objectContaining({
+      reason: "issue_recovery_action_restored", payload: expect.objectContaining({ issueId: sourceIssueId, recoveryActionId: action.id }),
+    }));
+    const stored = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(stored).toEqual([expect.objectContaining({ status: "resolved", outcome: "handed_back", fingerprint: action.fingerprint, evidence: action.evidence })]);
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
+    expect(logs.filter(entry => entry.action === "issue.updated")).toHaveLength(1);
+    // Replaying an existing note does not authorize an agent to append a new one.
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      ...body, resolutionNote: "Unapproved new evidence.",
+    }).expect(403);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(stored);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toEqual(logs);
+    // Once the board annotates, whole-note audit identity must still admit the
+    // original owner's lost-response replay without a second write or wake.
+    const board = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    await request(board).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      ...body, resolutionNote: "Board observation after hand-back.",
+    }).expect(200);
+    const annotated = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const source = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const annotatedLogs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(annotated[0].resolutionNote).toBe(body.resolutionNote + String.fromCharCode(10, 10) + "Board observation after hand-back.");
+    expect(annotatedLogs.filter(entry => entry.action === "issue.recovery_action_note_added")).toHaveLength(1);
+    const readable = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).query({ actionId: action.id }).expect(200);
+    expect(readable.body.actions[0].resolutionNote).toBe(annotated[0].resolutionNote);
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(annotated);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(source);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toEqual(annotatedLogs);
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
