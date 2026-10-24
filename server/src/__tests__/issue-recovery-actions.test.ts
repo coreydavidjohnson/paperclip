@@ -34,6 +34,7 @@ import {
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
+import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
@@ -1849,7 +1850,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(prompt).not.toContain("Do not produce the deliverable");
   });
 
-  it("accepts new verified evidence after an automatic no-replay disposition without reopening on duplicate requests", async () => {
+  it.each(["runId", "sourceRunId"])("reconciles older resolved duplicates through the board route (%s) without replay", async sourceKey => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();
     await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
@@ -1860,6 +1861,13 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       nextAction: "Preserve recorded work without replay.",
       evidence: { runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
     }).returning();
+    const duplicates = await db.insert(issueRecoveryActions).values([1, 2].map(index => ({
+      companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "blocked",
+      ownerType: "board", returnOwnerAgentId: coderId, cause: "uncertain_external_action",
+      fingerprint: runId + index, nextAction: "Old duplicate hold",
+      createdAt: new Date(action!.createdAt.getTime() - 60_000),
+      evidence: { [sourceKey]: runId, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+    }))).returning();
     const app = createApp();
     const body = { actionId: action!.id, outcome: "restored", sourceIssueStatus: "todo",
       executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
@@ -1872,8 +1880,59 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
     expect(recorded!.evidence).not.toHaveProperty("automaticRecovery");
     expect(recorded!.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "pending" });
+    expect(await getExecutionBlocker(db, companyId, sourceIssueId)).toBeNull();
+    for (const duplicate of duplicates) {
+      const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, duplicate.id));
+      expect(settled!.evidence).not.toHaveProperty("automaticRecovery");
+      expect(settled!.evidence).toMatchObject({ executionReconciliation: { runId }, continuationDelivery: "not_requested" });
+    }
     await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(recorded);
+    // Exercise real admission and a lost ACK after the board-route repair.
+    const responsibleUserId = randomUUID();
+    await db.insert(authUsers).values({ id: responsibleUserId, name: "Recovery operator", email: responsibleUserId + "@example.test", emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, companyId));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    let successorId: string | undefined;
+    await deliverReconciledExecutions(db, async (...args) => {
+      const successor = await heartbeat.wakeup(...args);
+      expect(successor).not.toBeNull();
+      successorId = successor!.id;
+      throw new Error("Lost acknowledgement after committed successor");
+    });
+    expect(successorId).toBeDefined();
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, successorId!));
+    await Promise.all([deliverReconciledExecutions(db, heartbeat.wakeup), deliverReconciledExecutions(db, heartbeat.wakeup)]);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action!.id}`));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]!.runId).toBe(successorId);
+
+  });
+
+  it.each(["run", "workspace", "newer", "owner"])("board reconciliation preserves a %s sibling hold", async scope => {
+    const { companyId, coderId, managerId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, sourceIssueId));
+    const row = { companyId, sourceIssueId, kind: "active_run_watchdog", status: "resolved", outcome: "blocked",
+      ownerType: "board", returnOwnerAgentId: coderId, cause: "uncertain_external_action", fingerprint: runId,
+      nextAction: "Inspect this source", evidence: { runId, automaticRecovery: { replay: "blocked" } } };
+    const [action] = await db.insert(issueRecoveryActions).values(row).returning();
+    const [protectedHold] = await db.insert(issueRecoveryActions).values({ ...row, fingerprint: runId + scope,
+      returnOwnerAgentId: scope === "owner" ? managerId : coderId,
+      createdAt: new Date(action!.createdAt.getTime() + (scope === "newer" ? 60_000 : -60_000)),
+      evidence: { ...row.evidence, runId: scope === "run" ? randomUUID() : runId,
+        ...(scope === "workspace" ? { workspaceRestoreRecovery: { schema: "retained-workspace" } } : {}) },
+    }).returning();
+    await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: action!.id, outcome: "restored", sourceIssueStatus: "todo",
+      executionReconciliation: { runId, providerStopped: true, actionOutcome: "not_performed",
+        outcomeEvidence: "The exact selected execution is stopped and no action was submitted." },
+    }).expect(200);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, protectedHold!.id)))[0]).toEqual(protectedHold);
+    expect(await getExecutionBlocker(db, companyId, sourceIssueId)).not.toBeNull();
   });
 
   it("reconciles a settled execution hold while preserving dependencies and approvals without replay", async () => {

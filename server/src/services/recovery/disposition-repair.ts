@@ -76,7 +76,7 @@ export function dispositionRepairDelayMs(attempt: number, fingerprint: string) {
 }
 
 export async function collectDispositionRepairSourceState(
-  db: Db,
+  db: Pick<Db, "select">,
   input: {
     issue: DispositionRepairIssue;
     excludeRunId?: string | null;

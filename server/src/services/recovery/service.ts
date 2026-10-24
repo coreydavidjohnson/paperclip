@@ -2855,8 +2855,9 @@ export function recoveryService(
   async function existingUnresolvedBlockerIssues(
     companyId: string,
     issueId: string,
+    dbOrTx: Pick<Db, "select"> = db,
   ) {
-    return db
+    return dbOrTx
       .select({ id: issueRelations.issueId, identifier: issues.identifier })
       .from(issueRelations)
       .innerJoin(
@@ -2883,20 +2884,6 @@ export function recoveryService(
     return existingUnresolvedBlockerIssues(companyId, issueId).then((rows) =>
       rows.map((row) => row.id),
     );
-  }
-
-  async function openChildIssues(issue: typeof issues.$inferSelect) {
-    return db
-      .select({ id: issues.id, identifier: issues.identifier })
-      .from(issues)
-      .where(
-        and(
-          eq(issues.companyId, issue.companyId),
-          eq(issues.parentId, issue.id),
-          visibleIssueCondition(),
-          notInArray(issues.status, ["done", "cancelled"]),
-        ),
-      );
   }
 
   async function healthyOpenChildIssues(issue: typeof issues.$inferSelect, sameWorkspaceOnly = false) {
@@ -2931,28 +2918,38 @@ export function recoveryService(
   async function resolveContinuationWaitingOnReview(
     issue: typeof issues.$inferSelect,
   ) {
-    const [existingBlockers, openChildren] = await Promise.all([
-      existingUnresolvedBlockerIssues(issue.companyId, issue.id),
-      openChildIssues(issue),
-    ]);
-    const blockedByIssueIds = [
-      ...new Set([
-        ...existingBlockers.map((row) => row.id),
-        ...openChildren.map((row) => row.id),
-      ]),
-    ];
-    if (blockedByIssueIds.length === 0) return null;
-
-    const updated = await issuesSvc.update(issue.id, {
-      status: "blocked",
-      blockedByIssueIds,
+    const publications: ActivityPublication[] = [];
+    const postCommitActions: IssuePostCommitAction[] = [];
+    const result = await db.transaction(async (tx) => {
+      // Recovery observes outside this lock. A newer accepted path wins.
+      const [current] = await tx.select().from(issues).where(and(
+        eq(issues.companyId, issue.companyId), eq(issues.id, issue.id),
+      )).for("update");
+      if (!current || current.hiddenAt
+        || current.status !== issue.status
+        || current.statusVersion !== issue.statusVersion
+        || current.lastStatusDecisionId !== issue.lastStatusDecisionId
+        || current.updatedAt.getTime() !== issue.updatedAt.getTime()
+        || current.assigneeAgentId !== issue.assigneeAgentId
+        || current.assigneeUserId !== issue.assigneeUserId
+        || current.checkoutRunId !== issue.checkoutRunId
+        || current.executionRunId !== issue.executionRunId) return null;
+      const paths = await collectDispositionRepairSourceState(tx, { issue: current });
+      if (paths.hasActiveExecutionPath) return null;
+      // Only explicit current links establish dependencies, never children.
+      const blockers = await existingUnresolvedBlockerIssues(current.companyId, current.id, tx);
+      if (blockers.length === 0) return null;
+      const updated = await issuesSvc.update(current.id, {
+        status: "blocked", companyGuard: current.companyId,
+      }, tx, publications, postCommitActions);
+      return updated ? { updated, blockers } : null;
     });
-    if (!updated) return null;
-
-    const waitingOn = formatIssueLinksForComment([
-      ...openChildren,
-      ...existingBlockers,
-    ]);
+    if (!result) return null;
+    for (const publication of publications) publishActivity(publication);
+    await executeIssuePostCommitActions(db, postCommitActions);
+    const { updated, blockers } = result;
+    const blockedByIssueIds = blockers.map(row => row.id);
+    const waitingOn = formatIssueLinksForComment(blockers);
     await issuesSvc.addComment(
       issue.id,
       `This task is waiting on ${waitingOn} to finish. ` +
@@ -3476,45 +3473,24 @@ export function recoveryService(
         continue;
       }
 
-      const [sourceState, healthyChildren, hasNewSourcePath] =
-        await Promise.all([
-          collectDispositionRepairSourceState(db, { issue }),
-          healthyOpenChildIssues(issue),
-          sourceHasNewPathOutsideRecoveryAction(action),
-        ]);
+      const [sourceState, hasNewSourcePath] = await Promise.all([
+        collectDispositionRepairSourceState(db, { issue }),
+        sourceHasNewPathOutsideRecoveryAction(action),
+      ]);
       const durablePathRestored =
         action.ownerType !== "board" && sourceState.hasDurableWaitingPath;
-      if (
-        durablePathRestored ||
-        healthyChildren.length > 0 ||
-        hasNewSourcePath
-      ) {
-        if (healthyChildren.length > 0 && !sourceState.hasDurableWaitingPath) {
-          const blockerIds = await existingUnresolvedBlockerIssueIds(
-            issue.companyId,
-            issue.id,
-          );
-          await issuesSvc.update(issue.id, {
-            status: "blocked",
-            blockedByIssueIds: [
-              ...new Set([
-                ...blockerIds,
-                ...healthyChildren.map((child) => child.id),
-              ]),
-            ],
-          });
-        }
+      // Parenthood is not a dependency. A newer accepted path retires only
+      // the obsolete recovery action, never the current execution owner.
+      if (durablePathRestored || hasNewSourcePath) {
         const resolved = await recoveryActionsSvc.resolveActiveForIssue({
           companyId: action.companyId,
           sourceIssueId: action.sourceIssueId,
           actionId: action.id,
           status: "resolved",
           outcome: "restored",
-          resolutionNote: durablePathRestored
-            ? `durable_path_restored:${sourceState.durablePathReason ?? "unknown"}`
-            : healthyChildren.length > 0
-              ? "durable_path_restored:healthy_child"
-              : "new_source_execution_path",
+          resolutionNote: hasNewSourcePath
+            ? "new_source_execution_path"
+            : `durable_path_restored:${sourceState.durablePathReason ?? "unknown"}`,
         });
         if (resolved) {
           result.resolved += 1;

@@ -240,6 +240,16 @@ heartbeat.ts.
   in `luma-patch-tests` (real PostgreSQL, refreshed updated_at, concurrent sweeps).
   Upstream recheck: `391dd15ff` recovers released comment queues but still filters
   for comment IDs or interaction responses; plain assignment wakes remain absent.
+- PER-1009 recovery repair: parent-child membership never creates dependency links.
+  Recovery retires obsolete actions without mutating a newer accepted source.
+  The remaining review-wait status repair locks the issue, compares source version,
+  timestamp and ownership, and rechecks active paths and explicit links in the
+  same transaction. Terminal dependency history is retained.
+  Board reconciliation settles only older same-company/issue/cause/run/owner
+  duplicate holds without workspace or existing delivery evidence. One selected
+  action retains continuation ownership and its existing idempotency key.
+  Regression suites: heartbeat-process-recovery and issue-recovery-actions,
+  including a real lock-wait race, board resolution and lost-ACK admission.
 - Deployment coupling: PER-1009 owns the schema-gated old-controller drain,
   OmniGenT adapter, parked-wake cutover, real staging matrix and combined release.
   Do not deploy the rebased fork before those gates pass.

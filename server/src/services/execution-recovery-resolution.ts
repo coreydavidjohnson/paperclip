@@ -5,7 +5,7 @@ import { claimedAdapterType, conversationRecoveryActionPredicate, getConversatio
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
-import { and, eq, inArray, isNull, not, or, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lte, not, or, sql } from "drizzle-orm";
 import {
   chatActions,
   environmentLeases,
@@ -175,63 +175,107 @@ export async function markExecutionReconciliation(
   deliveryOwner?: { kind: "chat_failed_run_retry"; actionId: string },
   options?: { workspaceRepairOnly?: boolean; deliverContinuation?: boolean },
 ) {
-  if (options?.workspaceRepairOnly && (deliveryOwner || !hasRequiredWorkspaceRecovery(action.evidence))) {
-    throw conflict("Workspace repair must target the retained source without a continuation owner.");
-  }
-  if (deliveryOwner) {
-    const [retry] = await db
-      .select()
-      .from(chatActions)
+  return db.transaction(async tx => {
+    const db = tx;
+    // Same lock order as board resolution and provider-stop reconciliation.
+    const [source] = await db.select({ id: issues.id }).from(issues).where(and(
+      eq(issues.companyId, action.companyId), eq(issues.id, action.sourceIssueId),
+    )).for("update");
+    if (!source) throw conflict("The recovery issue no longer exists in this company.");
+    const [current] = await db.select().from(issueRecoveryActions).where(and(
+      eq(issueRecoveryActions.id, action.id), eq(issueRecoveryActions.companyId, action.companyId),
+      eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+    )).for("update");
+    if (!current || (current.evidence.runId ?? current.evidence.sourceRunId) !== decision.runId) {
+      throw conflict("The recovery source changed before reconciliation. Refresh the recorded execution.");
+    }
+    action = current;
+    if (options?.workspaceRepairOnly && (deliveryOwner || !hasRequiredWorkspaceRecovery(action.evidence))) {
+      throw conflict("Workspace repair must target the retained source without a continuation owner.");
+    }
+    if (deliveryOwner) {
+      const [retry] = await db
+        .select()
+        .from(chatActions)
+        .where(
+          and(
+            eq(chatActions.companyId, action.companyId),
+            eq(chatActions.id, deliveryOwner.actionId),
+          ),
+        );
+      if (
+        deliveryOwner.kind !== "chat_failed_run_retry" ||
+        !retry ||
+        retry.kind !== "failed_run_retry" ||
+        !["issued", "processing", "processed"].includes(retry.status) ||
+        retry.payload.version !== 1 ||
+        retry.payload.failedRunId !== decision.runId ||
+        retry.payload.issueId !== action.sourceIssueId
+      ) {
+        throw conflict("The authorized chat retry owner is no longer valid.");
+      }
+    }
+    await db
+      .update(nativeRunFinalizations)
+      .set({
+        failureDetail: sql`coalesce(${nativeRunFinalizations.failureDetail}, '{}'::jsonb) || ${JSON.stringify({ replacementDenied: "operator_reconciled" })}::jsonb`,
+      })
       .where(
         and(
-          eq(chatActions.companyId, action.companyId),
-          eq(chatActions.id, deliveryOwner.actionId),
+          eq(nativeRunFinalizations.companyId, action.companyId),
+          eq(nativeRunFinalizations.runId, decision.runId),
         ),
       );
-    if (
-      deliveryOwner.kind !== "chat_failed_run_retry" ||
-      !retry ||
-      retry.kind !== "failed_run_retry" ||
-      !["issued", "processing", "processed"].includes(retry.status) ||
-      retry.payload.version !== 1 ||
-      retry.payload.failedRunId !== decision.runId ||
-      retry.payload.issueId !== action.sourceIssueId
-    ) {
-      throw conflict("The authorized chat retry owner is no longer valid.");
-    }
-  }
-  await db
-    .update(nativeRunFinalizations)
-    .set({
-      failureDetail: sql`coalesce(${nativeRunFinalizations.failureDetail}, '{}'::jsonb) || ${JSON.stringify({ replacementDenied: "operator_reconciled" })}::jsonb`,
-    })
-    .where(
-      and(
-        eq(nativeRunFinalizations.companyId, action.companyId),
-        eq(nativeRunFinalizations.runId, decision.runId),
-      ),
-    );
-  await db
-    .update(issueRecoveryActions)
-    .set({
-      evidence: {
-        ...action.evidence,
-        automaticRecovery: undefined,
-        executionReconciliation: {
-          ...decision,
-          actorId,
-          recordedAt: new Date().toISOString(),
+    await db
+      .update(issueRecoveryActions)
+      .set({
+        evidence: {
+          ...action.evidence,
+          automaticRecovery: undefined,
+          executionReconciliation: {
+            ...decision,
+            actorId,
+            recordedAt: new Date().toISOString(),
+          },
+          continuationDelivery: options?.workspaceRepairOnly || options?.deliverContinuation === false ? "not_requested" : deliveryOwner ? "delegated" : "pending",
+          ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
         },
-        continuationDelivery: options?.workspaceRepairOnly || options?.deliverContinuation === false ? "not_requested" : deliveryOwner ? "delegated" : "pending",
-        ...(deliveryOwner ? { continuationDeliveryOwner: deliveryOwner } : {}),
-      },
-    })
-    .where(
-      and(
-        eq(issueRecoveryActions.companyId, action.companyId),
-        eq(issueRecoveryActions.id, action.id),
-      ),
-    );
+      })
+      .where(
+        and(
+          eq(issueRecoveryActions.companyId, action.companyId),
+          eq(issueRecoveryActions.id, action.id),
+        ),
+      );
+    if (!options?.workspaceRepairOnly) {
+      // Old resolved rows can still enforce no-replay. Settle only obsolete
+      // siblings for this exact execution, retaining one continuation owner.
+      // Workspace or newer evidence needs its own verified disposition.
+      const siblings = await db.select().from(issueRecoveryActions).where(and(
+        eq(issueRecoveryActions.companyId, current.companyId),
+        eq(issueRecoveryActions.sourceIssueId, current.sourceIssueId),
+        eq(issueRecoveryActions.cause, current.cause),
+        inArray(issueRecoveryActions.status, ["resolved", "cancelled"]),
+        sql`${issueRecoveryActions.id} <> ${current.id}`,
+        lte(issueRecoveryActions.createdAt, current.createdAt),
+        sql`coalesce(${issueRecoveryActions.evidence}->>'runId', ${issueRecoveryActions.evidence}->>'sourceRunId') = ${decision.runId}`,
+        sql`not (${issueRecoveryActions.evidence} ? 'workspaceRestoreFailure')`,
+        sql`not (${issueRecoveryActions.evidence} ? 'workspaceRestoreRecovery')`,
+        sql`not (${issueRecoveryActions.evidence} ? 'executionReconciliation')`,
+        sql`coalesce(${issueRecoveryActions.evidence}->>'continuationDelivery', 'not_requested') = 'not_requested'`,
+      )).for("update");
+      for (const sibling of siblings) {
+        // A changed return owner is not an obsolete duplicate of this action.
+        if (sibling.returnOwnerAgentId !== current.returnOwnerAgentId) continue;
+        await db.update(issueRecoveryActions).set({
+          evidence: { ...sibling.evidence, automaticRecovery: undefined,
+            executionReconciliation: { ...decision, actorId, recordedAt: new Date().toISOString() },
+            continuationDelivery: "not_requested", reconciliationOwnerActionId: current.id },
+          wakePolicy: null, monitorPolicy: null, updatedAt: new Date(),
+        }).where(and(eq(issueRecoveryActions.companyId, current.companyId), eq(issueRecoveryActions.id, sibling.id)));
+      }
+    }
+  });
 }
 
 export async function deliverReconciledExecutions(

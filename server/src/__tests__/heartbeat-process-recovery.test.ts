@@ -1681,7 +1681,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     "preserves AI configuration recovery and reports only unexpected causes: %s", async (cause) => {
       const { companyId, agentId, issueId, runId, wakeupRequestId } = await seedQueuedIssueRunFixture();
       await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" }).onConflictDoNothing();
-      await db.update(agents).set({ runtimeConfig: {
+      await db.update(agents).set({ adapterConfig: { cwd: os.tmpdir() }, runtimeConfig: {
         heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 },
         aiConnection: { provider: "openai", method: "api_key", mode: "responsible_user" },
       } }).where(eq(agents.id, agentId));
@@ -7290,7 +7290,86 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
   });
 
-  it.each([false, "receipt", "launch", "provider", "cleanup"])("converts a continuation parked for review into a dependency wait on its open sub-tasks (dispatch receipt: %s)", async dispatchReceipt => {
+  it.each(["running", "wake"] as const)("PER-95 recovery cannot invent a child blocker over a newer accepted %s", async path => {
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress", runStatus: "succeeded", livenessState: "advanced",
+    });
+    const childId = randomUUID(), nextRunId = randomUUID(), actionId = randomUUID();
+    await db.insert(issues).values({ id: childId, companyId, parentId: issueId,
+      title: "Obsolete child, not a dependency", status: "todo", assigneeAgentId: agentId,
+      monitorNextCheckAt: new Date(Date.now() + 60_000), issueNumber: 10 });
+    await db.insert(issueRecoveryActions).values({ id: actionId, companyId, sourceIssueId: issueId,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target",
+      fingerprint: runId, ownerType: "agent", ownerAgentId: agentId,
+      wakePolicy: { type: "bounded_owner_disposition_repair" }, nextAction: "Restore original owner" });
+    if (path === "running") {
+      await db.insert(heartbeatRuns).values({ id: nextRunId, companyId, agentId,
+        status: "running", invocationSource: "assignment", startedAt: new Date(), contextSnapshot: { issueId } });
+      await db.update(issues).set({ checkoutRunId: nextRunId, executionRunId: nextRunId,
+        executionLockedAt: new Date(), updatedAt: new Date() }).where(eq(issues.id, issueId));
+    } else {
+      await db.update(issues).set({ checkoutRunId: null }).where(eq(issues.id, issueId));
+      await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "assignment",
+        reason: "issue_commented", status: "queued", payload: { issueId } });
+    }
+    const [before] = await db.select().from(issues).where(eq(issues.id, issueId));
+    await recoveryService(db, { enqueueWakeup: vi.fn() }).reconcileStrandedAssignedIssues();
+    const [after] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(after).toEqual(before);
+    expect(await sourceBlockerIssueIds(companyId, issueId)).toEqual([]);
+    expect((await selectRecoveryActionsForIssue(issueId)).find(row => row.id === actionId)).toMatchObject({
+      status: "resolved", resolutionNote: "new_source_execution_path",
+    });
+  });
+
+  it("PER-95 recovery rechecks accepted ownership and removed links under the mutation lock", async () => {
+    const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
+      status: "in_progress", runStatus: "cancelled", retryReason: "issue_continuation_needed",
+      runErrorCode: "issue_continuation_waiting_on_review", runError: "Waiting for review",
+    });
+    const childId = randomUUID(), nextRunId = randomUUID();
+    await db.insert(issues).values({ id: childId, companyId, parentId: issueId,
+      title: "Obsolete linked child", status: "todo", issueNumber: 10,
+      monitorNextCheckAt: new Date(Date.now() + 60_000) });
+    await db.insert(issueRelations).values({ companyId, issueId: childId, relatedIssueId: issueId, type: "blocks" });
+    let release!: () => void, entered!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const locked = new Promise<void>(resolve => { entered = resolve; });
+    let writerPid = 0;
+    const writer = db.transaction(async tx => {
+      const pid = await tx.execute(sql`select pg_backend_pid() as pid`);
+      writerPid = Number(pid[0].pid);
+      await tx.select().from(issues).where(eq(issues.id, issueId)).for("update");
+      entered();
+      await gate;
+      // Commit a newer accepted path and link removal before recovery locks.
+      await tx.delete(issueRelations).where(eq(issueRelations.relatedIssueId, issueId));
+      await tx.insert(heartbeatRuns).values({ id: nextRunId, companyId, agentId,
+        status: "running", invocationSource: "assignment", startedAt: new Date(), contextSnapshot: { issueId } });
+      await tx.update(issues).set({ checkoutRunId: nextRunId, executionRunId: nextRunId,
+        updatedAt: new Date() }).where(eq(issues.id, issueId));
+    });
+    await locked;
+    // Start outside the writer async transaction scope.
+    const sweep = recoveryService(db, { enqueueWakeup: vi.fn() }).reconcileStrandedAssignedIssues();
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where ${writerPid} = any(pg_blocking_pids(pid)) and wait_event_type = 'Lock'`);
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 10_000 });
+    } finally {
+      release();
+      await writer;
+      await sweep;
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({
+      status: "in_progress", checkoutRunId: nextRunId, executionRunId: nextRunId,
+    });
+    expect(await sourceBlockerIssueIds(companyId, issueId)).toEqual([]);
+  });
+
+  it.each([false, "receipt", "launch", "provider", "cleanup"])("converts a continuation parked for review into a dependency wait on its explicitly linked sub-tasks (dispatch receipt: %s)", async dispatchReceipt => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "cancelled",
@@ -7350,6 +7429,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       },
     ]);
 
+    await db.insert(issueRelations).values([openChildTodoId, openChildInProgressId, doneChildId].map(blockerId => ({
+      companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks",
+    })));
+
     const heartbeat = heartbeatService(db);
     const result = await heartbeat.reconcileStrandedAssignedIssues();
 
@@ -7370,10 +7453,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     // Original assignee is preserved — no reassignment to a recovery owner.
     expect(umbrella?.assigneeAgentId).toBe(agentId);
 
-    // Only the open children become first-class blockers; the done child is excluded.
+    // Keep explicit dependency links, including terminal history; do not invent child links.
     const blockers = await sourceBlockerIssueIds(companyId, issueId);
     expect(blockers.sort()).toEqual(
-      [openChildTodoId, openChildInProgressId].sort(),
+      [openChildTodoId, openChildInProgressId, doneChildId].sort(),
     );
 
     // No stranded-recovery action/issue is opened for a deliberate wait.
@@ -7487,7 +7570,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
     // Only the still-open blocker is carried over; the resolved one is excluded.
     const blockers = await sourceBlockerIssueIds(companyId, issueId);
-    expect(blockers).toEqual([openBlockerId]);
+    expect(blockers.sort()).toEqual([openBlockerId, doneBlockerId].sort());
 
     const recoveryIssues = await selectStrandedRecoveryIssuesForCompany(companyId);
     expect(recoveryIssues).toHaveLength(0);
