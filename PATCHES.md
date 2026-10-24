@@ -1220,3 +1220,15 @@ fixtures now return the requested resolution outcome and model the new action-ro
 lock; aborts require zero source writes. The company-skill database setup uses
 the existing shared embedded-Postgres test cost budget instead of a 20s override.
 The live readiness deadline remains two seconds.
+
+## PER-1181: reuse native embedded-database startup budgets
+
+Build 11811 passed 1,088 cases and failed company-skills-service's hardcoded
+20-second database setup hook. Reuse the two test-only hook corrections from
+814ca51c021ddacc8e41ed0d35d16107b96e9009 without its compact-storage ancestors.
+Both startup hooks use the existing EMBEDDED_POSTGRES_TEST_TIMEOUT_MS budget,
+as their sibling database suites do. Fixture TMPDIR was inspected: unset,
+backed by disposable container overlay, with ample space. This change does not
+assert that storage is the sole cause, change assertions or contention-test
+limits, or change production deadlines. Remove when upstream aligns these hooks.
+The full packaged image gate remains mandatory.
