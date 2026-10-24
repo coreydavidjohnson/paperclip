@@ -1262,3 +1262,12 @@ The full packaged image gate remains mandatory.
 ### Current production refresh, 2026-10-24
 
 Reapplied only the two-module PER-1108 Stop-intent delta on c069c7a94206c1d1dd503b84524457217096142d, preserving released PER-1181 recovery. Current production image 11813 reproduced cancelled/provider-running/zero-interrupts in a disposable two-server test. The owner-intent regression failed before this patch and passed 2/2 after it. Upstream v2026.1023.0 still captures Stop ownership in the process-local map in heartbeat/run-control.ts; its watcher has no owner-intent callback. No broad upstream upgrade, schema change or replay authority. Final-image HA acceptance remains required.
+
+### Local child interruption fixture, 2026-10-24
+
+The full build gate caught a fixture contradiction: the active legacy approval
+interruption case installs a real local child in runningProcesses but seeds a
+random foreign controllerBootId. Cross-process cancellation must not treat that
+as local authority. Set only that fixture row to the actual process boot UUID;
+keep the 15-second test timeout, assertions and production ownership check intact.
+The original failure remains retained; the final exact-image gate must pass.

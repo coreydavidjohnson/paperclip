@@ -26,6 +26,7 @@ import {
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { legacyControllerBootId } from "../services/legacy-controller-lease.js";
 import { issueService } from "../services/issues.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
@@ -512,7 +513,10 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     testProcesses.set(seeded.runId, child);
     runningProcesses.set(seeded.runId, { child, graceSec: 1, processGroupId: null });
-    await db.update(heartbeatRuns).set({ processPid: child.pid }).where(eq(heartbeatRuns.id, seeded.runId));
+    // This process owns the real child. A random foreign boot UUID models a
+    // different controller and correctly waits for that controller to stop it.
+    await db.update(heartbeatRuns).set({ processPid: child.pid, controllerBootId: legacyControllerBootId })
+      .where(eq(heartbeatRuns.id, seeded.runId));
     // Occupy another task to inspect admission without invoking a paid provider.
     await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
       status: "running", contextSnapshot: { issueId: randomUUID() } });
