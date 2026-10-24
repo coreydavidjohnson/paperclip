@@ -1232,3 +1232,33 @@ backed by disposable container overlay, with ample space. This change does not
 assert that storage is the sole cause, change assertions or contention-test
 limits, or change production deadlines. Remove when upstream aligns these hooks.
 The full packaged image gate remains mandatory.
+## Cross-instance Stop owner intent (PER-1108)
+- Restore the previously isolated-qualified 0798414f change on the current
+  production fork base e3410f6a (including the current PER-309 release).
+  Remote controllers save cancellation intent;
+  only the provider-owning controller interrupts and acknowledges the run.
+  A terminal row without a provider acknowledgement is not success.
+- Required even with one timer scheduler: disabled-scheduler instances still
+  run atomic delivery/cleanup workers and may own an adapter continuation.
+  HTTP mutation forwarding alone does not make that path single-process.
+- Upstream check: master 65f59e339a9fb6e0635bcbd8c36791bd610326a6 and latest
+  listed release v2026.1012.0 (bba6a45f0d364cfd962ac59b3bdf2426a8222adb)
+  both contain legacy-controller-lease.ts. Their lease watchers renew ownership
+  but do not read executionCancellation or invoke the owning Stop callback.
+  Released cancelRunInternal still captures adapter ownership from the local
+  process map. Newer structured cancellation metadata alone is not the missing
+  remote-owner handoff. Keep this bounded backport on the current production
+  base rather than combining an urgent replica change with a broad upgrade.
+  No upstream release upgrade or new dependency.
+- Native regression: `node --experimental-vm-modules --test
+  scripts/legacy-controller-stop-intent.test.mjs`; current-base baseline failed
+  requested intent (0 owner callbacks), while ordinary renewal passed.
+  Isolated two-server Stop/takeover acceptance is also required on the final
+  built image; the earlier image receipt is retained, not substituted.
+- Retirement: drop when a released upstream equivalent supports cross-instance
+  provider-owned cancellation acknowledgements and passes the same contracts.
+  No schema, migration, authorization, budget or provider replay change.
+
+### Current production refresh, 2026-10-24
+
+Reapplied only the two-module PER-1108 Stop-intent delta on c069c7a94206c1d1dd503b84524457217096142d, preserving released PER-1181 recovery. Current production image 11813 reproduced cancelled/provider-running/zero-interrupts in a disposable two-server test. The owner-intent regression failed before this patch and passed 2/2 after it. Upstream v2026.1023.0 still captures Stop ownership in the process-local map in heartbeat/run-control.ts; its watcher has no owner-intent callback. No broad upstream upgrade, schema change or replay authority. Final-image HA acceptance remains required.
