@@ -1,22 +1,27 @@
+import { z } from "zod";
 import { managedCompressionBlockForTransition } from "./managed-compression-block.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { claimedAdapterType, conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
-import { and, eq, inArray, isNull, lte, not, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lte, not, or, sql } from "drizzle-orm";
 import {
   chatActions,
   environmentLeases,
   heartbeatRuns,
   issueRecoveryActions,
+  issueComments,
+  issueThreadInteractions,
+  approvals,
+  issueApprovals,
   issues,
   nativeRunFinalizations,
   type Db,
 } from "@paperclipai/db";
-import { conflict } from "../errors.js";
+import { HttpError, conflict } from "../errors.js";
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import {
   EXECUTION_RECONCILIATION_CAUSES,
@@ -277,6 +282,103 @@ export async function markExecutionReconciliation(
       }
     }
   });
+}
+
+/** The ordinary user wake may beat the existing reconciliation outbox.
+ * Adopt that exact pending decision, not a caller-provided recovery envelope.
+ * Caller holds the issue lock and inserts the successor in this transaction.
+ */
+export async function admitReconciledUserContinuation(input: {
+  db: Db; companyId: string; issueId: string; agentId: string;
+  actorType?: string | null; actorId?: string | null; reason: string | null;
+  commentId: string | null; successorRunId: string; dependencyReady: boolean;
+}) {
+  const { db, companyId, issueId, agentId, actorId, commentId } = input;
+  if (input.actorType !== "user" || !actorId || !z.string().guid().safeParse(commentId).success || !commentId ||
+      !["issue_commented", "issue_reopened_via_comment"].includes(input.reason ?? "")) return null;
+  const [task] = await db.select().from(issues).where(and(
+    eq(issues.companyId, companyId), eq(issues.id, issueId),
+  )).for("update");
+  if (!task || task.assigneeAgentId !== agentId || ["done", "cancelled"].includes(task.status)) return null;
+  const [comment] = await db.select().from(issueComments).where(and(
+    eq(issueComments.companyId, companyId), eq(issueComments.issueId, issueId),
+    eq(issueComments.id, commentId), eq(issueComments.authorType, "user"),
+    eq(issueComments.authorUserId, actorId), isNull(issueComments.createdByRunId), isNull(issueComments.deletedAt),
+  ));
+  if (!comment?.body.trim()) return null;
+  const actions = await db.select().from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
+    eq(issueRecoveryActions.status, "resolved"), eq(issueRecoveryActions.kind, "active_run_watchdog"),
+    eq(issueRecoveryActions.returnOwnerAgentId, agentId),
+    or(sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`, and(
+      sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'delivered'`,
+      sql`${issueRecoveryActions.evidence}->'explicitUserContinuation'->>'commentId' = ${commentId}`,
+    )),
+  )).orderBy(desc(issueRecoveryActions.createdAt), desc(issueRecoveryActions.id)).for("update");
+  for (const action of actions) {
+    const decision = action.evidence.executionReconciliation as (ExecutionReconciliation & { recordedAt?: string }) | undefined;
+    if (!decision || !z.string().guid().safeParse(decision.runId).success ||
+        decision.runId !== (action.evidence.runId ?? action.evidence.sourceRunId) ||
+        decision.providerStopped !== true || !["completed", "not_performed", "mixed"].includes(decision.actionOutcome) ||
+        !decision.outcomeEvidence?.trim() || hasRequiredWorkspaceRecovery(action.evidence)) continue;
+    const authorization = action.evidence.explicitUserContinuation as Record<string, unknown> | undefined;
+    if (action.evidence.continuationDelivery === "delivered") {
+      if (authorization?.actorId !== actorId || authorization.commentId !== commentId ||
+          authorization.commentUpdatedAt !== comment.updatedAt.toISOString() ||
+          authorization.commentBodyHash !== createHash("sha256").update(comment.body).digest("hex")) continue;
+      const [run] = await db.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+        sql`${heartbeatRuns.id}::text = ${action.evidence.continuationRunId}`,
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+        sql`${heartbeatRuns.contextSnapshot}->>'recoveryActionId' = ${action.id}`,
+        sql`${heartbeatRuns.contextSnapshot}->'explicitUserContinuation'->>'commentId' = ${commentId}`,
+      ));
+      if (run && authorization.runId === run.id && run.retryOfRunId === decision.runId)
+        return { kind: "replayed" as const, run };
+      continue;
+    }
+    const [source] = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, decision.runId),
+    )).for("update");
+    const [latest] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, companyId),
+      or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId),
+        sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
+    )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+    if (!source || latest?.id !== source.id || source.agentId !== agentId || !source.finishedAt ||
+        comment.createdAt <= source.finishedAt ||
+        !Number.isFinite(Date.parse(String(decision.recordedAt))) ||
+        comment.createdAt.getTime() <= Date.parse(String(decision.recordedAt))) continue;
+    const blocked = (message: string) => ({ kind: "blocked" as const, recoveryActionId: action.id, message });
+    if (task.executionRunId || task.checkoutRunId || !input.dependencyReady)
+      return blocked("The current execution or dependency must finish. Your message is saved.");
+    const [card] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.companyId, companyId), eq(issueThreadInteractions.issueId, issueId),
+      eq(issueThreadInteractions.status, "pending"),
+    )).limit(1);
+    const [approval] = await db.select({ id: approvals.id }).from(issueApprovals).innerJoin(approvals, and(
+      eq(approvals.companyId, companyId), eq(approvals.id, issueApprovals.approvalId),
+    )).where(and(eq(issueApprovals.companyId, companyId), eq(issueApprovals.issueId, issueId),
+      inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
+    if (card || approval) return blocked("A pending approval or question must be resolved. Your message is saved.");
+    try {
+      await validateExecutionReconciliation({ db, companyId, issueId, agentId,
+        sourceRunId: source.id, decision });
+    } catch (error) {
+      if (error instanceof HttpError && error.status === 409) return blocked(error.message);
+      throw error;
+    }
+    const continuation = { previousRunId: source.id, commentId };
+    await db.update(issueRecoveryActions).set({ evidence: { ...action.evidence,
+      continuationDelivery: "delivered", continuationRunId: input.successorRunId,
+      explicitUserContinuation: { ...continuation, actorId, runId: input.successorRunId,
+        commentUpdatedAt: comment.updatedAt.toISOString(),
+        commentBodyHash: createHash("sha256").update(comment.body).digest("hex"), recordedAt: new Date().toISOString() },
+    } }).where(and(eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.id, action.id)));
+    return { kind: "admitted" as const, continuation, recoveryActionId: action.id,
+      previousSessionId: typeof source.resultJson?.session_id === "string" ? source.resultJson.session_id : null };
+  }
+  return null;
 }
 
 export async function deliverReconciledExecutions(

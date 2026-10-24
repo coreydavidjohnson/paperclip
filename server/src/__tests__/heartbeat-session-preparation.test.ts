@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, agentTaskSessions, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues } from "@paperclipai/db";
+import { agents, agentTaskSessions, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issueComments, issueRecoveryActions, issues } from "@paperclipai/db";
 import { registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext } from "../adapters/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -49,7 +49,7 @@ describePostgres("heartbeat session preparation through adapter dispatch", () =>
     await db.insert(companyMemberships).values({ companyId, principalId: userId, principalType: "user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Session reader", adapterType, status: "idle", adapterConfig: { model: "model-a" }, runtimeConfig });
     await db.insert(issues).values({ id: issueId, companyId, title: "Session fixture", status: "todo", assigneeAgentId: agentId, responsibleUserId: userId, issueNumber: 1 });
-    return { companyId, agentId, issueId };
+    return { companyId, agentId, issueId, userId };
   }
 
   async function execute(f: Awaited<ReturnType<typeof seed>>, context: Record<string, unknown> = {}) {
@@ -79,6 +79,38 @@ describePostgres("heartbeat session preparation through adapter dispatch", () =>
     expect(resumed.input.context.paperclipSessionRotationReason).toBeUndefined();
     expect(resumed.input.context.paperclipPreviousSessionId).toBeUndefined();
     expect(resumed.finished.sessionIdBefore).toBe("saved-session");
+  });
+
+  it("dispatches an adopted native recovery fresh while retaining its original conversation", async () => {
+    const f = await seed();
+    await execute(f);
+    // The fixture's review-without-reviewer repair can finish a corrective turn.
+    // Reconcile the latest actual source, never borrow an older run's authority.
+    const [latest] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.agentId))
+      .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+    const sourceId = latest!.id;
+    await db.update(heartbeatRuns).set({ status: "failed", finishedAt: new Date(Date.now() - 2000),
+      errorCode: "omnigent_session_not_recovered", resultJson: { session_id: "saved-session" } }).where(eq(heartbeatRuns.id, sourceId));
+    await db.update(issues).set({ status: "todo", executionRunId: null, checkoutRunId: null }).where(eq(issues.id, f.issueId));
+    await db.insert(issueRecoveryActions).values({ companyId: f.companyId, sourceIssueId: f.issueId,
+      kind: "active_run_watchdog", status: "resolved", outcome: "restored", ownerType: "board",
+      returnOwnerAgentId: f.agentId, cause: "legacy_execution_requires_reconciliation", fingerprint: sourceId,
+      nextAction: "Continue only after verified reconciliation.", evidence: { runId: sourceId, continuationDelivery: "pending",
+        executionReconciliation: { runId: sourceId, providerStopped: true, actionOutcome: "mixed",
+          recordedAt: new Date(Date.now() - 1000).toISOString(), outcomeEvidence: "The prior attempt sent no prompt; inspect older outcomes." } } });
+    const [comment] = await db.insert(issueComments).values({ companyId: f.companyId, issueId: f.issueId,
+      authorType: "user", authorUserId: f.userId, body: "Continue from the existing records." }).returning();
+    const run = await heartbeat.wakeup(f.agentId, { source: "on_demand", triggerDetail: "manual", reason: "issue_commented",
+      requestedByActorType: "user", requestedByActorId: f.userId, payload: { issueId: f.issueId, commentId: comment!.id },
+      contextSnapshot: { issueId: f.issueId, wakeCommentId: comment!.id } });
+    expect(run).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    const input = captured.get(run!.id)!;
+    expect(input).toBeDefined();
+    expect(input.context).toMatchObject({ forceFreshSession: true, previousRunId: sourceId,
+      paperclipPreviousSessionId: "saved-session", explicitUserContinuation: { previousRunId: sourceId, commentId: comment!.id } });
+    expect(input.runtime.sessionId).toBeNull();
+    expect(input.runtime.sessionParams).toBeNull();
   });
 
   it("starts fresh when effective model configuration changes and persists the reason", async () => {

@@ -240,6 +240,13 @@ heartbeat.ts.
   in `luma-patch-tests` (real PostgreSQL, refreshed updated_at, concurrent sweeps).
   Upstream recheck: `391dd15ff` recovers released comment queues but still filters
   for comment IDs or interaction responses; plain assignment wakes remain absent.
+- PER-1009 reconciled user wakes adopt the exact pending native outbox decision
+  under the issue lock. Admission retains the original conversation, authenticated
+  comment provenance and fresh-session intent atomically with the successor.
+  Lost acknowledgements reuse that successor. A newer accepted source invalidates
+  obsolete delivery without changing its recorded outcomes or current ownership.
+  A no-continuation decision remains no-dispatch. Board, session-preparation,
+  explicit-continuation and history regressions are mandatory image-gate inputs.
 - PER-1009 recovery repair: parent-child membership never creates dependency links.
   Recovery retires obsolete actions without mutating a newer accepted source.
   The remaining review-wait status repair locks the issue, compares source version,

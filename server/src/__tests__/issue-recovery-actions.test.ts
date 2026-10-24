@@ -34,8 +34,9 @@ import {
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
+import { buildExecutionContinuation } from "../services/execution-continuation.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
-import { deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
+import { admitReconciledUserContinuation, deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import * as routineServices from "../services/routines.js";
@@ -2138,10 +2139,102 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     return {
       ...fixture,
       previousRunId,
+      responsibleUserId,
       action: action!,
       heartbeat: heartbeatService(db, { runtimeEnv: {} }),
     };
   }
+
+  it("adopts pending native reconciliation into a later user comment once, retaining the original conversation", async () => {
+    const { companyId, coderId, sourceIssueId, previousRunId, responsibleUserId, action, heartbeat } = await seedReconciledDelivery();
+    const sessionId = "7a78e671acfa45ed9861e84121b9bb2e";
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", finishedAt: new Date(Date.now() - 1000),
+      errorCode: "omnigent_session_not_recovered", resultJson: { session_id: sessionId } }).where(eq(heartbeatRuns.id, previousRunId));
+    // Exercise the actual board route, then a normal saved user comment. The
+    // reconciler has not won admission yet; neither the caller nor the adapter
+    // may invent a recovery envelope or clear somebody else's execution claim.
+    await db.update(issueRecoveryActions).set({ evidence: { runId: previousRunId,
+      automaticRecovery: { replay: "blocked" } } }).where(eq(issueRecoveryActions.id, action.id));
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: vi.fn(async () => null) });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({
+      actionId: action.id, outcome: "restored", sourceIssueStatus: "todo",
+      executionReconciliation: { runId: previousRunId, providerStopped: true, actionOutcome: "mixed",
+        outcomeEvidence: "The last attempt sent no prompt. The old runner is offline; inspect earlier effects before changing anything." },
+    }).expect(200);
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId: sourceIssueId,
+      authorType: "user", authorUserId: responsibleUserId, body: "Continue from saved work without repeating unknown actions." }).returning();
+    const opts = { source: "on_demand" as const, triggerDetail: "manual" as const, reason: "issue_commented",
+      payload: { issueId: sourceIssueId, commentId: comment!.id }, requestedByActorType: "user", requestedByActorId: responsibleUserId,
+      contextSnapshot: { issueId: sourceIssueId, wakeCommentId: comment!.id } };
+    const successor = await heartbeat.wakeup(coderId, opts);
+    expect(successor).not.toBeNull();
+    expect(successor!.contextSnapshot).toMatchObject({ forceFreshSession: true, previousRunId,
+      paperclipPreviousSessionId: sessionId, recoveryActionId: action.id,
+      explicitUserContinuation: { previousRunId, commentId: comment!.id } });
+    expect(successor!.retryOfRunId).toBe(previousRunId);
+    const recorded = (await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]!;
+    expect(recorded.evidence).toMatchObject({ continuationDelivery: "delivered", continuationRunId: successor!.id,
+      executionReconciliation: { actionOutcome: "mixed" },
+      explicitUserContinuation: { runId: successor!.id, actorId: responsibleUserId, commentId: comment!.id } });
+    const continuation = await buildExecutionContinuation({ db, companyId, issueId: sourceIssueId, agentId: coderId,
+      runId: successor!.id, context: successor!.contextSnapshot!, summary: null, exposeLowTrustRaw: false });
+    expect(continuation.originCommentIds).toContain(comment!.id);
+    expect(continuation.recoveryOutcomes).toContainEqual(expect.objectContaining({ recoveryActionId: action.id }));
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    // Lost acknowledgement, even after the successor finishes, cannot replay it.
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, successor!.id));
+    await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, sourceIssueId));
+    expect((await heartbeat.wakeup(coderId, opts))?.id).toBe(successor!.id);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, previousRunId))).toHaveLength(1);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(recorded);
+  });
+
+  it.each(["question", "approval", "dependency", "live_process", "current_owner", "not_requested", "wrong_actor", "wrong_run", "newer_run"])(
+    "preserves %s while considering pending reconciliation for user input", async (mode) => {
+    const { companyId, coderId, sourceIssueId, previousRunId, responsibleUserId, action } = await seedReconciledDelivery();
+    await db.update(heartbeatRuns).set({ finishedAt: new Date(Date.now() - 2000), runtimeMode: "legacy",
+      errorCode: "omnigent_session_not_recovered", resultJson: { session_id: "original-conversation" },
+      ...(mode === "live_process" ? { processPid: process.pid } : {}) }).where(eq(heartbeatRuns.id, previousRunId));
+    await db.update(issueRecoveryActions).set({ evidence: { ...action.evidence,
+      continuationDelivery: mode === "not_requested" ? "not_requested" : "pending",
+      executionReconciliation: { ...(action.evidence.executionReconciliation as object),
+        recordedAt: new Date(Date.now() - 1000).toISOString(),
+        ...(mode === "wrong_run" ? { runId: randomUUID() } : {}),
+      } } }).where(eq(issueRecoveryActions.id, action.id));
+    const [comment] = await db.insert(issueComments).values({ companyId, issueId: sourceIssueId,
+      authorType: "user", authorUserId: responsibleUserId, body: "Continue the existing work." }).returning();
+    if (mode === "question" || mode === "approval") await db.insert(issueThreadInteractions).values({
+      companyId, issueId: sourceIssueId, kind: mode === "question" ? "ask_user_questions" : "request_confirmation",
+      status: "pending", createdByAgentId: coderId, payload: { version: 1, prompt: "Preserve this decision." },
+    });
+    if (mode === "current_owner") await db.update(issues).set({ executionRunId: previousRunId, checkoutRunId: previousRunId })
+      .where(eq(issues.id, sourceIssueId));
+    if (mode === "newer_run") await seedHeartbeatRun({ companyId, agentId: coderId, issueId: sourceIssueId,
+      runId: randomUUID(), status: "running" });
+    const before = (await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0];
+    const recorded = (await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0];
+    const candidate = await db.transaction(tx => admitReconciledUserContinuation({ db: tx as unknown as typeof db,
+      companyId, issueId: sourceIssueId, agentId: coderId, actorType: "user",
+      actorId: mode === "wrong_actor" ? randomUUID() : responsibleUserId, reason: "issue_commented",
+      commentId: comment!.id, successorRunId: randomUUID(), dependencyReady: mode !== "dependency" }));
+    if (["question", "approval", "dependency", "live_process", "current_owner"].includes(mode))
+      expect(candidate?.kind).toBe("blocked");
+    else expect(candidate).toBeNull();
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssueId)))[0]).toEqual(before);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]).toEqual(recorded);
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+  });
+
+  it("does not redeliver pending reconciliation after a newer accepted source", async () => {
+    const { companyId, coderId, sourceIssueId, previousRunId, action, heartbeat } = await seedReconciledDelivery();
+    await seedHeartbeatRun({ companyId, agentId: coderId, issueId: sourceIssueId, runId: randomUUID(), status: "succeeded" });
+    const before = await db.select().from(heartbeatRuns);
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    expect(await db.select().from(heartbeatRuns)).toEqual(before);
+    const recorded = (await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0]!;
+    expect(recorded.evidence).toMatchObject({ continuationDelivery: "invalidated", executionReconciliation: { runId: previousRunId } });
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+  });
 
   it("delivers a reconciled execution once across concurrent sweeps without a deferred duplicate", async () => {
     const { action, heartbeat } = await seedReconciledDelivery();
@@ -2281,7 +2374,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     },
   );
 
-  it("keeps reconciliation pending behind unrelated issue work without creating a second deferred outbox", async () => {
+  it("preserves newer issue work and invalidates the superseded reconciliation without another outbox", async () => {
     const { action, heartbeat, sourceIssueId, companyId, coderId } =
       await seedReconciledDelivery();
     const occupiedRunId = randomUUID();
@@ -2324,8 +2417,12 @@ describeEmbeddedPostgres("issue recovery actions", () => {
           `execution-reconciliation:${action.id}`,
         ),
       );
-    expect(wakes).toHaveLength(1);
-    expect(wakes[0]!.runId).not.toBe(occupiedRunId);
+    // New accepted work wins even after it finishes. Replaying an old
+    // reconciliation here would rotate the already-advanced conversation.
+    expect(wakes).toHaveLength(0);
+    const [receipt] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(receipt!.evidence.continuationDelivery).toBe("invalidated");
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, occupiedRunId)))[0]!.status).toBe("succeeded");
   });
 
   it("does not overwrite a newer reconciliation decision after a prior wake commits", async () => {

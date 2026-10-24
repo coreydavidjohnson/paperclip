@@ -311,7 +311,10 @@ export async function resolveHeartbeatAdapterSession(input: HeartbeatAdapterSess
   } else {
     delete context.paperclipSessionHandoffMarkdown;
     delete context.paperclipSessionRotationReason;
-    delete context.paperclipPreviousSessionId;
+    // A native reconciliation adopted by an authenticated user comment keeps
+    // its exact source conversation for the adapter's ownership-checked handoff.
+    if (context.forceFreshSession !== true || !context.explicitUserContinuation)
+      delete context.paperclipPreviousSessionId;
   }
 
   const taskSessionCredentialCompatible = !managedAiRuntime || managedAiSessionIdentityCompatible(

@@ -1,3 +1,4 @@
+import { admitReconciledUserContinuation } from "../execution-recovery-resolution.js";
 import { startClaimedLegacyControllerLease } from "../legacy-controller-lease.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
@@ -3281,6 +3282,26 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             const [reconciledRun] = await tx.select().from(heartbeatRuns).where(and(
               eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.id, sourceRunId),
             ));
+            if (!reconciledRun || reconciledRun.agentId !== agentId ||
+                (reconciledRun.nativeIssueId ?? reconciledRun.contextSnapshot?.issueId) !== issue.id ||
+                !["failed", "interrupted", "timed_out", "cancelled"].includes(reconciledRun.status))
+              return { kind: "skipped" as const };
+            const [newerSource] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
+                sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`),
+              // Compare persisted precision, not JavaScript's rounded Date.
+              sql`(${heartbeatRuns.createdAt}, ${heartbeatRuns.id}) > (select source.created_at, source.id
+                from heartbeat_runs source where source.company_id = ${issue.companyId} and source.id = ${sourceRunId})`,
+            )).limit(1);
+            if (newerSource) {
+              // Another accepted path consumed this source. Retain the decision,
+              // but never let an action-ID outbox replay it after that path ends.
+              await tx.update(issueRecoveryActions).set({ evidence: { ...action.evidence,
+                continuationDelivery: "invalidated", continuationInvalidationReason: "newer_accepted_source",
+              } }).where(and(eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.id, action.id)));
+              return { kind: "skipped" as const };
+            }
             if (hasWorkspaceRestoreFailure(reconciledRun?.resultJson)) {
               if ((readNonEmptyString(decision.workspaceRepairEvidence)?.length ?? 0) < 20)
                 return { kind: "skipped" as const };
@@ -3292,7 +3313,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
           let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
           const deferBlockedExecution = async (
-            executionBlocker: NonNullable<Awaited<ReturnType<typeof getExecutionBlocker>>>,
+            executionBlocker: Pick<NonNullable<Awaited<ReturnType<typeof getExecutionBlocker>>>, "recoveryActionId" | "nextAction">,
           ) => {
             const condition = { recoveryActionId: executionBlocker.recoveryActionId, ...continuationWait };
             if (executionWaitRequestId) {
@@ -4247,7 +4268,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "skipped" as const };
           }
 
-          const explicitContinuation = await admitExplicitNativeContinuation({
+          let explicitContinuation = await admitExplicitNativeContinuation({
             db: tx as unknown as Db, companyId: issue.companyId, issueId: issue.id,
             agentId, actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
             reason: durableRequest && !failedChatRetry ? "issue_commented" : reason,
@@ -4260,6 +4281,29 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             enrichedContextSnapshot.forceFreshSession = true;
             enrichedContextSnapshot.previousRunId = explicitContinuation.previousRunId;
             enrichedContextSnapshot.explicitUserContinuation = explicitContinuation;
+          }
+
+          if (!explicitContinuation && !executionReconciliationWake) {
+            const reconciled = await admitReconciledUserContinuation({
+              db: tx as unknown as Db, companyId: issue.companyId, issueId: issue.id, agentId,
+              actorType: opts.requestedByActorType, actorId: opts.requestedByActorId, reason,
+              commentId: wakeCommentId ?? null, successorRunId: explicitContinuationRunId,
+              dependencyReady: dependencyReadiness?.isDependencyReady !== false,
+            });
+            if (reconciled?.kind === "replayed") return { kind: "replayed" as const, run: reconciled.run };
+            if (reconciled?.kind === "blocked") return deferBlockedExecution({
+              recoveryActionId: reconciled.recoveryActionId, nextAction: reconciled.message,
+            });
+            if (reconciled?.kind === "admitted") {
+              explicitContinuation = reconciled.continuation;
+              reconciledSourceRunId = reconciled.continuation.previousRunId;
+              Object.assign(enrichedContextSnapshot, { forceFreshSession: true,
+                previousRunId: reconciledSourceRunId, retryOfRunId: reconciledSourceRunId,
+                recoveryActionId: reconciled.recoveryActionId,
+                explicitUserContinuation: reconciled.continuation,
+                ...(reconciled.previousSessionId ? { paperclipPreviousSessionId: reconciled.previousSessionId } : {}),
+              });
+            }
           }
 
           const wakeValues = {
