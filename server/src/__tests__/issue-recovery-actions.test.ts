@@ -2922,6 +2922,73 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
+  async function seedTrappedDisposition() {
+    const fixture = await seedCompany();
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId: fixture.companyId, sourceIssueId: fixture.sourceIssueId,
+      kind: "deliberate_wait_without_target", ownerType: "board", returnOwnerAgentId: fixture.coderId,
+      cause: "deliberate_wait_without_target", fingerprint: "per968:exhausted",
+      evidence: { terminalReason: "unchanged_source_state_exhausted", latestIssueStatus: "blocked" },
+      nextAction: "Choose the source disposition.", wakePolicy: { type: "board_escalation" },
+    });
+    return { ...fixture, action, repair: {
+      sourceUpdatedAt: fixture.sourceIssue.updatedAt.toISOString(),
+      sourceStatus: fixture.sourceIssue.status, sourceStatusVersion: fixture.sourceIssue.statusVersion,
+      assigneeAgentId: fixture.coderId, actionUpdatedAt: action.updatedAt.toISOString(),
+      actionFingerprint: action.fingerprint,
+    } };
+  }
+
+  it.each(["todo", "blocked", "done"])("PER-968 refuses naked %s without partial source or action mutation", async (status) => {
+    const { sourceIssueId, sourceIssue, action } = await seedTrappedDisposition();
+    const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const result = await request(createApp()).patch(`/api/issues/${sourceIssueId}`)
+      .send({ status, title: "Must roll back with the status" }).expect(409);
+    expect(result.body.details?.code).toBe("recovery_status_repair_required");
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(before);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toHaveLength(0);
+  });
+
+  it("PER-968 refuses a direct native service status write at the common boundary", async () => {
+    const { sourceIssueId, sourceIssue } = await seedTrappedDisposition();
+    await expect(issueService(db).update(sourceIssueId, { status: "todo", title: "Must not commit" }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
+  });
+
+  it("PER-968 repairs the third trap once with a normal same-session continuation", async () => {
+    const { sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake as never });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
+      resolutionNote: "Continue this task through its normal work path." };
+    const first = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(first.body.issue).toMatchObject({ status: "todo", assigneeAgentId: coderId, activeRecoveryAction: null });
+    expect(first.body.recoveryAction).toMatchObject({ id: action.id, status: "resolved", outcome: "handed_back" });
+    const stored = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(stored);
+    expect(wake).toHaveBeenCalledTimes(1);
+    expect(wake).toHaveBeenCalledWith(coderId, expect.objectContaining({ reason: "issue_commented",
+      idempotencyKey: `guarded-status-repair:${action.id}`, contextSnapshot: expect.not.objectContaining({ forceFreshSession: true }) }));
+    expect(wake.mock.calls[0][1].contextSnapshot).not.toHaveProperty("recoveryActionId");
+    await db.update(issues).set({ title: "A newer board decision", updatedAt: new Date(Date.now() + 1000) }).where(eq(issues.id, sourceIssueId));
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["sourceUpdatedAt", "sourceStatusVersion", "actionUpdatedAt", "actionFingerprint"])("PER-968 refuses stale %s atomically", async (field) => {
+    const { sourceIssueId, sourceIssue, action, repair } = await seedTrappedDisposition();
+    const stale = { ...repair, [field]: field === "sourceStatusVersion" ? repair.sourceStatusVersion + 1
+      : field.endsWith("At") ? "2000-01-01T00:00:00.000Z" : "different" };
+    await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: stale,
+        resolutionNote: "Continue the task normally." }).expect(409);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
+    expect(await issueRecoveryActionService(db).getActiveForIssue(sourceIssue.companyId, sourceIssueId)).toMatchObject({ id: action.id });
+  });
+
   it("retries an exhausted disposition action once, preserving the owner and audit trail", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     await db.update(issues).set({ status: "blocked", assigneeAgentId: coderId }).where(eq(issues.id, sourceIssueId));
