@@ -1426,7 +1426,12 @@ export function heartbeatService(
   }
 
   function resumeQueuedCommentInterrupt(...args: Parameters<typeof runControl.resumeQueuedCommentInterrupt>) {
-    return runControl.resumeQueuedCommentInterrupt(...args);
+    // A durable interrupt is dispatched after HTTP commit, before it registers
+    // any successor run. Include that prologue in graceful task drainage.
+    const promise = runControl.resumeQueuedCommentInterrupt(...args);
+    activeWakeupPromises.add(promise);
+    void promise.catch(() => {}).finally(() => activeWakeupPromises.delete(promise));
+    return promise;
   }
 
   function resumeSavedLegacyComments(...args: Parameters<typeof runControl.resumeSavedLegacyComments>) {

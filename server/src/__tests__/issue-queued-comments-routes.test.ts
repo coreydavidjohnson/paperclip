@@ -2168,6 +2168,27 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId as string));
     expect((wake.payload as any)?.queuedCommentInterrupt?.targetRunId).toBe(seeded.runId);
     expect((wake.payload as any)?._paperclipWakeContext?.wakeCommentIds).toEqual([response.body.id]);
+
+    await heartbeatService(db).drainActiveRunExecutions();
+    const successorId = randomUUID();
+    const successor = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    testProcesses.set(successorId, successor);
+    runningProcesses.set(successorId, { child: successor, graceSec: 1, processGroupId: null });
+    await db.insert(heartbeatRuns).values({ id: successorId, companyId: seeded.companyId,
+      agentId: seeded.agentId, status: "running", runtimeMode: "legacy", processPid: successor.pid,
+      issueId: seeded.issueId, contextSnapshot: { issueId: seeded.issueId },
+    });
+    await db.update(issues).set({ executionRunId: successorId }).where(eq(issues.id, seeded.issueId));
+    const replay = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+      clientRequestId, body: "Interrupt only the run that received this request", interrupt: true,
+    });
+    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
+    expect(replay.body.id).toBe(response.body.id);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successorId)))[0].status).toBe("running");
+    expect(successor.exitCode).toBeNull();
+    expect((await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.source, "issue_comment_operation")))
+      .filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(1);
   });
 
 

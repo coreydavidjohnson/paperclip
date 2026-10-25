@@ -68,3 +68,34 @@ storage and remain unqualified. Automatic client retries remain disabled.
 
 Focused real-process verification is pending on this branch. Do not claim a
 runtime reliability release or staging acceptance from source changes alone.
+
+## Integration caught an untracked interrupt prologue
+
+The first integrated seven-suite run at `fa3a5326256e1a02188ecc612c15c51ccbfe5f28`
+recorded 374 passes and two failures. Its first failure was a teardown deadlock:
+`TRUNCATE companies CASCADE` raced background database work. The following
+case then encountered the company prefix left behind by that failed cleanup.
+The supported route deliberately returns after durable commit, before its
+interrupt delivery finishes. That recovery prologue must join the existing
+heartbeat promise registry so shutdown and deterministic fixture teardown can
+observe it. No production retry, timeout increase or truncate retry is an
+acceptable repair. The disposable namespace was removed.
+
+The exact same product candidate passed both database and server semantic
+checks, and its separate typecheck namespace was independently absent. Those
+checks do not turn the failed seven-suite receipt into a passing one.
+
+The worker's earlier `993d39ed` run remains failed, with 111 passes and three
+fixture assertion/input failures. Parent review also corrected escaped fixture
+quotes and nullable result assertions before the integrated run. The real
+comment-router metrics test is now explicitly in the image test gate, not only
+a separate telemetry observation.
+
+The deterministic drain regression at `bc9406cc05add34f111c7c4dfe268b441b3ab278`
+then failed exactly once: the pending interrupt reported zero pending wakes.
+The other 376 tests passed, and cleanup was independently verified. Register
+the recovery promise in the existing wake set and remove it on settlement.
+Fixture teardown now awaits the existing drain rather than racing a truncate.
+The original-target test also checks an exact receipt replay after a real
+successor process starts. The replay must return the original comment without
+stopping that successor or inserting another operation receipt.
