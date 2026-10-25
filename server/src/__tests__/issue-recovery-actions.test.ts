@@ -3115,6 +3115,12 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       expect(run!.contextSnapshot).toMatchObject({ wakeReason: "issue_commented", guardedStatusRepairId: action.id });
       expect(run!.contextSnapshot).not.toHaveProperty("recoveryActionId");
       expect(run!.contextSnapshot).not.toHaveProperty("forceFreshSession");
+      const payload = await buildPaperclipWakePayload({ db, companyId, contextSnapshot: run!.contextSnapshot ?? {} });
+      expect(payload?.recovery).toBeNull();
+      const prompt = renderPaperclipWakePrompt(payload);
+      expect(prompt).toContain(body.resolutionNote);
+      expect(prompt).not.toContain("Recovery contract:");
+      expect(prompt).not.toContain("Do not produce the deliverable");
       throw new Error("Lost ACK after commit");
     });
     expect(runId).toBeDefined();
