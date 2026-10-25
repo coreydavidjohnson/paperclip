@@ -84,6 +84,56 @@ function makeRecoveryActionRow(overrides: Record<string, unknown> = {}) {
 }
 
 describe("issueRecoveryActionService", () => {
+  it.each([
+    ["issue_recovery_actions_active_source_uq", true],
+    ["issue_recovery_actions_active_fingerprint_uq", true],
+    ["unrelated_unique_constraint", false],
+  ])("handles wrapped uniqueness conflicts only for %s", async (constraintName, retryExpected) => {
+    const existingRow = makeRecoveryActionRow({ id: "existing-action" });
+    const selectResults = [[], [existingRow]];
+    const error = new Error("Failed query", {
+      cause: { code: "23505", constraint_name: constraintName },
+    });
+    const fakeDb = {
+      select: vi.fn(() => ({
+        from() { return this; },
+        where() { return this; },
+        orderBy() { return this; },
+        limit() { return Promise.resolve(selectResults.shift() ?? [existingRow]); },
+      })),
+      insert: vi.fn(() => ({
+        values: vi.fn(() => ({
+          returning: vi.fn(async () => { throw error; }),
+        })),
+      })),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => [existingRow]),
+          })),
+        })),
+      })),
+    };
+    const result = issueRecoveryActionService(fakeDb as never).upsertSourceScoped({
+      companyId: "company-1",
+      sourceIssueId: "source-1",
+      kind: "missing_disposition",
+      ownerType: "agent",
+      ownerAgentId: "agent-1",
+      cause: "successful_run_missing_issue_disposition",
+      fingerprint: "missing-disposition:fingerprint",
+      nextAction: "Choose a valid issue disposition.",
+    });
+    if (retryExpected) {
+      expect(await result).toMatchObject({ id: "existing-action", status: "active" });
+      expect(fakeDb.select).toHaveBeenCalledTimes(2);
+    } else {
+      await expect(result).rejects.toBe(error);
+      expect(fakeDb.select).toHaveBeenCalledTimes(1);
+    }
+    expect(fakeDb.insert).toHaveBeenCalledTimes(1);
+  });
+
   it("does not reactivate an action resolved between the active read and update", async () => {
     const existingRow = makeRecoveryActionRow({ id: "existing-action", attemptCount: 1 });
     const createdRow = makeRecoveryActionRow({ id: "new-action", attemptCount: 1 });

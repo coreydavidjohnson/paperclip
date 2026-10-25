@@ -5,7 +5,7 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import { Router } from "express";
 import type { Db } from "@paperclipai/db";
 import { and, count, eq, gt, inArray, isNull, sql } from "drizzle-orm";
-import { heartbeatRuns, instanceUserRoles, invites } from "@paperclipai/db";
+import { heartbeatRuns, instanceUserRoles, invites, persistentDedicatedDb } from "@paperclipai/db";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import {
   readPersistedDevServerStatus,
@@ -172,7 +172,8 @@ export function healthRoutes(
     // Compare identity, not a driver-controlled error message, to classify timeout.
     const timeoutError = new Error("readiness_database_timeout");
     try {
-      readinessProbe ??= Promise.resolve(db.execute(sql`select 1`)).finally(() => { readinessProbe = null; });
+      const probeDb = persistentDedicatedDb(db, "paperclip-readiness") ?? db;
+      readinessProbe ??= Promise.resolve(probeDb.execute(sql`select 1`)).finally(() => { readinessProbe = null; });
       await Promise.race([readinessProbe, new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(timeoutError), 2000);
       })]);

@@ -179,6 +179,8 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
   && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
     --hookTimeout=120000 --testTimeout=60000 \
     src/controller-drain.test.ts \
+    src/__tests__/db-errors.test.ts \
+    src/__tests__/health-readiness-db.test.ts \
     src/services/heartbeat/queue.test.ts \
     src/services/heartbeat/external-run-state.test.ts \
     src/services/heartbeat/external-run-state.runtime.test.ts \

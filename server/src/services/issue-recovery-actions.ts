@@ -10,6 +10,7 @@ import type {
   IssueRecoveryActionStatus,
 } from "@paperclipai/shared";
 
+import { isUniqueViolation } from "../db-errors.js";
 import { isNativeWorkspaceFinalizationOperationActive } from "./workspace-operations.js";
 
 const ACTIVE_RECOVERY_ACTION_STATUSES = ["active", "escalated"] as const satisfies readonly IssueRecoveryActionStatus[];
@@ -110,19 +111,8 @@ function toReadModel(row: IssueRecoveryActionRow): IssueRecoveryAction {
 }
 
 function isUniqueRecoveryActionConflict(error: unknown) {
-  const maybe = error as { code?: string; constraint?: string; message?: string } | null;
-  return Boolean(
-    maybe &&
-      maybe.code === "23505" &&
-      (
-        maybe.constraint === "issue_recovery_actions_active_source_uq" ||
-        maybe.constraint === "issue_recovery_actions_active_fingerprint_uq" ||
-        typeof maybe.message === "string" && (
-          maybe.message.includes("issue_recovery_actions_active_source_uq") ||
-          maybe.message.includes("issue_recovery_actions_active_fingerprint_uq")
-        )
-      ),
-  );
+  return isUniqueViolation(error, "issue_recovery_actions_active_source_uq")
+    || isUniqueViolation(error, "issue_recovery_actions_active_fingerprint_uq");
 }
 
 export function issueRecoveryActionService(db: Db) {

@@ -22,6 +22,25 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-1009 production carry and recovery conflict corrections
+
+- The rebased readiness route must retain the deployed `c069c7a942` behavior:
+  use the existing `persistentDedicatedDb` connection for readiness, never the
+  occupied shared query pool. Restore the deployed synthetic and real-database
+  regressions, preserving single-flight and the two-second failure deadline.
+  The synthetic suite reproduced two failures before the correction.
+- Recovery-action upserts must recognize both authorized unique constraints
+  inside Drizzle's `cause` chain. Reuse the existing `isUniqueViolation`
+  helper rather than introducing another error unwrapper. Unrelated unique
+  constraints still propagate. The full image gate exposed four concurrent
+  replay failures; deterministic unit coverage reproduced both wrapped
+  recovery conflicts before the correction.
+- The production image gate includes the real readiness fixture and the
+  shared database-error helper tests. No failed test is waived, and no
+  production rollout is implied by a focused result.
+- Remove these carries when upstream retains readiness isolation and uses
+  constraint-aware wrapped-error detection in recovery-action upserts.
+
 ## 1. External adapter composer capabilities
 
 - Why: the task composer's model/effort controls use a built-in adapter
