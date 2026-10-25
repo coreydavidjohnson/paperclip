@@ -1,3 +1,4 @@
+import { apiMetrics } from "../../api-metrics.js";
 import type { Db } from "@paperclipai/db";
 import { agents, agentWakeupRequests, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRunEvents, heartbeatRuns } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
@@ -125,6 +126,19 @@ describe.skipIf(!support.supported)("heartbeat lifecycle database wiring", () =>
     });
     expect(persisted?.processStartedAt?.toISOString()).toBe(remoteBirth);
     expect(persisted?.processPid).toBe(process.pid);
+  });
+
+  it("counts a committed disposition failure once, not stale writes or replay", async () => {
+    const { run } = await fixture();
+    const lifecycle = createHeartbeatLifecycle(db, callbacks(db));
+    const count = () => Number(apiMetrics.render().match(/paperclip_control_failures_total[{]reason="disposition_failure"[}] ([0-9]+)/)![1]);
+    const before = count();
+    const patch = { errorCode: "paperclip_disposition_failed", finishedAt: new Date() };
+    expect((await lifecycle.setRunStatusIfRunning(run.id, "failed", patch, undefined, 999)).updated).toBe(false);
+    expect(count()).toBe(before);
+    expect((await lifecycle.setRunStatusIfRunning(run.id, "failed", patch)).updated).toBe(true);
+    expect((await lifecycle.setRunStatusIfRunning(run.id, "failed", patch)).updated).toBe(false);
+    expect(count()).toBe(before + 1);
   });
 
   it("keeps one terminal outcome and reports only the winner of competing writes", async () => {
