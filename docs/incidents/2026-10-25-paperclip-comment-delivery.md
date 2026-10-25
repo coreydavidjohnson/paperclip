@@ -40,3 +40,31 @@ The optional build definition still points at the separate immutable queue-only
 candidate. This port does not silently replace its source archive or tag.
 Normal comment POST replay is a separate unresolved bug; automatic retries
 stay disabled and no production reliability release is claimed.
+
+## Normal comment POST replay and interrupt authority
+
+The normal comments route previously performed the interrupt before its
+`clientRequestId` lookup in `addComment`. A replay could therefore stop a
+successor, including when the request returned a conflict for a changed body.
+
+The current branch adds an issue-row-locked receipt for keyed human comments.
+The supported plain and attachment path commits the comment, request
+fingerprint, audit, fast-response request, and any exact-target interrupt
+outbox in one transaction. The fingerprint covers company, issue, user,
+request key, body, attachments, presentation/metadata, and control flags.
+The outbox keeps the original run ID and is processed through the existing
+run-control identity and admission checks. A replay returns the saved comment;
+it does not get authority over a newer run.
+
+Legacy comments without a receipt can return the saved comment only when the
+body and attachment set match. The legacy path does not replay control flags.
+Requests that use reopen/resume, implicit state transitions, review
+confirmation/auto-approval, a closed execution workspace, or the Paperclip
+Runner's queued-message interrupt protocol retain their first-request behavior
+but are retry-disabled. Their fingerprint is saved before route side effects;
+a completed receipt returns the saved comment, while an uncertain `started`
+receipt rejects replay. Unassigned issues cannot use the existing wake-receipt
+storage and remain unqualified. Automatic client retries remain disabled.
+
+Focused real-process verification is pending on this branch. Do not claim a
+runtime reliability release or staging acceptance from source changes alone.

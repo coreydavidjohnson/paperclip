@@ -381,3 +381,12 @@ heartbeat.ts.
   `doc/DOCKER.md`.
 - Remove when: the pinned package manager detects the actual build allocation
   and its resource use fits the allotted builder capacity without this wrapper.
+
+## PER-316 normal comment POST operation replay
+
+- Why: the normal issue-comment route performed interrupt and transition side effects before `addComment` applied its client-request-key dedupe. A replay could therefore stop a successor even when the response was 201 or 409.
+- Contract: keyed human comments use the issue-row lock to bind company, issue, user, request key, body, attachments, presentation/metadata, and reopen/resume/interrupt flags. The supported plain/attachment path commits the comment, immutable receipt, audit row, fast-response request, and exact original-target interrupt wake together. Exact replay returns the saved comment. Conflicting input returns 409 before any new side effect. Interrupt delivery reuses the existing run-control and process-identity gates.
+- Compatibility: legacy comments without a durable receipt can return only the exact existing content and attachment set; their control flags are never replayed. Unsupported transition, review/auto-approval, closed-workspace, Paperclip Runner interrupt, and unassigned variants keep their first-request route behavior but receive a fingerprinted retry-disabled receipt where the issue has an assignee. A receipt left in `started` state after an uncertain result rejects replay rather than granting fresh stop authority. Unassigned requests cannot use the existing wake receipt table and remain unqualified.
+- Files: `server/src/routes/issues.ts` and `server/src/__tests__/issue-queued-comments-routes.test.ts`.
+- Verification: real-database/process replay, conflicting-control/attachment, concurrency, original-target, and rollback checks are being run on this branch. No image, deployment, or production acceptance is implied.
+- Remove when upstream provides equivalent whole-operation request receipts and successor-safe interrupt recovery.
