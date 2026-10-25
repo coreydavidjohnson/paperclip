@@ -38,15 +38,26 @@ heartbeat.ts.
 - The production image gate includes the real readiness fixture and the
   shared database-error helper tests. No failed test is waived, and no
   production rollout is implied by a focused result.
+- Restore the deployed interactions GET read-only regression in the image
+  gate. The route already preserves that behavior; restoring its test does
+  not reintroduce expired-interaction sweeps or activity writes on reads.
 - Reconciliation delivery must acknowledge the exact already committed wake
   before considering task closure or reassignment. Bind the company, owner,
   mutual wake/run IDs, system actor, source issue, recovery action and recorded
   decision; never call wake again for that receipt. Real database regressions
   reproduced four lost-ack failures and then passed all eight selected cases,
   including rejection of mismatched owner, source, decision and actor receipts.
+- Wake admission must use its reserved transaction connection for issue,
+  routine and responsible-user reads. Run filesystem workspace preflight before
+  taking the admission transaction, only for issue wakes with isolated
+  workspaces enabled, and revalidate dependencies under the lock. Restore the
+  deployed one-connection real-database regression in the production image gate;
+  do not compensate for nested acquisition by increasing the pool.
 - Remove these carries when upstream retains readiness isolation and uses
   constraint-aware wrapped-error detection in recovery-action upserts, and
   delivery recognizes exact committed acknowledgments without a second wake.
+  Retire the admission carry when all transactional wake reads stay on their
+  reserved connection and slow filesystem preflight cannot consume it.
 
 ## 1. External adapter composer capabilities
 

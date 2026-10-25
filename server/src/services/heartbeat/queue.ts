@@ -2771,7 +2771,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       }
     }
 
-    const hasResolvablePriorSessionWorkspace = isolatedWorkspacesEnabled
+    const hasResolvablePriorSessionWorkspace = issueId && isolatedWorkspacesEnabled
       ? await hasResolvablePriorSessionWorkspaceForWake({
           agent,
           contextSnapshot: enrichedContextSnapshot,
