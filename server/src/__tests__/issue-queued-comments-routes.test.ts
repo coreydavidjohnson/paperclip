@@ -1824,7 +1824,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .get(`/api/issues/${seeded.issueId}/queued-comments`);
     expect(after.body.entries.map((entry: any) => entry.comment.id)).toEqual(seeded.commentIds);
   });
-  it.each(["other_issue", "other_agent", "missing", "old_receipt", "discarded", "reassigned", "terminal"])(
+  it.each(["other_issue", "indexed_conflict", "other_agent", "missing", "old_receipt", "discarded", "reassigned", "terminal"])(
     "does not stop a run from an invalid or stale durable interrupt: %s", async (kind) => {
       const seeded = await seedQueue();
       await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
@@ -1844,6 +1844,10 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
         id: targetId, companyId: seeded.companyId, agentId: kind === "other_agent" ? otherAgentId : seeded.agentId,
         status: "running", runtimeMode: "legacy", contextSnapshot: { issueId: kind === "other_issue" ? randomUUID() : seeded.issueId },
       });
+      // Indexed identity wins even when a historical JSON key claims this issue.
+      if (kind === "indexed_conflict") await db.update(heartbeatRuns).set({ issueId: randomUUID(),
+        contextSnapshot: { issueId: seeded.issueId, taskId: seeded.issueId },
+      }).where(eq(heartbeatRuns.id, seeded.runId));
       if (kind === "reassigned") await db.update(issues).set({ assigneeAgentId: otherAgentId }).where(eq(issues.id, seeded.issueId));
       if (kind === "terminal") await db.update(issues).set({ status: "done" }).where(eq(issues.id, seeded.issueId));
       const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));

@@ -22,6 +22,25 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-316 queued-interrupt restart carry
+
+- Why: a server exit after saving a queued interrupt but before cancellation
+  left the original running. Recovery also missed the current indexed issue
+  identity and historical `taskId` identity when guarding successor runs.
+- Contract: record the original run in the existing durable queue transaction.
+  Recovery revalidates company, issue, assignee, actor, current queue and task
+  eligibility before retrying only that target through native cancellation.
+  Indexed issue identity wins over conflicting legacy context. Targetless old
+  receipts cannot gain stop authority. Existing process-stop and admission
+  fences remain required; never wait for provider cancellation under issue locks.
+- Files: `server/src/routes/issues.ts`, `services/operator-interrupt.ts`, and
+  `services/heartbeat/run-control.ts`. Real-database/process regressions live in
+  `issue-queued-comments-routes.test.ts`, already part of the image gate.
+- Scope: this is not the normal comment-POST replay repair. Automatic resend
+  remains disabled until whole-operation replay and staging qualify it.
+- Remove when upstream saves original queue interrupt authority and recovers it
+  with equivalent indexed/legacy identity and successor safety.
+
 ## PER-1009 production carry and recovery conflict corrections
 
 - The rebased readiness route must retain the deployed `c069c7a942` behavior:
