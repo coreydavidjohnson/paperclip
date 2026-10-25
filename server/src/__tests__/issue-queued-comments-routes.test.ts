@@ -2001,4 +2001,167 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   });
 
 
+  it.each([false, true])("does not stop a successor on normal keyed comment replay (conflicting body: %s)", async conflicting => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+      .where(eq(agents.id, seeded.agentId));
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    testProcesses.set(seeded.runId, child);
+    runningProcesses.set(seeded.runId, { child, graceSec: 1, processGroupId: null });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", processPid: child.pid })
+      .where(eq(heartbeatRuns.id, seeded.runId));
+    // Keep any accidentally admitted follow-up queued; never invoke a model.
+    await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+      status: "running", contextSnapshot: { issueId: randomUUID() },
+    });
+    const clientRequestId = randomUUID();
+    // A prior request already committed this input. The current process is a
+    // successor and must not inherit the old request's authority to interrupt.
+    const saved = await issueService(db).addComment(seeded.issueId, "Saved original input", {
+      userId: "queue-owner",
+    }, { clientRequestId, authorType: "user" });
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+      body: conflicting ? "Different input under the old key" : saved.body,
+      clientRequestId, interrupt: true,
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(conflicting ? 409 : 201);
+    if (!conflicting) expect(response.body.id).toBe(saved.id);
+    const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    expect(successor.status).toBe("running");
+    expect(successor.resultJson).not.toHaveProperty("executionCancellation");
+    const keyedComments = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId));
+    expect(keyedComments).toHaveLength(1);
+    expect(keyedComments[0].body).toBe(saved.body);
+    expect(child.exitCode).toBeNull();
+  });
+
+
+  it("serializes concurrent same-key normal comments into one durable operation", async () => {
+    const seeded = await seedQueue();
+    const clientRequestId = randomUUID();
+    const body = { clientRequestId, body: "One durable comment" };
+    const [first, second] = await Promise.all([
+      request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send(body),
+      request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send(body),
+    ]);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    expect(second.status, JSON.stringify(second.body)).toBe(201);
+    expect(first.body.id).toBe(second.body.id);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId));
+    expect(comments).toHaveLength(1);
+    const receipts = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.source, "issue_comment_operation"));
+    expect(receipts.filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(1);
+  });
+
+  it("rejects a changed interrupt flag without reapplying it", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+      .where(eq(agents.id, seeded.agentId));
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    testProcesses.set(seeded.runId, child);
+    runningProcesses.set(seeded.runId, { child, graceSec: 1, processGroupId: null });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", processPid: child.pid })
+      .where(eq(heartbeatRuns.id, seeded.runId));
+    const clientRequestId = randomUUID();
+    const first = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+      clientRequestId, body: "Keep the run active",
+    });
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    for (const changed of [
+      { interrupt: true },
+      { reopen: true },
+      { resume: true },
+      { attachmentIds: [randomUUID()] },
+      { metadata: { retryMarker: "changed" } },
+    ]) {
+      const replay = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+        clientRequestId, body: "Keep the run active", ...changed,
+      });
+      expect(replay.status, JSON.stringify(replay.body)).toBe(409);
+      expect(replay.body.details?.code).toBe("comment_operation_key_conflict");
+    }
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    expect(run.status).toBe("running");
+    expect(run.resultJson).not.toHaveProperty("executionCancellation");
+    expect(child.exitCode).toBeNull();
+  });
+
+  it("rolls back a keyed comment when its durable receipt insert fails", async () => {
+    const seeded = await seedQueue();
+    const clientRequestId = randomUUID();
+    await db.execute(sql.raw(`CREATE OR REPLACE FUNCTION fail_issue_comment_operation_receipt() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN
+        IF NEW.source = 'issue_comment_operation' THEN RAISE EXCEPTION 'forced operation receipt failure'; END IF;
+        RETURN NEW;
+      END; $$`));
+    await db.execute(sql.raw(`CREATE TRIGGER fail_issue_comment_operation_receipt
+      BEFORE INSERT ON agent_wakeup_requests FOR EACH ROW EXECUTE FUNCTION fail_issue_comment_operation_receipt()`));
+    try {
+      const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+        clientRequestId, body: "Must roll back with its receipt",
+      });
+      expect(response.status).toBe(500);
+      expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(0);
+      const receipts = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.source, "issue_comment_operation"));
+      expect(receipts.filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(0);
+      const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId));
+      expect(activities.filter(row => row.action === "issue.comment_added")).toHaveLength(0);
+    } finally {
+      await db.execute(sql.raw("DROP TRIGGER IF EXISTS fail_issue_comment_operation_receipt ON agent_wakeup_requests"));
+      await db.execute(sql.raw("DROP FUNCTION IF EXISTS fail_issue_comment_operation_receipt()"));
+    }
+  });
+
+
+  it("persists the original run target for comment interrupt recovery", async () => {
+    const seeded = await seedQueue();
+    await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+      .where(eq(agents.id, seeded.agentId));
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    testProcesses.set(seeded.runId, child);
+    runningProcesses.set(seeded.runId, { child, graceSec: 1, processGroupId: null });
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", processPid: child.pid })
+      .where(eq(heartbeatRuns.id, seeded.runId));
+    await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
+      status: "running", contextSnapshot: { issueId: randomUUID() },
+    });
+    const clientRequestId = randomUUID();
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+      clientRequestId, body: "Interrupt only the run that received this request", interrupt: true,
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    const rows = await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.source, "issue_comment_operation"));
+    const receipt = rows.find(row => row.payload?.issueId === seeded.issueId && row.payload?.commentId === response.body.id);
+    expect(receipt?.payload?.originalTargetRunId).toBe(seeded.runId);
+    const wakeId = receipt?.payload?.interruptWakeId;
+    expect(typeof wakeId).toBe("string");
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakeId as string));
+    expect((wake.payload as any)?.queuedCommentInterrupt?.targetRunId).toBe(seeded.runId);
+    expect((wake.payload as any)?._paperclipWakeContext?.wakeCommentIds).toEqual([response.body.id]);
+  });
+
+
+  it("preserves initial reopen behavior while disabling unsafe transition replay", async () => {
+    const seeded = await seedQueue();
+    await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, seeded.issueId));
+    const clientRequestId = randomUUID();
+    const body = { clientRequestId, body: "Please reopen this task", reopen: true };
+    const first = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send(body);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const [reopened] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
+    expect(reopened.status).toBe("todo");
+    const activityCount = (await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId)))
+      .filter(row => row.action === "issue.updated").length;
+    const replay = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send(body);
+    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
+    expect(replay.body.id).toBe(first.body.id);
+    expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0].status).toBe("todo");
+    expect((await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId)))
+      .filter(row => row.action === "issue.updated")).toHaveLength(activityCount);
+  });
+
+
 });

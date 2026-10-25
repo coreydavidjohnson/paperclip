@@ -62,6 +62,7 @@ import {
   issueApprovals,
   issueAccessGrants,
   issueComments,
+  issueAttachments,
   issueDocuments,
   issueExecutionDecisions,
   issueRelations,
@@ -380,6 +381,13 @@ import {
 } from "../services/issue-queued-comment-queue.js";
 
 const MAX_ISSUE_COMMENT_LIMIT = 500;
+
+function stableCommentOperationJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableCommentOperationJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${stableCommentOperationJson(record[key])}`).join(",")}}`;
+}
 const updateIssueRouteSchema = updateIssueSchema.extend({
   interrupt: z.boolean().optional(),
 });
@@ -18544,6 +18552,10 @@ export function issueRoutes(
           .json({ error: "Issue follow-up blocked by unresolved blockers" });
         return;
       }
+      if (interruptRequested && req.actor.type !== "board") {
+        res.status(403).json({ error: "Only board users can interrupt active runs from issue comments" });
+        return;
+      }
       if (
         !(await assertCrossIssueInfluenceWithinRunCap(
           req,
@@ -18553,6 +18565,279 @@ export function issueRoutes(
         ))
       )
         return;
+      // Keyed human comments commit their content, immutable request receipt, and
+      // any original-target interrupt outbox row under the same issue-row fence.
+      // Replays never re-enter route side effects or infer authority from the latest run.
+      let idempotentCommentOperation: {
+        comment: Awaited<ReturnType<typeof svc.addComment>>;
+        interruptWakeId: string | null;
+        fastResponseEnqueued: boolean;
+      } | null = null;
+      let idempotentCommentAuditWritten = false;
+      let retryDisabledOperationReceiptId: string | null = null;
+      let retryDisabledOriginalTargetRunId: string | null = null;
+      if (actor.actorType === "user" && req.body.clientRequestId) {
+        const operationState = parseIssueExecutionState(issue.executionState);
+        const operationWouldAutoApprove = issue.status === "in_review" &&
+          operationState?.status === "pending" &&
+          actorMatchesExecutionParticipant(actor, operationState.currentParticipant ?? null) &&
+          isApprovalReviewComment(req.body.body);
+        let operationSupported = Boolean(actor.actorId && issue.assigneeAgentId) &&
+          !explicitMoveToTodoRequested && !effectiveMoveToTodoRequested &&
+          !closedExecutionWorkspace && !operationWouldAutoApprove && issue.status !== "in_review" &&
+          (!interruptRequested || req.actor.type === "board");
+
+        const requestIdentity = {
+          companyId: issue.companyId,
+          issueId: issue.id,
+          userId: actor.actorId,
+          clientRequestId: req.body.clientRequestId,
+        };
+        const operationKey = `issue-comment-operation:${createHash("sha256")
+          .update(stableCommentOperationJson(requestIdentity)).digest("hex")}`;
+        const requestFingerprint = createHash("sha256").update(stableCommentOperationJson({
+          ...requestIdentity,
+          body: req.body.body,
+          attachmentIds: req.body.attachmentIds ?? [],
+          onBehalfOfUserId: req.body.onBehalfOfUserId ?? null,
+          authorType: req.body.authorType ?? null,
+          presentation: req.body.presentation ?? null,
+          metadata: req.body.metadata ?? null,
+          reopen: reopenRequested,
+          resume: resumeRequested,
+          interrupt: interruptRequested,
+        })).digest("hex");
+        const operationSourceTrust = await sourceTrustForActorWrite(issue, actor);
+        const operationCommentOptions = {
+          authorType: req.body.authorType ?? "user",
+          presentation: commentPresentation,
+          metadata: req.body.metadata ?? null,
+          attachmentIds: req.body.attachmentIds,
+          clientRequestId: req.body.clientRequestId,
+          mirrorToSlack: true,
+          authorizationReason: commentAuthorizationReason,
+          sourceTrust: operationSourceTrust,
+        };
+        const operationPublications: ActivityPublication[] = [];
+        const operationResult = await db.transaction(async tx => {
+          const [lockedIssue] = await tx.select().from(issueRows).where(and(
+            eq(issueRows.id, issue.id), eq(issueRows.companyId, issue.companyId),
+          )).for("update");
+          if (!lockedIssue) throw notFound("Issue not found");
+          if (lockedIssue.status !== issue.status || lockedIssue.assigneeAgentId !== issue.assigneeAgentId ||
+              lockedIssue.executionRunId !== issue.executionRunId) {
+            throw conflict("Issue execution changed; submit the comment again with a new request id");
+          }
+          const [receipt] = await tx.select().from(agentWakeupRequests).where(and(
+            eq(agentWakeupRequests.companyId, issue.companyId),
+            eq(agentWakeupRequests.source, "issue_comment_operation"),
+            eq(agentWakeupRequests.idempotencyKey, operationKey),
+            sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
+          )).limit(1);
+          if (receipt) {
+            if (receipt.payload?.requestFingerprint !== requestFingerprint) {
+              throw conflict("Message request ID was already used for a different operation", {
+                code: "comment_operation_key_conflict",
+              });
+            }
+            const commentId = typeof receipt.payload?.commentId === "string" ? receipt.payload.commentId : null;
+            const operationState = receipt.payload?.operationState;
+            if (receipt.payload?.retryDisabled === true && operationState !== "completed") {
+              throw conflict("This control variant is saved but is not safe to retry", {
+                code: "comment_operation_retry_disabled",
+              });
+            }
+            const [saved] = commentId ? await tx.select().from(issueComments).where(and(
+              eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
+              eq(issueComments.id, commentId),
+            )) : [];
+            if (!saved) throw conflict("The saved comment for this request is no longer available", {
+              code: "comment_operation_comment_missing",
+            });
+            return { kind: "replay" as const, comment: saved };
+          }
+
+          // Pre-upgrade comments have no operation receipt. Return the existing
+          // content as a receipt, but never replay their control flags or attachments.
+          const [legacyComment] = await tx.select().from(issueComments).where(and(
+            eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
+            eq(issueComments.authorUserId, actor.actorId),
+            eq(issueComments.clientRequestId, req.body.clientRequestId),
+          ));
+          if (legacyComment) {
+            const attachmentRows = await tx.select({ id: issueAttachments.id }).from(issueAttachments)
+              .where(eq(issueAttachments.issueCommentId, legacyComment.id));
+            const savedAttachmentIds = attachmentRows.map(row => row.id).sort();
+            const requestedAttachmentIds = [...(req.body.attachmentIds ?? [])].sort();
+            if (legacyComment.body !== req.body.body ||
+                legacyComment.authorType !== (req.body.authorType ?? "user") ||
+                stableCommentOperationJson(legacyComment.presentation ?? null) !== stableCommentOperationJson(req.body.presentation ?? null) ||
+                stableCommentOperationJson(legacyComment.metadata ?? null) !== stableCommentOperationJson(req.body.metadata ?? null) ||
+                stableCommentOperationJson(savedAttachmentIds) !== stableCommentOperationJson(requestedAttachmentIds)) {
+              throw conflict("Message request ID was already used for different content");
+            }
+            return { kind: "legacy_replay" as const, comment: legacyComment };
+          }
+
+          const target = interruptRequested ? await resolveActiveIssueRun(lockedIssue) : null;
+          if (target) {
+            const [agent] = await tx.select({ adapterType: agents.adapterType }).from(agents).where(and(
+              eq(agents.id, lockedIssue.assigneeAgentId!), eq(agents.companyId, issue.companyId),
+            ));
+            if (agent?.adapterType === "paperclip_runner") operationSupported = false;
+          }
+          if (!operationSupported) {
+            if (!actor.actorId || !lockedIssue.assigneeAgentId) return { kind: "untracked_unsupported" as const };
+            const receiptId = randomUUID();
+            await tx.insert(agentWakeupRequests).values({
+              id: receiptId,
+              companyId: issue.companyId,
+              agentId: lockedIssue.assigneeAgentId,
+              source: "issue_comment_operation",
+              triggerDetail: "comment",
+              reason: "Retry-disabled issue comment operation receipt",
+              payload: {
+                issueId: issue.id,
+                clientRequestId: req.body.clientRequestId,
+                requestFingerprint,
+                retryDisabled: true,
+                operationState: "started",
+                commentId: null,
+                originalTargetRunId: target?.id ?? null,
+              },
+              status: "succeeded",
+              requestedByActorType: "user",
+              requestedByActorId: actor.actorId,
+              idempotencyKey: operationKey,
+            });
+            return { kind: "retry_disabled_first" as const, receiptId, originalTargetRunId: target?.id ?? null };
+          }
+
+          const saved = await svc.addComment(issue.id, req.body.body, {
+            agentId: actor.agentId ?? undefined,
+            userId: actor.actorId,
+            runId: actor.runId,
+            onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
+          }, operationCommentOptions, tx);
+          let interruptWakeId: string | null = null;
+          if (target) {
+            interruptWakeId = randomUUID();
+            const interruptPayload = withQueuedCommentIdsInWakePayload({
+              issueId: issue.id,
+              queuedCommentInterrupt: {
+                actorId: actor.actorId,
+                requestedAt: new Date().toISOString(),
+                targetRunId: target.id,
+              },
+              issueCommentOperationId: operationKey,
+              _paperclipWakeContext: {
+                issueId: issue.id,
+                taskId: issue.id,
+                source: "issue.comment",
+                wakeReason: "issue_commented",
+              },
+            }, [saved.id]);
+            await tx.insert(agentWakeupRequests).values({
+              id: interruptWakeId,
+              companyId: issue.companyId,
+              agentId: lockedIssue.assigneeAgentId!,
+              source: "issue_comment",
+              triggerDetail: "manual",
+              reason: "Board comment interrupt",
+              payload: interruptPayload,
+              status: "deferred_issue_execution",
+              requestedByActorType: "user",
+              requestedByActorId: actor.actorId,
+              idempotencyKey: `issue-comment-interrupt:${operationKey}`,
+            });
+          }
+
+          await tx.insert(agentWakeupRequests).values({
+            id: randomUUID(),
+            companyId: issue.companyId,
+            agentId: lockedIssue.assigneeAgentId!,
+            source: "issue_comment_operation",
+            triggerDetail: "comment",
+            reason: "Durable issue comment operation receipt",
+            payload: {
+              issueId: issue.id,
+              commentId: saved.id,
+              clientRequestId: req.body.clientRequestId,
+              requestUserId: actor.actorId,
+              requestFingerprint,
+              interruptWakeId,
+              originalTargetRunId: target?.id ?? null,
+            },
+            status: "succeeded",
+            requestedByActorType: "user",
+            requestedByActorId: actor.actorId,
+            idempotencyKey: operationKey,
+            finishedAt: new Date(),
+          });
+
+          const needsFastResponse = !interruptWakeId && lockedIssue.assigneeAgentId &&
+            !["done", "cancelled", "backlog"].includes(lockedIssue.status);
+          if (needsFastResponse) {
+            await enqueueFastResponse(tx as unknown as Db, {
+              companyId: issue.companyId,
+              issueId: issue.id,
+              agentId: lockedIssue.assigneeAgentId!,
+              responsibleUserId: actor.actorId,
+              sourceCommentId: saved.id,
+              sourceKey: `comment:${saved.id}`,
+              acceptedAt: new Date(saved.createdAt),
+            });
+          }
+          await logActivity(tx as unknown as Db, {
+            companyId: issue.companyId,
+            actorType: actor.actorType,
+            actorId: actor.actorId,
+            agentId: actor.agentId,
+            runId: actor.runId,
+            agentApiKeyId: actor.agentApiKeyId,
+            responsibleUserIdOverride: authenticatedActorResponsibleUserId(req),
+            action: "issue.comment_added",
+            entityType: "issue",
+            entityId: issue.id,
+            details: {
+              commentId: saved.id,
+              bodySnippet: saved.body.slice(0, 120),
+              identifier: issue.identifier,
+              issueTitle: issue.title,
+              authorizationReason: commentAuthorizationReason,
+            },
+          }, operationPublications);
+          return {
+            kind: "created" as const,
+            comment: saved,
+            interruptWakeId,
+            fastResponseEnqueued: Boolean(needsFastResponse),
+          };
+        });
+        for (const publication of operationPublications) publishActivity(publication);
+        if (operationResult.kind === "replay" || operationResult.kind === "legacy_replay") {
+          res.status(201).json(operationResult.comment);
+          return;
+        }
+        if (operationResult.kind === "retry_disabled_first") {
+          retryDisabledOperationReceiptId = operationResult.receiptId;
+          retryDisabledOriginalTargetRunId = operationResult.originalTargetRunId;
+        } else if (operationResult.kind === "created") {
+          idempotentCommentOperation = {
+            comment: operationResult.comment,
+            interruptWakeId: operationResult.interruptWakeId,
+            fastResponseEnqueued: operationResult.fastResponseEnqueued,
+          };
+          idempotentCommentAuditWritten = true;
+          if (idempotentCommentOperation.interruptWakeId) {
+            const queueId = idempotentCommentOperation.interruptWakeId;
+            void heartbeat.resumeQueuedCommentInterrupt(issue.companyId, queueId).catch(err => {
+              logger.warn({ err, issueId: issue.id, queueId }, "durable comment interrupt remains queued for recovery");
+            });
+          }
+        }
+      }
+
       // Reopen the closed isolated workspace only after every access, resume-intent,
       // blocker, and run-cap gate passes. A rejected comment must not rebuild and
       // republish the workspace as active, because the issue stays terminal and the
@@ -18606,7 +18891,7 @@ export function issueRoutes(
       let scheduledRetrySupersededByComment = false;
       let cancelledScheduledRetryRunId: string | null = null;
       if (
-        effectiveMoveToTodoRequested &&
+        !idempotentCommentOperation && effectiveMoveToTodoRequested &&
         (isClosed ||
           (isBlocked && !hasUnresolvedFirstClassBlockers) ||
           shouldResumeInProgressScheduledRetry)
@@ -18664,7 +18949,7 @@ export function issueRoutes(
         });
       }
 
-      if (interruptRequested) {
+      if (interruptRequested && !idempotentCommentOperation) {
         if (req.actor.type !== "board") {
           res.status(403).json({
             error:
@@ -18673,7 +18958,10 @@ export function issueRoutes(
           return;
         }
 
-        const runToInterrupt = await resolveActiveIssueRun(currentIssue);
+        const activeRun = await resolveActiveIssueRun(currentIssue);
+        const runToInterrupt = retryDisabledOperationReceiptId
+          ? activeRun?.id === retryDisabledOriginalTargetRunId ? activeRun : null
+          : activeRun;
         if (runToInterrupt) {
           const cancelled = await heartbeat.cancelRun(
             runToInterrupt.id,
@@ -18725,8 +19013,10 @@ export function issueRoutes(
       // comment is inserted would leave an orphan comment without the corresponding state change.
       let comment: Awaited<ReturnType<typeof svc.addComment>>;
       let goalCommentSteered = false;
-      let fastResponseEnqueued = false;
-      if (shouldAutoApproveReviewComment) {
+      let fastResponseEnqueued = idempotentCommentOperation?.fastResponseEnqueued ?? false;
+      if (idempotentCommentOperation) {
+        comment = idempotentCommentOperation.comment;
+      } else if (shouldAutoApproveReviewComment) {
         const transition = applyIssueExecutionPolicyTransition({
           issue: currentIssue,
           policy: currentExecutionPolicy,
@@ -18914,7 +19204,23 @@ export function issueRoutes(
         }) : await add();
       }
 
-      if (!fastResponseEnqueued && actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status)) {
+      if (retryDisabledOperationReceiptId) {
+        const [receipt] = await db.select().from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.id, retryDisabledOperationReceiptId),
+          eq(agentWakeupRequests.companyId, currentIssue.companyId),
+          eq(agentWakeupRequests.source, "issue_comment_operation"),
+        ));
+        if (receipt) await db.update(agentWakeupRequests).set({
+          payload: { ...receipt.payload, commentId: comment.id, operationState: "completed" },
+          finishedAt: new Date(),
+          updatedAt: new Date(),
+        }).where(and(
+          eq(agentWakeupRequests.id, receipt.id), eq(agentWakeupRequests.companyId, currentIssue.companyId),
+          eq(agentWakeupRequests.source, "issue_comment_operation"),
+        ));
+      }
+
+      if (!fastResponseEnqueued && !idempotentCommentOperation?.interruptWakeId && actor.actorType === "user" && currentIssue.assigneeAgentId && !["done", "cancelled", "backlog"].includes(currentIssue.status)) {
         await db.transaction(tx => enqueueFastResponse(tx as unknown as Db, { companyId: currentIssue.companyId, issueId: currentIssue.id, agentId: currentIssue.assigneeAgentId,
           responsibleUserId: actor.actorId, sourceCommentId: comment.id, sourceKey: `comment:${comment.id}`, acceptedAt: new Date(comment.createdAt) }))
           .catch(() => logger.warn({ issueId: currentIssue.id }, "fast response admission unavailable"));
@@ -18923,7 +19229,7 @@ export function issueRoutes(
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
       if (
-        currentIssue.assigneeAgentId &&
+        currentIssue.assigneeAgentId && !idempotentCommentOperation?.interruptWakeId &&
         // Slack-linked messages need the normal attributed wake boundary so
         // the accepted requester and return-thread receipt travel with the run.
         !currentIssue.externalConversationState &&
@@ -18985,7 +19291,7 @@ export function issueRoutes(
           );
       }
 
-      await logActivity(db, {
+      if (!idempotentCommentAuditWritten) await logActivity(db, {
         companyId: currentIssue.companyId,
         actorType: actor.actorType,
         actorId: actor.actorId,
@@ -19206,7 +19512,7 @@ export function issueRoutes(
           reopened,
           currentStatus: wakeIssueSnapshot.status,
         });
-        if (assigneeId && !goalCommentSteered && shouldWakeAssigneeForComment) {
+        if (assigneeId && !goalCommentSteered && shouldWakeAssigneeForComment && !idempotentCommentOperation?.interruptWakeId) {
           if (reopened) {
             addWakeup(assigneeId, {
               source: "automation",
