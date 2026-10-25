@@ -25,6 +25,14 @@ The original lease/process-identity and native terminalization fences remain.
 
 ## Verification boundary
 
-Green checks are pending. This is feature-branch source, not a deployed
-monitoring surface or a live latency claim. The private scrape/ingress boundary,
-production collector and dashboards remain infrastructure delivery gates.
+Exact product candidate `8153eaa36939d3842cda385aa04ccf961e88af3d` passed
+all 142 checks in the four complete focused suites, with no skips, in 39.96
+seconds. Both database and server semantic typechecks passed at the same exact
+commit. Both disposable fixture namespaces were independently absent afterward.
+Receipts are retained under the task continuation; no running fixture remains.
+
+This is feature-branch source, not a deployed monitoring surface or a live latency
+claim. Private scrape/ingress, collectors and dashboards remain infrastructure
+release gates. Their current-source carry separately passes 73 source checks,
+including promtool firing and recovery fixtures; exact-commit cluster CI remains
+pending. Do not activate the infrastructure scrape against an older application.
