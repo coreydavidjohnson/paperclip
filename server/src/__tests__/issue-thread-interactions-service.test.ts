@@ -549,6 +549,33 @@ describeEmbeddedPostgres("issueThreadInteractionService", () => {
     expect(created).toMatchObject({ kind: "ask_user_questions", status: "pending" });
   });
 
+  it.each(["pending", "failed", "missing-version", "invalid-version", "stale-version", "other-run"])(
+    "does not treat a %s acknowledgement as delivered user direction", async (mode) => {
+      const fixture = await seedSourceQuestionFixture({ paperclipWake: { comments: [] } });
+      const commentId = randomUUID();
+      await db.insert(issueComments).values({ id: commentId, companyId: fixture.companyId,
+        issueId: fixture.issueId, authorType: "user", authorUserId: "board-user", body: "Wait.",
+        createdAt: new Date("2026-07-25T12:01:00.000Z"), updatedAt: new Date("2026-07-25T12:01:00.000Z") });
+      const receipt = { status: ["pending", "failed"].includes(mode) ? mode : "acknowledged",
+        // A later wall-clock acknowledgement must not authorize an old revision.
+        acknowledgedAt: "2026-07-25T12:02:00.000Z",
+        commentUpdatedAt: mode === "missing-version" ? undefined : mode === "invalid-version" ? "not-a-date"
+          : mode === "stale-version" ? "2026-07-25T12:00:00.000Z" : "2026-07-25T12:01:00.000Z" };
+      let receiptRunId = fixture.runId;
+      if (mode === "other-run") {
+        receiptRunId = randomUUID();
+        await db.insert(heartbeatRuns).values({ id: receiptRunId, companyId: fixture.companyId,
+          agentId: fixture.agentId, invocationSource: "manual", status: "running", contextSnapshot: { issueId: fixture.issueId } });
+      }
+      await db.update(heartbeatRuns).set({ resultJson: { queuedSteeringAcknowledgements: { [commentId]: receipt } } })
+        .where(eq(heartbeatRuns.id, receiptRunId));
+      await expect(interactionsSvc.create({ id: fixture.issueId, companyId: fixture.companyId },
+        questionCreateInput(fixture.runId), { agentId: fixture.agentId, runId: fixture.runId },
+      )).rejects.toMatchObject({ status: 409, details: { reason: "newer_comment_not_delivered", commentIds: [commentId] } });
+      expect(await interactionsSvc.listForIssue(fixture.companyId, fixture.issueId)).toEqual([]);
+    },
+  );
+
   it("keeps legacy source snapshots compatible when delivered comments are unknown", async () => {
     const fixture = await seedSourceQuestionFixture({});
     await db.insert(issueComments).values({

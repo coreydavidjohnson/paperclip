@@ -3632,10 +3632,22 @@ export function issueThreadInteractionService(
             sourceRunContext &&
             sourceRunCreatedAt
           ) {
-            const delivered = deliveredContinuationCommentIds(sourceRunContext);
+            // Delivery can occur after the launch snapshot was captured. Read the
+            // server-owned receipt under the same issue/run fence as delivery,
+            // not from the earlier pre-transaction source-run lookup.
+            const [deliveredRun] = await tx.select({
+              contextSnapshot: heartbeatRuns.contextSnapshot,
+              resultJson: heartbeatRuns.resultJson,
+            }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.id, data.sourceRunId!),
+              eq(heartbeatRuns.companyId, issue.companyId),
+            )).for("share");
+            if (!deliveredRun) throw unprocessable("sourceRunId must belong to the same company");
+            const delivered = deliveredContinuationCommentIds(deliveredRun.contextSnapshot);
+            const acknowledgements = deliveredRun.resultJson?.queuedSteeringAcknowledgements;
             if (delivered.known) {
               const newerHumanComments = await tx
-                .select({ id: issueComments.id })
+                .select({ id: issueComments.id, updatedAt: issueComments.updatedAt })
                 .from(issueComments)
                 .where(
                   and(
@@ -3650,9 +3662,17 @@ export function issueThreadInteractionService(
                     gte(issueComments.createdAt, sourceRunCreatedAt),
                   ),
                 );
-              const undelivered = newerHumanComments.filter(
-                (comment) => !delivered.ids.has(comment.id),
-              );
+              const undelivered = newerHumanComments.filter((comment) => {
+                if (delivered.ids.has(comment.id)) return false;
+                const receipt = acknowledgements && typeof acknowledgements === "object"
+                  ? (acknowledgements as Record<string, unknown>)[comment.id] : null;
+                if (!receipt || typeof receipt !== "object") return true;
+                const ack = receipt as { status?: unknown; commentUpdatedAt?: unknown };
+                // A pending/failed receipt, or a comment edited after delivery,
+                // is not proof that this run received the current direction.
+                return ack.status !== "acknowledged" || typeof ack.commentUpdatedAt !== "string"
+                  || Date.parse(ack.commentUpdatedAt) !== comment.updatedAt.getTime();
+              });
               if (undelivered.length > 0) {
                 throw conflict(
                   "New user comments arrived after this run's context; continue after queued comments are delivered",

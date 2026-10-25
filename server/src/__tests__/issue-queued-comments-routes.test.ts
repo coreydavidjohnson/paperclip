@@ -235,6 +235,14 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const delivered = await request(agentApp).post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
     expect(delivered.status).toBe(200);
     expect(delivered.body.deliveredCommentIds.sort()).toEqual([...seeded.commentIds].sort());
+    // A pre-upgrade receipt without a version is not proof until a fresh read.
+    const [oldRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    const oldReceipts = (oldRun.resultJson as any).queuedSteeringAcknowledgements;
+    for (const receipt of Object.values(oldReceipts) as any[]) delete receipt.commentUpdatedAt;
+    await db.update(heartbeatRuns).set({ resultJson: { ...oldRun.resultJson, queuedSteeringAcknowledgements: oldReceipts } })
+      .where(eq(heartbeatRuns.id, seeded.runId));
+    await expect(service.create(scope, input, seeded)).rejects.toMatchObject({ status: 409,
+      details: { reason: "newer_comment_not_delivered" } });
     const repeated = await request(agentApp).post(`/api/issues/${seeded.issueId}/comments/delivery`).send({});
     expect(repeated.status).toBe(200);
     expect(repeated.body.deliveredCommentIds).toEqual([]);
@@ -250,6 +258,12 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await expect(service.create(scope, input, seeded)).rejects.toMatchObject({ status: 409,
       details: { reason: "newer_comment_not_delivered", commentIds: [laterId] } });
     expect(await db.select().from(issueThreadInteractions)).toHaveLength(1);
+    await db.delete(issueComments).where(eq(issueComments.id, laterId));
+    await db.update(issueComments).set({ body: "Revised direction not yet read.",
+      updatedAt: new Date(Date.now() + 1_000),
+    }).where(eq(issueComments.id, seeded.commentIds[0]));
+    await expect(service.create(scope, input, seeded)).rejects.toMatchObject({ status: 409,
+      details: { reason: "newer_comment_not_delivered", commentIds: [seeded.commentIds[0]] } });
   });
 
   it.each(["board", "wrong_run", "wrong_agent", "cancelled", "cancelling", "expired", "other_issue", "malformed", "missing_boot", "missing_lease"])(

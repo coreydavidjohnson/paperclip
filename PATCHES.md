@@ -338,6 +338,23 @@ heartbeat.ts.
 
 - Owned terminal completion transfers cleanup-event authority before fallible post-terminal effects; the real-database cleanup regression preserves the warning after a completion exception without granting stale observers a new epoch.
 
+## Delivered comment revisions before questions (PER-316)
+
+- Why: the current question guard reads only the initial run snapshot. An
+  authenticated external comment delivery records a durable acknowledgement,
+  but a later question still receives `newer_comment_not_delivered`.
+- Scope: reread the source run under the issue/run fence and accept only its
+  server-owned acknowledged receipt for the exact current comment revision.
+  Delivery and ordered native steering record that revision. A fresh delivery
+  can refresh an old versionless receipt; a question write cannot.
+- Preserve unread/later/edited direction, foreign-run, pending/failed and invalid
+  receipt rejection; do not mutate the launch snapshot or approve anything.
+- Regression: real delivery-to-question route plus receipt negative controls in
+  the complete interaction service suite, both retained in the image gate.
+  Current-base red proof and limits are in
+  `docs/incidents/2026-10-25-paperclip-comment-delivery.md`.
+- Remove when upstream delivers the same revision-bound acknowledgement guard.
+
 ## Homelab-owned settings (not fork patches)
 
 - Database indexes in `luma-homelab` `k8s/paperclip/70-db-indexes.yaml`
