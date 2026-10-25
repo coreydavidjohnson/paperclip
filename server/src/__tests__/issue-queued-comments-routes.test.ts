@@ -25,7 +25,7 @@ import {
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
-import { heartbeatService } from "../services/heartbeat.js";
+import { getTaskDrainStatus, heartbeatService } from "../services/heartbeat.js";
 import { issueService } from "../services/issues.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
@@ -70,6 +70,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       child.kill();
     }
     testProcesses.clear();
+    await heartbeatService(db).drainActiveRunExecutions();
     // Each case owns the entire disposable database. Clear the full company
     // graph, including attribution rows and constraints added by migrations.
     await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
@@ -2037,6 +2038,19 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const keyedComments = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId));
     expect(keyedComments).toHaveLength(1);
     expect(keyedComments[0].body).toBe(saved.body);
+  });
+
+  it("tracks queued interrupt recovery until the task drain completes", async () => {
+    const seeded = await seedQueue();
+    const heartbeat = heartbeatService(db);
+    const pending = heartbeat.resumeQueuedCommentInterrupt(seeded.companyId, seeded.wakeId);
+    try {
+      expect(getTaskDrainStatus().pendingWakes).toBeGreaterThan(0);
+    } finally {
+      await pending;
+    }
+    await heartbeat.drainActiveRunExecutions();
+    expect(getTaskDrainStatus().pendingWakes).toBe(0);
   });
 
   it("serializes concurrent same-key normal comments into one durable operation", async () => {
