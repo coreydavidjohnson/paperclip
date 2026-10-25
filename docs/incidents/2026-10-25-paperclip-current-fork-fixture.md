@@ -43,3 +43,9 @@ cleanup. A conflicting-indexed-identity negative control was then added.
 These results do not prove semantic typecheck, an image build, independent
 review, staging behavior, measured request p95 or the normal POST repair.
 Automatic UI resend stays disabled. Historical failures remain failures.
+
+The first indexed-conflict control used a nonexistent UUID in the indexed issue
+column and correctly failed its foreign key before exercising recovery. The
+fixture now inserts a real second task, so the control tests a valid conflicting
+binding rather than impossible database state. That 105-pass/one-fail receipt
+remains failed; the successful semantic typecheck on that commit is separate.

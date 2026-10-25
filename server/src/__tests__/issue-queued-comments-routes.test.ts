@@ -1845,9 +1845,14 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
         status: "running", runtimeMode: "legacy", contextSnapshot: { issueId: kind === "other_issue" ? randomUUID() : seeded.issueId },
       });
       // Indexed identity wins even when a historical JSON key claims this issue.
-      if (kind === "indexed_conflict") await db.update(heartbeatRuns).set({ issueId: randomUUID(),
-        contextSnapshot: { issueId: seeded.issueId, taskId: seeded.issueId },
-      }).where(eq(heartbeatRuns.id, seeded.runId));
+      if (kind === "indexed_conflict") {
+        const [otherIssue] = await db.insert(issues).values({ companyId: seeded.companyId,
+          title: "Indexed identity owns this other task", status: "in_progress", assigneeAgentId: seeded.agentId,
+        }).returning();
+        await db.update(heartbeatRuns).set({ issueId: otherIssue.id,
+          contextSnapshot: { issueId: seeded.issueId, taskId: seeded.issueId },
+        }).where(eq(heartbeatRuns.id, seeded.runId));
+      }
       if (kind === "reassigned") await db.update(issues).set({ assigneeAgentId: otherAgentId }).where(eq(issues.id, seeded.issueId));
       if (kind === "terminal") await db.update(issues).set({ status: "done" }).where(eq(issues.id, seeded.issueId));
       const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
