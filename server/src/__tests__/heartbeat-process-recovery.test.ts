@@ -7287,6 +7287,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const [action] = await selectRecoveryActionsForIssue(issueId);
     expect(action).toMatchObject({ kind: "deliberate_wait_without_target", ownerType: "board", attemptCount: 1 });
     expect(action.evidence).toMatchObject({ latestRunId: runId, sourceMaxAttempts: 1 });
+    // Creating the hold is atomic, but later common status writes still refuse.
+    await expect(issueService(db).update(issueId, { status: "todo" })).rejects.toMatchObject({
+      status: 409, details: { code: "recovery_status_repair_required", recoveryActionId: action.id },
+    });
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
   });
 

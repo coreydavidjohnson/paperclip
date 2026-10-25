@@ -3660,6 +3660,13 @@ export function recoveryService(
         attemptCount: input.attemptCount,
         legacyEpisode: input.legacyEpisode,
       }, db);
+      // Establish the hold before publishing its board escalation, in the same
+      // source-locked transaction. The common guard must reject later status
+      // writes, not the producer that creates this exact hold. No bypass needed.
+      const updated = await issuesSvc.update(input.issue.id, {
+        status: "blocked", companyGuard: input.issue.companyId,
+      }, db, publications, postCommitActions);
+      if (!updated) return null;
       const now = new Date();
       await db
         .update(issueRecoveryActions)
@@ -3697,10 +3704,6 @@ export function recoveryService(
           ),
         );
 
-      const updated = await issuesSvc.update(input.issue.id, {
-        status: "blocked", companyGuard: input.issue.companyId,
-      }, db, publications, postCommitActions);
-      if (!updated) return null;
       const sourceAssigneePreserved =
         updated.assigneeAgentId === input.issue.assigneeAgentId &&
         updated.assigneeUserId === input.issue.assigneeUserId;

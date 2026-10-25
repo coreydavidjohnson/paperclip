@@ -2265,6 +2265,8 @@ describe("agent issue mutation checkout ownership", () => {
         mockChatRunRetries.processFailedChatRunRetry,
       ).toHaveBeenCalledExactlyOnceWith(chatRetryActionId);
       expect(order).toEqual(["begin", "stage", "commit", "dispatch"]);
+      expect(mockIssueService.update.mock.calls[0]?.[2]).toBe(db);
+      expect(mockIssueRecoveryActionService.resolveActiveForIssue.mock.calls[0]?.[1]).toBe(db);
       expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
       expect(db.chatBindingQueries[0].params).toEqual(["restricted", companyId, issueId]);
     });
@@ -2358,9 +2360,9 @@ describe("agent issue mutation checkout ownership", () => {
         mockChatRunRetries.prepareFailedChatRunRetry,
       ).toHaveBeenCalledTimes(1);
       expect(order).toEqual(["begin", "stage", "rollback"]);
-      // The real DB owns rollback of prepared intent and issue changes. This
-      // route stub proves both writes share its transaction and no worker ran.
-      expect(mockIssueService.update.mock.calls[0]?.[2]).toBe(db);
+      // Resolution now precedes the guarded status write. An abort rolls back
+      // prepared intent and never reaches the issue write or dispatch.
+      expect(mockIssueService.update).not.toHaveBeenCalled();
       expect(
         mockIssueRecoveryActionService.resolveActiveForIssue,
       ).toHaveBeenCalledExactlyOnceWith(expect.any(Object), db);

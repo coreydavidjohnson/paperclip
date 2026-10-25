@@ -358,6 +358,9 @@ heartbeat.ts.
   `statusRepair` snapshot. It repairs blocked, in_progress or todo source
   drift to todo only for that exact action and unchanged original owner.
   Policy, dependencies, pending cards/approvals and execution gates stay intact.
+- Recovery creates its blocked source hold before publishing the exhausted board
+  action, under the same source-locked transaction. The status guard has no
+  system bypass; subsequent writes still refuse that exact escalation.
 - Resolution and source status commit together. Exact replay is read-only and
   rejects a newer source/action decision. A durable action-evidence intent uses
   ordinary `issue_commented` admission, exact-key deduplication, and the saved
