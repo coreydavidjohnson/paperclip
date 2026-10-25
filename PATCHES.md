@@ -345,3 +345,25 @@ heartbeat.ts.
   `doc/DOCKER.md`.
 - Remove when: the pinned package manager detects the actual build allocation
   and its resource use fits the allotted builder capacity without this wrapper.
+
+
+## PER-968 exhausted disposition status repair
+
+- Ordinary `issueService.update` status writes refuse the exact active
+  board-owned exhausted disposition escalation while holding both source and
+  action locks. Board PATCH/comment and native service callers cannot commit
+  a status mutation and leave that escalation stranded.
+- The existing recovery resolve endpoint accepts an optional board-only
+  `statusRepair` snapshot. It repairs blocked, in_progress or todo source
+  drift to todo only for that exact action and unchanged original owner.
+  Policy, dependencies, pending cards/approvals and execution gates stay intact.
+- Resolution and source status commit together. Exact replay is read-only and
+  rejects a newer source/action decision. A durable action-evidence intent uses
+  ordinary `issue_commented` admission, exact-key deduplication, and the saved
+  task session. No fresh-session flag or recovery-mode projection is introduced.
+- Regression: `server/src/__tests__/issue-recovery-actions.test.ts` (PER-968
+  cases, including assembled admission and lost acknowledgement). API contract:
+  `doc/guarded-status-repair.md`. Remove when upstream provides atomic status
+  refusal/repair, guarded replay and durable normal same-session continuation.
+- Upstream checked at `67aa87a93bb1bbc4559105497863f541f9fb4e9b` (2026-10-25).
+  Its resolve path still requires a blocked source; no equivalent guard exists.

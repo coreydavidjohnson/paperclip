@@ -11,6 +11,7 @@ import {
   costEvents,
   agents,
   agentRuntimeState,
+  agentTaskSessions,
   authUsers,
   agentWakeupRequests,
   activityLog,
@@ -2951,6 +2952,14 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toHaveLength(0);
   });
 
+  it("PER-968 refuses a board comment plus todo without inserting the comment", async () => {
+    const { sourceIssueId, sourceIssue, action } = await seedTrappedDisposition();
+    await request(createApp()).patch(`/api/issues/${sourceIssueId}`).send({ status: "todo", comment: "Continue the task now." }).expect(409);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssueId))).toHaveLength(0);
+    expect(await issueRecoveryActionService(db).getActiveForIssue(sourceIssue.companyId, sourceIssueId)).toMatchObject({ id: action.id });
+  });
+
   it("PER-968 refuses a direct native service status write at the common boundary", async () => {
     const { sourceIssueId, sourceIssue } = await seedTrappedDisposition();
     await expect(issueService(db).update(sourceIssueId, { status: "todo", title: "Must not commit" }))
@@ -2979,9 +2988,10 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["sourceUpdatedAt", "sourceStatusVersion", "actionUpdatedAt", "actionFingerprint"])("PER-968 refuses stale %s atomically", async (field) => {
+  it.each(["sourceUpdatedAt", "sourceStatus", "sourceStatusVersion", "assigneeAgentId", "actionUpdatedAt", "actionFingerprint"])("PER-968 refuses stale %s atomically", async (field) => {
     const { sourceIssueId, sourceIssue, action, repair } = await seedTrappedDisposition();
     const stale = { ...repair, [field]: field === "sourceStatusVersion" ? repair.sourceStatusVersion + 1
+      : field === "assigneeAgentId" ? randomUUID() : field === "sourceStatus" ? "blocked"
       : field.endsWith("At") ? "2000-01-01T00:00:00.000Z" : "different" };
     await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
       .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: stale,
@@ -2997,7 +3007,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: sourceIssueId, type: "blocks" });
     }
     if (hold === "interaction") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
-      kind: "question", status: "pending", title: "Real decision", payload: { questions: [] }, createdByAgentId: coderId });
+      kind: "request_confirmation", status: "pending", title: "Real decision", payload: { version: 1, prompt: "Choose a path" }, createdByAgentId: coderId });
     if (hold === "execution") await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), issueId: sourceIssueId });
     if (hold === "paused") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
     if (hold === "unrelated") await db.update(issueRecoveryActions).set({ kind: "active_run_watchdog" }).where(eq(issueRecoveryActions.id, action.id));
@@ -3033,6 +3043,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       createdAt: new Date(), updatedAt: new Date() });
     await db.update(companies).set({ defaultResponsibleUserId: userId }).where(eq(companies.id, companyId));
     await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    await db.insert(agentTaskSessions).values({ companyId, agentId: coderId, adapterType: "codex_local", taskKey: sourceIssueId,
+      sessionDisplayId: "per968-existing-session", sessionParamsJson: { sessionId: "per968-existing-session" } });
     // Occupy this agent on another task so the successor stays queued and no
     // real provider starts. This is still assembled native queue admission.
     await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
@@ -3046,6 +3058,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       const run = await heartbeat.wakeup(...args);
       expect(run).not.toBeNull();
       runId = run!.id;
+      expect(run!.sessionIdBefore).toBe("per968-existing-session");
       expect(run!.contextSnapshot).toMatchObject({ wakeReason: "issue_commented", guardedStatusRepairId: action.id });
       expect(run!.contextSnapshot).not.toHaveProperty("recoveryActionId");
       expect(run!.contextSnapshot).not.toHaveProperty("forceFreshSession");

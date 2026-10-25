@@ -10061,30 +10061,22 @@ export function issueRoutes(
             { deliverContinuation: sourceIssueStatus !== "blocked" },
           );
         }
-        // Settle the action in the SAME transaction before the common status
-        // boundary. Any later gate/write failure rolls both records back.
-        const recordedOutcome =
-          outcome === "restored" &&
-          sourceIssueStatus === "todo" &&
-          activeRecoveryAction.returnOwnerAgentId != null &&
-          lockedIssue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId
-            ? "handed_back"
-            : outcome === "restored" && sourceIssueStatus === "done"
-              ? "owner_completed"
-              : outcome;
-
-        const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
-          {
-            companyId: existing.companyId,
-            sourceIssueId: existing.id,
-            actionId: activeRecoveryAction.id,
-            status: actionStatus,
-            outcome: recordedOutcome,
-            resolutionNote: resolutionNote ?? null,
-          },
-          tx,
-        );
-        if (!recoveryAction) throw notFound("Active recovery action not found");
+        // Settle inside this transaction immediately before the common status
+        // boundary, after policy chooses the effective disposition. A failed
+        // source write rolls the action back as well, without a bypass option.
+        const actionToResolve = activeRecoveryAction;
+        const resolveWithDisposition = async (status: string) => {
+          const recordedOutcome = outcome === "restored" && status === "todo" &&
+            actionToResolve.returnOwnerAgentId != null && lockedIssue.assigneeAgentId === actionToResolve.returnOwnerAgentId
+              ? "handed_back" : outcome === "restored" && status === "done" ? "owner_completed" : outcome;
+          const action = await recoveryActionsSvc.resolveActiveForIssue({
+            companyId: lockedIssue.companyId, sourceIssueId: lockedIssue.id, actionId: actionToResolve.id,
+            status: actionStatus, outcome: recordedOutcome, resolutionNote: resolutionNote ?? null,
+          }, tx);
+          if (!action) throw notFound("Active recovery action not found");
+          return action;
+        };
+        let recoveryAction: Awaited<ReturnType<typeof resolveWithDisposition>> | undefined;
 
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
@@ -10204,6 +10196,7 @@ export function issueRoutes(
             actorAgentId: actor.agentId ?? null,
             actorUserId: actor.actorType === "user" ? actor.actorId : null,
           };
+          recoveryAction = await resolveWithDisposition(String(updateFields.status));
           const updatedIssue =
             sourceIssueStatus === "done" || sourceIssueStatus === "cancelled"
               ? await svc.update(
@@ -10222,6 +10215,8 @@ export function issueRoutes(
           if (!updatedIssue) throw notFound("Issue not found");
           issue = updatedIssue;
         }
+
+        recoveryAction ??= await resolveWithDisposition(issue.status);
 
         if (statusRepair) {
           const receipt = { request: statusRepair, actorType: actor.actorType, actorId: actor.actorId,
