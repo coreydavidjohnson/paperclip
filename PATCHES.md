@@ -361,6 +361,9 @@ heartbeat.ts.
 - Recovery creates its blocked source hold before publishing the exhausted board
   action, under the same source-locked transaction. The status guard has no
   system bypass; subsequent writes still refuse that exact escalation.
+  Source then action locks and action snapshot validation preserve a concurrent
+  resolution. Coverage resolution compares observed ownership and fingerprint
+  so stale agent-owned evidence cannot settle a newer board escalation.
 - Resolution and source status commit together. Exact replay is read-only and
   rejects a newer source/action decision. A durable action-evidence intent uses
   ordinary `issue_commented` admission, exact-key deduplication, and the saved

@@ -23,6 +23,7 @@ import { instanceSettingsService } from "../services/instance-settings.js";
 import { createHash, randomUUID } from "node:crypto";
 import { recordLegacyWorkspaceRestoreFailure, terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
 import { issueService } from "../services/issues.js";
+import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
 import { adapterExecutionControls, createAdapterExecutionControl } from "../services/adapter-execution-control.js";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
@@ -7292,6 +7293,54 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       status: 409, details: { code: "recovery_status_repair_required", recoveryActionId: action.id },
     });
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
+  });
+
+  it("PER-968 preserves a recovery resolution that wins before escalation locks its action", async () => {
+    const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
+      status: "in_progress", runStatus: "succeeded", livenessState: "advanced",
+    });
+    const [source] = await db.select().from(issues).where(eq(issues.id, issueId));
+    const state = await collectDispositionRepairSourceState(db, { issue: source });
+    await db.update(heartbeatRuns).set({ runtimeMode: "native", nativeIssueId: issueId, contextSnapshot: {
+      issueId, taskId: issueId, wakeReason: "issue_disposition_repair",
+      retryReason: "issue_disposition_repair", dispositionRepairFingerprint: state.fingerprint,
+      dispositionRepairAttempt: 5, dispositionRepairMaxAttempts: 5,
+    } }).where(eq(heartbeatRuns.id, runId));
+    const actionId = randomUUID();
+    await db.insert(issueRecoveryActions).values({ id: actionId, companyId, sourceIssueId: issueId,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target",
+      fingerprint: state.fingerprint, ownerType: "agent", ownerAgentId: agentId,
+      returnOwnerAgentId: agentId, attemptCount: 5, nextAction: "Replace the parked summary",
+      wakePolicy: { type: "bounded_owner_disposition_repair" },
+    });
+    let release!: () => void, report!: (pid: number) => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const ready = new Promise<number>(resolve => { report = resolve; });
+    const resolution = db.transaction(async tx => {
+      await tx.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, actionId)).for("update");
+      const [row] = await tx.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`);
+      report(row.pid);
+      await gate;
+      await issueRecoveryActionService(tx as unknown as typeof db).resolveActiveForIssue({
+        companyId, sourceIssueId: issueId, actionId, status: "resolved", outcome: "restored",
+        resolutionNote: "Concurrent resolution must survive",
+      });
+    });
+    const pid = await ready;
+    const sweep = heartbeatService(db).reconcileStrandedAssignedIssues();
+    try {
+      await vi.waitFor(async () => {
+        const waiting = await db.execute(sql`select pid from pg_stat_activity
+          where ${pid} = any(pg_blocking_pids(pid)) and wait_event_type = 'Lock'`);
+        expect(waiting.length).toBeGreaterThan(0);
+      }, { timeout: 10000 });
+    } finally { release(); }
+    await resolution;
+    await sweep;
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toEqual(source);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, actionId)))[0])
+      .toMatchObject({ status: "resolved", resolutionNote: "Concurrent resolution must survive" });
+    expect(await selectRecoveryCommentsForIssue(issueId)).toHaveLength(0);
   });
 
   it.each(["running", "wake"] as const)("PER-95 recovery cannot invent a child blocker over a newer accepted %s", async path => {

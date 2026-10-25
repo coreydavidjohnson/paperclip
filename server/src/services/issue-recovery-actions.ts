@@ -74,6 +74,8 @@ export type ResolveIssueRecoveryActionInput = {
   kind?: IssueRecoveryActionKind | null;
   cause?: string | null;
   fingerprint?: string | null;
+  /** Optional compare-and-set ownership for a resolver using an earlier snapshot. */
+  ownerType?: IssueRecoveryActionOwnerType;
   status: Extract<IssueRecoveryActionStatus, "resolved" | "cancelled">;
   outcome: IssueRecoveryActionOutcome;
   resolutionNote?: string | null;
@@ -544,6 +546,9 @@ export function issueRecoveryActionService(db: Db) {
     ];
     if (input.actionId) {
       predicates.push(eq(issueRecoveryActions.id, input.actionId));
+    }
+    if (input.ownerType) {
+      predicates.push(eq(issueRecoveryActions.ownerType, input.ownerType));
     }
     if (input.kind) {
       predicates.push(eq(issueRecoveryActions.kind, input.kind));

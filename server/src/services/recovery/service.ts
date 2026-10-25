@@ -80,7 +80,7 @@ import {
   nativeRunnerOwnershipNotHeldCondition,
 } from "../native-runtime/native-runner-ownership.js";
 import { visibleIssueCondition } from "../issue-visibility.js";
-import { forbidden, notFound } from "../../errors.js";
+import { conflict, forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
 import {
   isPidAlive,
@@ -3130,14 +3130,18 @@ export function recoveryService(
       issue.id,
     );
     if (!active || active.kind !== "deliberate_wait_without_target") return;
-    await recoveryActionsSvc.resolveActiveForIssue({
+    const resolved = await recoveryActionsSvc.resolveActiveForIssue({
       companyId: issue.companyId,
       sourceIssueId: issue.id,
       actionId: active.id,
+      // A stale agent-owned coverage check cannot settle a newer board hold.
+      ownerType: active.ownerType,
+      fingerprint: active.fingerprint,
       status: "resolved",
       outcome: "restored",
       resolutionNote: reason,
     });
+    if (!resolved) return;
     await logActivity(db, {
       companyId: issue.companyId,
       actorType: "system",
@@ -3585,6 +3589,8 @@ export function recoveryService(
           companyId: action.companyId,
           sourceIssueId: action.sourceIssueId,
           actionId: action.id,
+          ownerType: action.ownerType,
+          fingerprint: action.fingerprint,
           status: "resolved",
           outcome: "restored",
           resolutionNote: hasNewSourcePath
@@ -3660,6 +3666,16 @@ export function recoveryService(
         attemptCount: input.attemptCount,
         legacyEpisode: input.legacyEpisode,
       }, db);
+      // A coverage resolver may settle the agent-owned action without taking
+      // the source lock. Lock and revalidate it before touching source status.
+      const [lockedAction] = await db.select().from(issueRecoveryActions).where(and(
+        eq(issueRecoveryActions.companyId, input.issue.companyId),
+        eq(issueRecoveryActions.sourceIssueId, input.issue.id), eq(issueRecoveryActions.id, action.id),
+      )).for("update");
+      if (!lockedAction || !["active", "escalated"].includes(lockedAction.status)
+        || lockedAction.status !== action.status || lockedAction.ownerType !== action.ownerType
+        || lockedAction.fingerprint !== action.fingerprint
+        || lockedAction.updatedAt.getTime() !== action.updatedAt.getTime()) return null;
       // Establish the hold before publishing its board escalation, in the same
       // source-locked transaction. The common guard must reject later status
       // writes, not the producer that creates this exact hold. No bypass needed.
@@ -3668,7 +3684,7 @@ export function recoveryService(
       }, db, publications, postCommitActions);
       if (!updated) return null;
       const now = new Date();
-      await db
+      const [escalatedAction] = await db
         .update(issueRecoveryActions)
         .set({
           status: "active",
@@ -3701,8 +3717,12 @@ export function recoveryService(
           and(
             eq(issueRecoveryActions.id, action.id),
             eq(issueRecoveryActions.companyId, input.issue.companyId),
+            inArray(issueRecoveryActions.status, ["active", "escalated"]),
+            eq(issueRecoveryActions.ownerType, lockedAction.ownerType),
+            eq(issueRecoveryActions.fingerprint, lockedAction.fingerprint),
           ),
-        );
+        ).returning({ id: issueRecoveryActions.id });
+      if (!escalatedAction) throw conflict("Recovery action changed during escalation");
 
       const sourceAssigneePreserved =
         updated.assigneeAgentId === input.issue.assigneeAgentId &&

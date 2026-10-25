@@ -2943,6 +2943,17 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     } };
   }
 
+  it("PER-968 does not let stale agent-owned coverage resolve a newer board escalation", async () => {
+    const { companyId, sourceIssueId, action } = await seedTrappedDisposition();
+    const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const result = await issueRecoveryActionService(db).resolveActiveForIssue({
+      companyId, sourceIssueId, actionId: action.id, ownerType: "agent",
+      status: "resolved", outcome: "restored", resolutionNote: "Old agent-owned coverage",
+    });
+    expect(result).toBeNull();
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(before);
+  });
+
   it.each(["todo", "blocked", "done"])("PER-968 refuses naked %s without partial source or action mutation", async (status) => {
     const { sourceIssueId, sourceIssue, action } = await seedTrappedDisposition();
     const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
