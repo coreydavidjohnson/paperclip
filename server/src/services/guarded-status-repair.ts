@@ -1,12 +1,30 @@
-import { and, asc, eq, sql } from "drizzle-orm";
-import { issueRecoveryActions, type Db } from "@paperclipai/db";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { issueRecoveryActions, issues, type Db } from "@paperclipai/db";
+import { conflict } from "../errors.js";
+import type { WakeupOptions } from "./heartbeat/run-preparation.js";
 import { logger } from "../middleware/logger.js";
+
+/** Call only inside the caller's transaction. Source -> action lock order is
+ * shared by ordinary writes and the exact board repair. No public bypass. */
+export async function assertRecoveryStatusWriteAllowed(tx: Pick<Db, "select">, companyId: string, issueId: string) {
+  await tx.select({ id: issues.id }).from(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))).for("update");
+  const [action] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+    eq(issueRecoveryActions.companyId, companyId), eq(issueRecoveryActions.sourceIssueId, issueId),
+    inArray(issueRecoveryActions.status, ["active", "escalated"]),
+    eq(issueRecoveryActions.kind, "deliberate_wait_without_target"), eq(issueRecoveryActions.ownerType, "board"),
+    sql`${issueRecoveryActions.wakePolicy}->>'type' = 'board_escalation'`,
+    sql`${issueRecoveryActions.evidence}->>'terminalReason' = 'unchanged_source_state_exhausted'`,
+  )).for("update");
+  if (action) throw conflict("Resolve this exact recovery escalation before changing the task status.", {
+    code: "recovery_status_repair_required", recoveryActionId: action.id,
+  });
+}
 
 /** The repair transaction owns intent; ordinary heartbeat admission owns execution.
  * No recovery action ID enters the wake projection and no session reset is requested. */
 export async function deliverGuardedStatusRepairs(
   db: Db,
-  wake: ReturnType<typeof import("./heartbeat.js").heartbeatService>["wakeup"],
+  wake: (agentId: string, options: WakeupOptions) => Promise<{ id: string } | null>,
   actionId?: string,
 ) {
   const pending = await db.select().from(issueRecoveryActions).where(and(

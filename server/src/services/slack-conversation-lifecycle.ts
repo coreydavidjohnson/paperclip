@@ -1,3 +1,4 @@
+import { assertRecoveryStatusWriteAllowed } from "./guarded-status-repair.js";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { chatConversations, chatEndpoints, heartbeatRuns, issueComments, issues, type Db } from "@paperclipai/db";
 import { persistActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
@@ -98,6 +99,7 @@ export async function settleExternalConversation(db: Db, companyId: string, issu
         and p.state in ('pending', 'streaming', 'retry', 'delivery_unknown', 'failed', 'awaiting_consent'))
       as ready`);
     if (!evidence?.ready) return false;
+    await assertRecoveryStatusWriteAllowed(tx, companyId, issueId);
     const changed = await tx.update(chatConversations).set({ state: "waiting", updatedAt: new Date() })
       .where(and(eq(chatConversations.id, binding.conversation.id), eq(chatConversations.companyId, companyId), eq(chatConversations.state, "active")))
       .returning({ id: chatConversations.id });

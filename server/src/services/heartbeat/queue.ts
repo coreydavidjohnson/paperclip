@@ -1,3 +1,4 @@
+import { assertRecoveryStatusWriteAllowed } from "../guarded-status-repair.js";
 import { admitReconciledUserContinuation } from "../execution-recovery-resolution.js";
 import { startClaimedLegacyControllerLease } from "../legacy-controller-lease.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
@@ -3111,6 +3112,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             });
             return { kind: "skipped" as const };
           }
+
+          await assertRecoveryStatusWriteAllowed(tx, issue.companyId, issue.id);
 
           const issueStateGuard = opts.issueStateGuard;
           const activeMonitorRun = issueStateGuard?.monitorNextCheckAt === undefined ? null

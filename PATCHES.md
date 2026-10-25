@@ -351,7 +351,8 @@ heartbeat.ts.
 
 - Ordinary `issueService.update` status writes refuse the exact active
   board-owned exhausted disposition escalation while holding both source and
-  action locks. Board PATCH/comment and native service callers cannot commit
+  action locks. Checkout/release, conversation transitions and wake admission
+  share the same guard. Board PATCH/comment and native service callers cannot commit
   a status mutation and leave that escalation stranded.
 - The existing recovery resolve endpoint accepts an optional board-only
   `statusRepair` snapshot. It repairs blocked, in_progress or todo source

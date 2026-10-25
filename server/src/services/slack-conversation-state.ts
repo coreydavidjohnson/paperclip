@@ -1,3 +1,4 @@
+import { assertRecoveryStatusWriteAllowed } from "./guarded-status-repair.js";
 import { chatConversations, issues, type Db } from "@paperclipai/db";
 import { and, eq, sql } from "drizzle-orm";
 
@@ -45,6 +46,10 @@ export function nonIdleSlackIssueCondition() {
 export async function resumeExternalConversation(tx: Db, companyId: string, issueId: string) {
   // Only the verified idle convention may leave In Review automatically.
   // A real decision or delivery problem keeps the existing review semantics.
+  const [idle] = await tx.select({ id: issues.id }).from(issues).where(and(
+    eq(issues.companyId, companyId), eq(issues.id, issueId), sql`${externalConversationStateSql()} = 'waiting'`,
+  ));
+  if (idle) await assertRecoveryStatusWriteAllowed(tx, companyId, issueId);
   await tx.update(issues).set({ status: "todo", updatedAt: new Date() })
     .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId),
       sql`${externalConversationStateSql()} = 'waiting'`));

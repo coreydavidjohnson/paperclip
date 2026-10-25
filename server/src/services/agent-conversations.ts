@@ -1,3 +1,4 @@
+import { assertRecoveryStatusWriteAllowed } from "./guarded-status-repair.js";
 import { FAST_RESPONSE_AGENT_GUIDANCE, fastResponseHistoryBody } from "@paperclipai/shared";
 import {
   persistActivity,
@@ -256,6 +257,7 @@ export async function prepareConversationTurn(
         context.conversationReplayThroughCommentId = replayThrough?.id ?? commentId;
       }
     }
+    await assertRecoveryStatusWriteAllowed(tx, issue.companyId, issue.id);
     await tx
       .update(issues)
       .set({
@@ -369,6 +371,7 @@ export async function settleConversationTurn(
       issue.conversationState === conversationState
     )
       return true;
+    await assertRecoveryStatusWriteAllowed(tx, issue.companyId, issue.id);
     await tx
       .update(issues)
       .set({

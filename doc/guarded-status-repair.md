@@ -36,7 +36,8 @@ active execution refuses the entire repair without partial status/action edits.
 ## Status writes and replay
 
 Ordinary status writes through the common service refuse this exact escalation
-with HTTP 409 and code recovery_status_repair_required. Earlier route validation
+with HTTP 409 and code recovery_status_repair_required. Direct checkout/release,
+conversation transitions and issue wake admission share this source/action guard. Earlier route validation
 can still refuse an invalid Blocked request with HTTP 422. Nonstatus writes and
 unrelated recovery kinds retain existing behavior.
 
