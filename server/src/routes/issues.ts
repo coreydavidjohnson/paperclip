@@ -18568,6 +18568,7 @@ export function issueRoutes(
       // Keyed human comments commit their content, immutable request receipt, and
       // any original-target interrupt outbox row under the same issue-row fence.
       // Replays never re-enter route side effects or infer authority from the latest run.
+      const commentClientRequestId = req.body.clientRequestId;
       let idempotentCommentOperation: {
         comment: Awaited<ReturnType<typeof svc.addComment>>;
         interruptWakeId: string | null;
@@ -18576,7 +18577,7 @@ export function issueRoutes(
       let idempotentCommentAuditWritten = false;
       let retryDisabledOperationReceiptId: string | null = null;
       let retryDisabledOriginalTargetRunId: string | null = null;
-      if (actor.actorType === "user" && req.body.clientRequestId) {
+      if (actor.actorType === "user" && commentClientRequestId) {
         const operationState = parseIssueExecutionState(issue.executionState);
         const operationWouldAutoApprove = issue.status === "in_review" &&
           operationState?.status === "pending" &&
@@ -18591,7 +18592,7 @@ export function issueRoutes(
           companyId: issue.companyId,
           issueId: issue.id,
           userId: actor.actorId,
-          clientRequestId: req.body.clientRequestId,
+          clientRequestId: commentClientRequestId,
         };
         const operationKey = `issue-comment-operation:${createHash("sha256")
           .update(stableCommentOperationJson(requestIdentity)).digest("hex")}`;
@@ -18613,7 +18614,7 @@ export function issueRoutes(
           presentation: commentPresentation,
           metadata: req.body.metadata ?? null,
           attachmentIds: req.body.attachmentIds,
-          clientRequestId: req.body.clientRequestId,
+          clientRequestId: commentClientRequestId,
           mirrorToSlack: true,
           authorizationReason: commentAuthorizationReason,
           sourceTrust: operationSourceTrust,
@@ -18662,7 +18663,7 @@ export function issueRoutes(
           const [legacyComment] = await tx.select().from(issueComments).where(and(
             eq(issueComments.companyId, issue.companyId), eq(issueComments.issueId, issue.id),
             eq(issueComments.authorUserId, actor.actorId),
-            eq(issueComments.clientRequestId, req.body.clientRequestId),
+            eq(issueComments.clientRequestId, commentClientRequestId),
           ));
           if (legacyComment) {
             const attachmentRows = await tx.select({ id: issueAttachments.id }).from(issueAttachments)
@@ -18680,7 +18681,7 @@ export function issueRoutes(
           }
 
           const target = interruptRequested ? await resolveActiveIssueRun(lockedIssue) : null;
-          if (target) {
+          if (target && operationSupported && lockedIssue.assigneeAgentId) {
             const [agent] = await tx.select({ adapterType: agents.adapterType }).from(agents).where(and(
               eq(agents.id, lockedIssue.assigneeAgentId!), eq(agents.companyId, issue.companyId),
             ));
@@ -18698,7 +18699,7 @@ export function issueRoutes(
               reason: "Retry-disabled issue comment operation receipt",
               payload: {
                 issueId: issue.id,
-                clientRequestId: req.body.clientRequestId,
+                clientRequestId: commentClientRequestId,
                 requestFingerprint,
                 retryDisabled: true,
                 operationState: "started",
@@ -18762,7 +18763,7 @@ export function issueRoutes(
             payload: {
               issueId: issue.id,
               commentId: saved.id,
-              clientRequestId: req.body.clientRequestId,
+              clientRequestId: commentClientRequestId,
               requestUserId: actor.actorId,
               requestFingerprint,
               interruptWakeId,

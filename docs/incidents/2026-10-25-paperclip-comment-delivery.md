@@ -49,8 +49,8 @@ successor, including when the request returned a conflict for a changed body.
 
 The current branch adds an issue-row-locked receipt for keyed human comments.
 The supported plain and attachment path commits the comment, request
-fingerprint, audit, fast-response request, and any exact-target interrupt
-outbox in one transaction. The fingerprint covers company, issue, user,
+fingerprint, audit, and either the fast-response request or exact-target
+interrupt outbox in one transaction. The fingerprint covers company, issue, user,
 request key, body, attachments, presentation/metadata, and control flags.
 The outbox keeps the original run ID and is processed through the existing
 run-control identity and admission checks. A replay returns the saved comment;
