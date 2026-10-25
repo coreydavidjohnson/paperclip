@@ -9,6 +9,7 @@ import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { logger } from "../middleware/logger.js";
 import { and, desc, eq, inArray, isNull, lte, not, or, sql } from "drizzle-orm";
 import {
+  agentWakeupRequests,
   chatActions,
   environmentLeases,
   heartbeatRuns,
@@ -403,10 +404,35 @@ export async function deliverReconciledExecutions(
       const pendingDecision = and(
         eq(issueRecoveryActions.companyId, action.companyId),
         eq(issueRecoveryActions.id, action.id),
+        eq(issueRecoveryActions.sourceIssueId, action.sourceIssueId),
+        eq(issueRecoveryActions.returnOwnerAgentId, action.returnOwnerAgentId),
         eq(issueRecoveryActions.status, "resolved"),
         sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
         sql`${issueRecoveryActions.evidence}->'executionReconciliation' = ${JSON.stringify(decision)}::jsonb`,
       );
+      const [committedRun] = await db
+        .select({ id: heartbeatRuns.id })
+        .from(agentWakeupRequests)
+        .innerJoin(heartbeatRuns, and(
+          eq(heartbeatRuns.id, agentWakeupRequests.runId),
+          eq(heartbeatRuns.wakeupRequestId, agentWakeupRequests.id),
+          eq(heartbeatRuns.companyId, action.companyId),
+          eq(heartbeatRuns.agentId, action.returnOwnerAgentId),
+        ))
+        .where(and(
+          eq(agentWakeupRequests.companyId, action.companyId),
+          eq(agentWakeupRequests.agentId, action.returnOwnerAgentId),
+          eq(agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action.id}`),
+          not(eq(agentWakeupRequests.status, "skipped")),
+          eq(agentWakeupRequests.requestedByActorType, "system"),
+          eq(agentWakeupRequests.requestedByActorId, "execution-recovery"),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${action.sourceIssueId}`,
+          sql`${agentWakeupRequests.payload}->>'recoveryActionId' = ${action.id}`,
+          sql`coalesce(${heartbeatRuns.nativeIssueId}::text, ${heartbeatRuns.contextSnapshot}->>'issueId') = ${action.sourceIssueId}`,
+          sql`${heartbeatRuns.contextSnapshot}->>'recoveryActionId' = ${action.id}`,
+          sql`${heartbeatRuns.contextSnapshot}->>'previousRunId' = ${decision.runId}`,
+        ))
+        .limit(1);
       const [task] = await db
         .select()
         .from(issues)
@@ -417,9 +443,10 @@ export async function deliverReconciledExecutions(
           ),
         );
       if (
-        !task ||
-        task.assigneeAgentId !== action.returnOwnerAgentId ||
-        ["done", "cancelled"].includes(task.status)
+        !committedRun &&
+        (!task ||
+          task.assigneeAgentId !== action.returnOwnerAgentId ||
+          ["done", "cancelled"].includes(task.status))
       ) {
         await db
           .update(issueRecoveryActions)
@@ -429,17 +456,17 @@ export async function deliverReconciledExecutions(
           .where(pendingDecision);
         continue;
       }
-      const run = await wake(action.returnOwnerAgentId, {
+      const run = committedRun ?? await wake(action.returnOwnerAgentId, {
         source: "automation",
         triggerDetail: "system",
         reason: "issue_recovery_action_restored",
         idempotencyKey: `execution-reconciliation:${action.id}`,
-        payload: { issueId: task.id, recoveryActionId: action.id },
+        payload: { issueId: action.sourceIssueId, recoveryActionId: action.id },
         requestedByActorType: "system",
         requestedByActorId: "execution-recovery",
         contextSnapshot: {
-          issueId: task.id,
-          taskId: task.id,
+          issueId: action.sourceIssueId,
+          taskId: action.sourceIssueId,
           recoveryActionId: action.id,
           previousRunId: decision.runId,
           retryOfRunId: decision.runId,

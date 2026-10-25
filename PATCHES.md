@@ -38,8 +38,15 @@ heartbeat.ts.
 - The production image gate includes the real readiness fixture and the
   shared database-error helper tests. No failed test is waived, and no
   production rollout is implied by a focused result.
+- Reconciliation delivery must acknowledge the exact already committed wake
+  before considering task closure or reassignment. Bind the company, owner,
+  mutual wake/run IDs, system actor, source issue, recovery action and recorded
+  decision; never call wake again for that receipt. Real database regressions
+  reproduced four lost-ack failures and then passed all eight selected cases,
+  including rejection of mismatched owner, source, decision and actor receipts.
 - Remove these carries when upstream retains readiness isolation and uses
-  constraint-aware wrapped-error detection in recovery-action upserts.
+  constraint-aware wrapped-error detection in recovery-action upserts, and
+  delivery recognizes exact committed acknowledgments without a second wake.
 
 ## 1. External adapter composer capabilities
 

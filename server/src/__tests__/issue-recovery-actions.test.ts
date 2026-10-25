@@ -2324,8 +2324,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
-  it("reconciles a lost wake acknowledgement after the exact successor has already finished", async () => {
-    const { action, heartbeat, companyId, previousRunId } =
+  it.each(["open", "closed", "reassigned", "newer_success"] as const)("reconciles a lost wake acknowledgement after the exact successor finished with %s source state", async (sourceState) => {
+    const { action, heartbeat, companyId, previousRunId, sourceIssueId, coderId, managerId } =
       await seedReconciledDelivery();
     let successorId: string | undefined;
     await deliverReconciledExecutions(db, async (...args) => {
@@ -2340,7 +2340,16 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .update(heartbeatRuns)
       .set({ status: "succeeded", finishedAt: new Date() })
       .where(eq(heartbeatRuns.id, successorId!));
-    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    if (sourceState === "closed") {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, sourceIssueId));
+    } else if (sourceState === "reassigned") {
+      await db.update(issues).set({ assigneeAgentId: managerId }).where(eq(issues.id, sourceIssueId));
+    } else if (sourceState === "newer_success") {
+      await seedHeartbeatRun({ companyId, agentId: coderId, issueId: sourceIssueId, runId: randomUUID(), status: "succeeded" });
+    }
+    const wake = vi.fn(heartbeat.wakeup);
+    await deliverReconciledExecutions(db, wake);
+    expect(wake).not.toHaveBeenCalled();
     const wakes = await db
       .select()
       .from(agentWakeupRequests)
@@ -2373,6 +2382,45 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       continuationRunId: successorId,
     });
   });
+
+  it.each(["owner", "source", "decision", "actor"] as const)(
+    "does not acknowledge a committed recovery receipt with mismatched %s",
+    async (mismatch) => {
+      const { action, heartbeat, sourceIssueId, managerId } = await seedReconciledDelivery();
+      let successorId: string | undefined;
+      await deliverReconciledExecutions(db, async (...args) => {
+        const run = await heartbeat.wakeup(...args);
+        successorId = run!.id;
+        throw new Error("fixture lost post-commit wake acknowledgement");
+      });
+      const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successorId!));
+      const [wakeRecord] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.runId, successorId!));
+      if (mismatch === "owner") {
+        await db.update(heartbeatRuns).set({ agentId: managerId }).where(eq(heartbeatRuns.id, successorId!));
+      } else if (mismatch === "source") {
+        await db.update(agentWakeupRequests).set({
+          payload: { ...wakeRecord!.payload, issueId: randomUUID() },
+        }).where(eq(agentWakeupRequests.id, wakeRecord!.id));
+      } else if (mismatch === "decision") {
+        await db.update(heartbeatRuns).set({
+          contextSnapshot: { ...successor!.contextSnapshot, previousRunId: randomUUID() },
+        }).where(eq(heartbeatRuns.id, successorId!));
+      } else {
+        await db.update(agentWakeupRequests).set({
+          requestedByActorId: "different-actor",
+        }).where(eq(agentWakeupRequests.id, wakeRecord!.id));
+      }
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, sourceIssueId));
+      const wake = vi.fn(heartbeat.wakeup);
+      await deliverReconciledExecutions(db, wake);
+      expect(wake).not.toHaveBeenCalled();
+      const [recorded] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      expect(recorded!.evidence).toMatchObject({ continuationDelivery: "invalidated" });
+      expect(await db.select().from(agentWakeupRequests).where(
+        eq(agentWakeupRequests.idempotencyKey, `execution-reconciliation:${action.id}`),
+      )).toHaveLength(1);
+    },
+  );
 
   it.each(["owner", "status", "decision"] as const)(
     "rechecks the current reconciliation %s after the sweep read",
