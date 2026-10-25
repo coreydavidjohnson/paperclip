@@ -2540,20 +2540,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const sessionBefore =
       explicitResumeSession?.sessionDisplayId ??
       (await resolveSessionBeforeForWakeup(agent, effectiveTaskKey));
-    let hasResolvablePriorSessionWorkspace: boolean | null = null;
-    const resolveHasResolvablePriorSessionWorkspace = async () => {
-      if (hasResolvablePriorSessionWorkspace !== null)
-        return hasResolvablePriorSessionWorkspace;
-      hasResolvablePriorSessionWorkspace = issueId
-        ? await hasResolvablePriorSessionWorkspaceForWake({
-            agent,
-            contextSnapshot: enrichedContextSnapshot,
-            taskKey: effectiveTaskKey,
-            explicitResumeSession,
-          })
-        : false;
-      return hasResolvablePriorSessionWorkspace;
-    };
     const continuationAttempt = readContinuationAttempt(
       enrichedContextSnapshot.livenessContinuationAttempt,
     );
@@ -2618,15 +2604,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       : false;
     let operatorResponsibleUserId: string | null = opts.manualUserWake ? opts.requestedByActorId! : null;
     let queuedResponsibleUserIdPromise: Promise<string> | null = null;
-    const resolveQueuedResponsibleUserId = () => {
+    const resolveQueuedResponsibleUserId = (client: Pick<Db, "select">) => {
       if (operatorResponsibleUserId) return Promise.resolve(operatorResponsibleUserId);
       queuedResponsibleUserIdPromise ??= (async () => {
         const queuedIssueContext = issueId
-          ? await getIssueExecutionContext(agent.companyId, issueId)
+          ? await getIssueExecutionContext(agent.companyId, issueId, client)
           : null;
         const queuedRoutineEnvContext = await getRoutineEnvForExecutionIssue(
           agent.companyId,
           queuedIssueContext,
+          client,
         );
         const queuedResponsibleUserId =
           await resolveResponsibleUserIdForRunSeed({
@@ -2638,7 +2625,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             requestedByActorId: opts.requestedByActorId ?? null,
             source,
             triggerDetail,
-          });
+          }, client);
         if (!queuedResponsibleUserId) {
           throw new HttpError(
             422,
@@ -2783,6 +2770,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         };
       }
     }
+
+    const hasResolvablePriorSessionWorkspace = isolatedWorkspacesEnabled
+      ? await hasResolvablePriorSessionWorkspaceForWake({
+          agent,
+          contextSnapshot: enrichedContextSnapshot,
+          taskKey: effectiveTaskKey,
+          explicitResumeSession,
+        })
+      : false;
 
     if (issueId) {
       // Mention-triggered wakes can request input from another agent, but they must
@@ -3889,8 +3885,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 issue.executionWorkspacePreference,
               existingExecutionWorkspaceStatus,
             });
-            const hasResolvablePriorSessionWorkspace =
-              await resolveHasResolvablePriorSessionWorkspace();
 
             if (
               isUnrunnableWorktreeCombo({
@@ -4402,7 +4396,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               invocationSource: source,
               triggerDetail,
               status: "queued",
-              responsibleUserId: await resolveQueuedResponsibleUserId(),
+              responsibleUserId: await resolveQueuedResponsibleUserId(tx),
               wakeupRequestId: wakeupRequest.id,
               retryOfRunId: failedChatRetry
                 ? durableRequest!.failedRunRetry!.failedRunId
@@ -4704,7 +4698,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           invocationSource: source,
           triggerDetail,
           status: "queued",
-          responsibleUserId: await resolveQueuedResponsibleUserId(),
+          responsibleUserId: await resolveQueuedResponsibleUserId(tx),
           wakeupRequestId: wakeupRequest.id,
           contextSnapshot: enrichedContextSnapshot,
           sessionIdBefore: sessionBefore,
