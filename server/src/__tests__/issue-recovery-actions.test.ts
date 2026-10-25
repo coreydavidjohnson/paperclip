@@ -47,6 +47,7 @@ import { recoveryService } from "../services/recovery/service.js";
 import { deliverGuardedStatusRepairs } from "../services/guarded-status-repair.js";
 import { issueService } from "../services/issues.js";
 import { withNativeWorkspaceFinalizationOwnership } from "../services/native-runtime/native-workspace-finalization-ownership.js";
+import { prepareConversationTurn } from "../services/agent-conversations.js";
 import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
@@ -216,6 +217,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(environmentLeases);
     await db.delete(activityLog);
     await db.delete(costEvents);
+    await db.delete(agentTaskSessions);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
@@ -2967,6 +2969,25 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
   });
 
+  it.each(["checkout", "release"])("PER-968 fences direct %s status writes", async (operation) => {
+    const { sourceIssueId, sourceIssue, coderId } = await seedTrappedDisposition();
+    const svc = issueService(db);
+    const result = operation === "checkout" ? svc.checkout(sourceIssueId, coderId, ["in_progress"], null) : svc.release(sourceIssueId);
+    await expect(result).rejects.toMatchObject({ status: 409, details: { code: "recovery_status_repair_required" } });
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
+  });
+
+  it("PER-968 fences direct conversation preparation without erasing its session", async () => {
+    const { companyId, sourceIssueId, coderId } = await seedTrappedDisposition();
+    await db.update(issues).set({ conversationAgentId: coderId, conversationUserId: "board-user", conversationState: "waiting", status: "in_review" })
+      .where(eq(issues.id, sourceIssueId));
+    const before = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId: coderId, status: "running", invocationSource: "manual",
+      contextSnapshot: { issueId: sourceIssueId } }).returning();
+    await expect(prepareConversationTurn(db, run)).rejects.toMatchObject({ status: 409, details: { code: "recovery_status_repair_required" } });
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(before);
+  });
+
   it("PER-968 repairs the third trap once with a normal same-session continuation", async () => {
     const { sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
     const wake = vi.fn(async (_agentId: string, _opts: any) => ({ id: randomUUID() }));
@@ -3034,6 +3055,38 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
     expect(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
     expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["newer_source", "pending_card", "active_action", "live_run", "dependency"])("PER-968 normal delivery preserves %s admitted after resolution", async (gate) => {
+    const { companyId, sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
+    const userId = randomUUID();
+    await db.insert(authUsers).values({ id: userId, name: "Board operator", email: userId + "@example.test", emailVerified: true,
+      createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: userId }).where(eq(companies.id, companyId));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    const app = createApp({ type: "board", source: "local_implicit", userId }, { recoveryActionEnqueueWakeup: async () => null });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ actionId: action.id, outcome: "restored",
+      sourceIssueStatus: "todo", statusRepair: repair, resolutionNote: "Continue normally when the current gates permit work." }).expect(200);
+    if (gate === "newer_source") await db.update(issues).set({ title: "Newer operator decision", updatedAt: new Date(Date.now() + 1000) }).where(eq(issues.id, sourceIssueId));
+    if (gate === "pending_card") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+      kind: "request_confirmation", status: "pending", createdByAgentId: coderId, payload: { version: 1, prompt: "Wait for this choice." } });
+    if (gate === "active_action") await issueRecoveryActionService(db).upsertSourceScoped({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", ownerType: "board", cause: "uncertain_external_action", fingerprint: "new incident",
+      nextAction: "Inspect the actual provider outcomes.", returnOwnerAgentId: coderId });
+    if (gate === "live_run") await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), issueId: sourceIssueId });
+    if (gate === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Current prerequisite", status: "todo" }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: sourceIssueId, type: "blocks" });
+    }
+    const before = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await deliverGuardedStatusRepairs(db, heartbeat.wakeup);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${action.id}`));
+    expect(wakes.filter(wake => wake.runId)).toHaveLength(0);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(before);
+    const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(settled.evidence.guardedStatusRepair).toMatchObject({ delivery: gate === "newer_source" ? "invalidated" : "pending" });
   });
 
   it("PER-968 recovers a lost delivery ACK without a second normal turn", async () => {
