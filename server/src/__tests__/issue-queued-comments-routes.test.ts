@@ -2001,37 +2001,37 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   });
 
 
-  it.each([false, true])(\"does not stop a successor on normal keyed comment replay (conflicting body: %s)\", async conflicting => {
+  it.each([false, true])("does not stop a successor on normal keyed comment replay (conflicting body: %s)", async conflicting => {
     const seeded = await seedQueue();
-    await db.update(agents).set({ adapterType: \"claude_local\", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
+    await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
       .where(eq(agents.id, seeded.agentId));
     const clientRequestId = randomUUID();
-    const saved = await issueService(db).addComment(seeded.issueId, \"Saved original input\", {
-      userId: \"queue-owner\",
-    }, { clientRequestId, authorType: \"user\" });
-    await db.update(heartbeatRuns).set({ status: \"succeeded\", runtimeMode: \"legacy\", finishedAt: new Date() })
+    const saved = await issueService(db).addComment(seeded.issueId, "Saved original input", {
+      userId: "queue-owner",
+    }, { clientRequestId, authorType: "user" });
+    await db.update(heartbeatRuns).set({ status: "succeeded", runtimeMode: "legacy", finishedAt: new Date() })
       .where(eq(heartbeatRuns.id, seeded.runId));
 
     const successorId = randomUUID();
-    const child = spawn(process.execPath, [\"-e\", \"setInterval(() => {}, 1000)\"], { stdio: \"ignore\" });
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     testProcesses.set(successorId, child);
     runningProcesses.set(successorId, { child, graceSec: 1, processGroupId: null });
     await db.insert(heartbeatRuns).values({ id: successorId, companyId: seeded.companyId, agentId: seeded.agentId,
-      status: \"running\", runtimeMode: \"legacy\", processPid: child.pid,
+      status: "running", runtimeMode: "legacy", processPid: child.pid,
       issueId: seeded.issueId, contextSnapshot: { issueId: seeded.issueId },
     });
     await db.update(issues).set({ executionRunId: successorId }).where(eq(issues.id, seeded.issueId));
 
     const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
-      body: conflicting ? \"Different input under the old key\" : saved.body,
+      body: conflicting ? "Different input under the old key" : saved.body,
       clientRequestId, interrupt: true,
     });
     expect(response.status, JSON.stringify(response.body)).toBe(conflicting ? 409 : 201);
     if (!conflicting) expect(response.body.id).toBe(saved.id);
     const [original] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
-    expect(original.status).toBe(\"succeeded\");
+    expect(original.status).toBe("succeeded");
     const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, successorId));
-    expect(successor.status).toBe(\"running\");
+    expect(successor.status).toBe("running");
     expect(successor.resultJson?.executionCancellation).toBeUndefined();
     expect(child.exitCode).toBeNull();
     const keyedComments = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId));
@@ -2086,7 +2086,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     }
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
     expect(run.status).toBe("running");
-    expect(run.resultJson).not.toHaveProperty("executionCancellation");
+    expect(run.resultJson?.executionCancellation).toBeUndefined();
     expect(child.exitCode).toBeNull();
   });
 
