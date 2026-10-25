@@ -1,3 +1,4 @@
+import { deliverGuardedStatusRepairs } from "./services/guarded-status-repair.js";
 import { beginControllerDrain, controllerDrainRemainingMs, isControllerDraining } from "./controller-drain.js";
 import { timeStartupRecovery } from "./startup-recovery-timing.js";
 import { skillSourceSyncService } from "./services/skill-source-sync.js";
@@ -1202,6 +1203,7 @@ async function startServerWithDatabaseTeardown(
     ["external_liveness", () => heartbeat?.sweepExternalRunLiveness()],
     ["external_liveness_outbox", () => heartbeat?.consumeExternalRunLivenessOutbox()],
     ["replacement", () => heartbeat ? reconcileSafeNativeReplacements(db, new Date(), { verifyStoppedSession: run => verifyStoppedNativeSessionForReplacement(db, run) }) : undefined],
+    ["guarded_status_delivery", () => heartbeat ? deliverGuardedStatusRepairs(db, heartbeat.wakeup) : undefined],
     ["reconciliation_delivery", () => heartbeat ? deliverReconciledExecutions(db, heartbeat.wakeup) : undefined],
     ["status_delivery", () => deliverExecutionStatuses(db)],
     ["automatic_disposition", () => settleUnrecoverableExecutions(db)],

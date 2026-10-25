@@ -11200,6 +11200,21 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (issueData.status !== undefined) {
+          // Lock the exact action as well as its source. A concurrent action
+          // refresh must not slip between the decision and the status write.
+          const [escalation] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+            eq(issueRecoveryActions.companyId, receiptExisting.companyId), eq(issueRecoveryActions.sourceIssueId, id),
+            inArray(issueRecoveryActions.status, ["active", "escalated"]),
+            eq(issueRecoveryActions.kind, "deliberate_wait_without_target"), eq(issueRecoveryActions.ownerType, "board"),
+            sql`${issueRecoveryActions.wakePolicy}->>'type' = 'board_escalation'`,
+            sql`${issueRecoveryActions.evidence}->>'terminalReason' = 'unchanged_source_state_exhausted'`,
+          )).for("update");
+          if (escalation) throw conflict("Resolve this exact recovery escalation before changing the task status.", {
+            code: "recovery_status_repair_required", recoveryActionId: escalation.id,
+          });
+        }
+
         if (issueData.executionWorkspaceId !== undefined || issueData.projectWorkspaceId !== undefined ||
             issueData.executionWorkspacePreference !== undefined || issueData.executionWorkspaceSettings !== undefined) {
           Object.assign(patch, await executionWorkspaceService(db).prepareTaskWorkspaceUpdate({

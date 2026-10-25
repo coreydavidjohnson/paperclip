@@ -575,6 +575,14 @@ export const retryWorkspaceExportSchema = z.object({
 
 export const resolveIssueRecoveryActionSchema = z
   .object({
+    statusRepair: z.object({
+      sourceUpdatedAt: z.iso.datetime(),
+      sourceStatus: z.enum(ISSUE_STATUSES),
+      sourceStatusVersion: z.number().int().nonnegative(),
+      assigneeAgentId: z.string().guid(),
+      actionUpdatedAt: z.iso.datetime(),
+      actionFingerprint: z.string().min(1).max(2000),
+    }).strict().optional(),
     workspaceBaseRef: z.object({
       requestedRef: z.string().trim().min(1).max(1024),
       branch: z.string().trim().refine(isValidExistingBranchName, { message: "Choose a valid Git branch name" }),
@@ -596,6 +604,10 @@ export const resolveIssueRecoveryActionSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
+    if (value.statusRepair && (!value.actionId || value.outcome !== "restored" || value.sourceIssueStatus !== "todo" ||
+        value.workspaceBaseRef || value.executionReconciliation || !value.resolutionNote?.trim() || value.resolutionNote.length > 2000)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["statusRepair"], message: "Status repair must restore the exact action to todo with a short normal-continuation note" });
+    }
     if (value.workspaceBaseRef && (!value.actionId || value.outcome !== "restored" || value.sourceIssueStatus !== "todo" || value.executionReconciliation)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["workspaceBaseRef"], message: "Branch repair must retry the exact recovery action" });
     }

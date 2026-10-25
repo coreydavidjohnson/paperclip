@@ -1,3 +1,5 @@
+import { deliverGuardedStatusRepairs } from "../services/guarded-status-repair.js";
+import { isDeepStrictEqual } from "node:util";
 import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
 import { managedCompressionBlockUnchanged } from "../services/managed-compression-block.js";
 import { authorizeHomeLabChild } from "../services/home-lab-delegation.js";
@@ -9610,11 +9612,13 @@ export function issueRoutes(
         resolutionNote,
         executionReconciliation,
         workspaceBaseRef,
+        statusRepair,
       } = req.body;
       if (outcome === "false_positive" || outcome === "cancelled") {
         assertBoard(req);
       }
 
+      if (statusRepair) assertBoard(req);
       if (workspaceBaseRef) {
         assertBoard(req);
         const decision = await access.decide({ actor: req.actor, action: "runtime:manage", resource: { type: "company", companyId: existing.companyId } });
@@ -9650,6 +9654,38 @@ export function issueRoutes(
           eq(issueRecoveryActions.sourceIssueId, lockedIssue.id),
           actionId ? eq(issueRecoveryActions.id, actionId) : inArray(issueRecoveryActions.status, ["active", "escalated"]),
         )).limit(1).for("update");
+        if (statusRepair) {
+          const action = workspaceRepairAction;
+          const stale = () => conflict("The task or recovery action changed. Refresh before repairing its status.", { code: "recovery_status_repair_stale" });
+          if (!action || action.id !== actionId || action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
+              action.wakePolicy?.type !== "board_escalation" || action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+              action.returnOwnerAgentId !== statusRepair.assigneeAgentId || lockedIssue.assigneeAgentId !== statusRepair.assigneeAgentId ||
+              lockedIssue.assigneeUserId || !["blocked", "in_progress", "todo"].includes(statusRepair.sourceStatus)) throw stale();
+          const receipt = parseObject(action.evidence.guardedStatusRepair);
+          if (action.status === "resolved") {
+            // Check before the generic settled-action/late-note replay path.
+            if (action.outcome !== "handed_back" || !isDeepStrictEqual(receipt.request, statusRepair) ||
+                receipt.actorId !== actor.actorId || action.resolutionNote !== resolutionNote ||
+                lockedIssue.status !== "todo" || lockedIssue.updatedAt.toISOString() !== receipt.sourceUpdatedAt ||
+                lockedIssue.statusVersion !== receipt.sourceStatusVersion) throw stale();
+            const newerAction = await recoveryActionsSvc.getActiveForIssue(lockedIssue.companyId, lockedIssue.id, tx);
+            if (newerAction) throw stale();
+            return { issue: lockedIssue, recoveryAction: action, replayed: true };
+          }
+          if (!["active", "escalated"].includes(action.status) ||
+              lockedIssue.status !== statusRepair.sourceStatus || lockedIssue.updatedAt.toISOString() !== statusRepair.sourceUpdatedAt ||
+              lockedIssue.statusVersion !== statusRepair.sourceStatusVersion || action.updatedAt.toISOString() !== statusRepair.actionUpdatedAt ||
+              action.fingerprint !== statusRepair.actionFingerprint) throw stale();
+          const [liveRun] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.companyId, lockedIssue.companyId),
+            or(eq(heartbeatRuns.issueId, lockedIssue.id), eq(heartbeatRuns.nativeIssueId, lockedIssue.id),
+              sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${lockedIssue.id}`),
+            inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+          )).limit(1);
+          if (liveRun) throw conflict("An execution already owns this task. Preserve its current recovery path.");
+          await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: issueRecoveryActionReadModel(action) });
+        }
+
         if (workspaceRepairAction && hasRequiredWorkspaceRecovery(workspaceRepairAction.evidence)) {
           assertBoard(req);
           await requireRecoveryActionAuthority(req, lockedIssue, issueRecoveryActionReadModel(workspaceRepairAction),
@@ -9865,7 +9901,7 @@ export function issueRoutes(
             (lockedIssue.status === "blocked" || lockedIssue.status === "in_progress") &&
             activeRecoveryAction.ownerAgentId === activeRecoveryAction.returnOwnerAgentId;
           const currentBoardEscalation =
-            lockedIssue.status === "blocked" &&
+            (lockedIssue.status === "blocked" || statusRepair) &&
             activeRecoveryAction.ownerType === "board" &&
             activeRecoveryAction.wakePolicy?.type === "board_escalation";
           if (
@@ -10025,6 +10061,31 @@ export function issueRoutes(
             { deliverContinuation: sourceIssueStatus !== "blocked" },
           );
         }
+        // Settle the action in the SAME transaction before the common status
+        // boundary. Any later gate/write failure rolls both records back.
+        const recordedOutcome =
+          outcome === "restored" &&
+          sourceIssueStatus === "todo" &&
+          activeRecoveryAction.returnOwnerAgentId != null &&
+          lockedIssue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId
+            ? "handed_back"
+            : outcome === "restored" && sourceIssueStatus === "done"
+              ? "owner_completed"
+              : outcome;
+
+        const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
+          {
+            companyId: existing.companyId,
+            sourceIssueId: existing.id,
+            actionId: activeRecoveryAction.id,
+            status: actionStatus,
+            outcome: recordedOutcome,
+            resolutionNote: resolutionNote ?? null,
+          },
+          tx,
+        );
+        if (!recoveryAction) throw notFound("Active recovery action not found");
+
         let issue = lockedIssue;
         const sourceStatusChanged = sourceIssueStatus !== lockedIssue.status;
         if (outcome === "blocked" && sourceStatusChanged) {
@@ -10162,28 +10223,12 @@ export function issueRoutes(
           issue = updatedIssue;
         }
 
-        const recordedOutcome =
-          outcome === "restored" &&
-          issue.status === "todo" &&
-          activeRecoveryAction.returnOwnerAgentId != null &&
-          issue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId
-            ? "handed_back"
-            : outcome === "restored" && issue.status === "done"
-              ? "owner_completed"
-              : outcome;
-
-        const recoveryAction = await recoveryActionsSvc.resolveActiveForIssue(
-          {
-            companyId: existing.companyId,
-            sourceIssueId: existing.id,
-            actionId: activeRecoveryAction.id,
-            status: actionStatus,
-            outcome: recordedOutcome,
-            resolutionNote: resolutionNote ?? null,
-          },
-          tx,
-        );
-        if (!recoveryAction) throw notFound("Active recovery action not found");
+        if (statusRepair) {
+          const receipt = { request: statusRepair, actorType: actor.actorType, actorId: actor.actorId,
+            sourceUpdatedAt: issue.updatedAt.toISOString(), sourceStatusVersion: issue.statusVersion, delivery: "pending" };
+          await tx.update(issueRecoveryActions).set({ evidence: { ...recoveryAction.evidence, guardedStatusRepair: receipt } })
+            .where(eq(issueRecoveryActions.id, recoveryAction.id));
+        }
 
         // Persist whole-note identity with the disposition, before fallible post-commit work.
         await logActivity(tx as unknown as Db, {
@@ -10249,7 +10294,9 @@ export function issueRoutes(
 
 
 
-      if (result.chatRetry) {
+      if (statusRepair) {
+        await deliverGuardedStatusRepairs(db, enqueueRecoveryActionWakeup, result.recoveryAction.id);
+      } else if (result.chatRetry) {
         // The intent is committed with recovery resolution. A lost immediate
         // dispatch response cannot erase it; the durable sweep will continue.
         try {

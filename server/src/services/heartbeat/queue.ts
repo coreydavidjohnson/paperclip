@@ -2212,6 +2212,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       }
       payload = { ...payload, manualUserWake: true };
     }
+    const guardedStatusRepairId = readNonEmptyString(contextSnapshot.guardedStatusRepairId);
     const executionReconciliationWake =
       contextSnapshot.source === "execution.reconciled" ||
       opts.idempotencyKey?.startsWith("execution-reconciliation:") === true;
@@ -3159,6 +3160,67 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "skipped" as const };
           }
 
+          if (guardedStatusRepairId) {
+            // The source lock serializes admission and lost-ACK redelivery.
+            // This marker authorizes no bypass: it binds the exact board
+            // decision, then passes through ordinary admission below.
+            const [action] = isUuidLike(guardedStatusRepairId) ? await tx.select().from(issueRecoveryActions).where(and(
+              eq(issueRecoveryActions.id, guardedStatusRepairId), eq(issueRecoveryActions.companyId, issue.companyId),
+              eq(issueRecoveryActions.sourceIssueId, issue.id),
+            )).for("update") : [];
+            const receipt = parseObject(action?.evidence.guardedStatusRepair);
+            if (!action || action.status !== "resolved" || action.outcome !== "handed_back" ||
+                action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
+                action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+                action.returnOwnerAgentId !== agentId || receipt.actorType !== "user" ||
+                opts.requestedByActorType !== "user" || opts.requestedByActorId !== receipt.actorId ||
+                source !== "automation" || triggerDetail !== "system" || reason !== "issue_commented" ||
+                opts.idempotencyKey !== `guarded-status-repair:${action.id}` ||
+                enrichedContextSnapshot.source !== "issue.comment" || enrichedContextSnapshot.forceFreshSession ||
+                enrichedContextSnapshot.recoveryActionId || enrichedContextSnapshot.recovery || opts.failedRunId ||
+                parseObject(enrichedContextSnapshot.paperclipAgentMessage).text !== action.resolutionNote) return { kind: "skipped" as const };
+            const [prior] = await tx.select({ runId: agentWakeupRequests.runId }).from(agentWakeupRequests).where(and(
+              eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
+              eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+              eq(agentWakeupRequests.requestedByActorType, "user"), eq(agentWakeupRequests.requestedByActorId, String(receipt.actorId)),
+              sql`${agentWakeupRequests.payload}->>'issueId' = ${issue.id}`,
+              sql`${agentWakeupRequests.runId} is not null`,
+            )).limit(1);
+            if (prior) {
+              const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, prior.runId!),
+                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId)));
+              return run ? { kind: "replayed" as const, run } : { kind: "deferred" as const };
+            }
+            const [current] = await tx.select().from(issues).where(eq(issues.id, issue.id));
+            if (receipt.delivery !== "pending" || current.status !== "todo" || current.assigneeAgentId !== agentId ||
+                current.assigneeUserId || current.hiddenAt || current.updatedAt.toISOString() !== receipt.sourceUpdatedAt ||
+                current.statusVersion !== receipt.sourceStatusVersion) {
+              await tx.update(issueRecoveryActions).set({ evidence: sql`jsonb_set(${issueRecoveryActions.evidence},
+                '{guardedStatusRepair,delivery}', '"invalidated"'::jsonb)` }).where(eq(issueRecoveryActions.id, action.id));
+              return { kind: "skipped" as const };
+            }
+            const [live] = await tx.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+              eq(heartbeatRuns.companyId, issue.companyId),
+              or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
+                sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`),
+              inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+            )).limit(1);
+            const [activeAction] = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+              eq(issueRecoveryActions.companyId, issue.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
+              inArray(issueRecoveryActions.status, ["active", "escalated"]),
+            )).limit(1);
+            const [card] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+              eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
+              eq(issueThreadInteractions.status, "pending"),
+            )).limit(1);
+            const [approval] = await tx.select({ id: approvals.id }).from(issueApprovals)
+              .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId)))
+              .where(and(eq(issueApprovals.companyId, issue.companyId), eq(issueApprovals.issueId, issue.id),
+                inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
+            if (live || activeAction || card || approval || parseObject(current.executionState).status === "pending" || current.checkoutRunId || current.executionRunId ||
+                await getExecutionBlocker(tx as unknown as Db, issue.companyId, issue.id)) return { kind: "deferred" as const };
+          }
+
           if (opts.failedRunId) {
             // The issue lock makes double-clicks and network retries adopt the
             // same successor, including after it has already finished.
@@ -3392,6 +3454,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               ((!wake.runId && ["deferred_issue_execution", "skipped", "coalesced"].includes(wake.status)) ||
                 (wake.runId && resolvesLivenessGate(wake)));
           });
+          if (guardedStatusRepairId && livenessReceipt) return { kind: "deferred" as const };
           if (livenessReceipt) {
             const saved = parseObject(livenessReceipt.payload?.[DEFERRED_WAKE_CONTEXT_KEY]);
             Object.assign(enrichedContextSnapshot, {
@@ -4300,6 +4363,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             }
           }
 
+          if (guardedStatusRepairId && (explicitContinuation || enrichedContextSnapshot.forceFreshSession)) return { kind: "deferred" as const };
           const wakeValues = {
             ...durableReceiptFields,
             companyId: agent.companyId, agentId, source, triggerDetail, reason, payload,

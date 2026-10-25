@@ -43,6 +43,7 @@ import * as routineServices from "../services/routines.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { recoveryService } from "../services/recovery/service.js";
+import { deliverGuardedStatusRepairs } from "../services/guarded-status-repair.js";
 import { issueService } from "../services/issues.js";
 import { withNativeWorkspaceFinalizationOwnership } from "../services/native-runtime/native-workspace-finalization-ownership.js";
 import { noticeMetadataReferencesRecoveryAction } from "../services/recovery/successful-run-handoff.js";
@@ -2943,8 +2944,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const { sourceIssueId, sourceIssue, action } = await seedTrappedDisposition();
     const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
     const result = await request(createApp()).patch(`/api/issues/${sourceIssueId}`)
-      .send({ status, title: "Must roll back with the status" }).expect(409);
-    expect(result.body.details?.code).toBe("recovery_status_repair_required");
+      .send({ status, title: "Must roll back with the status" }).expect(status === "blocked" ? 422 : 409);
+    if (status !== "blocked") expect(result.body.details?.code).toBe("recovery_status_repair_required");
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(before);
     expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toHaveLength(0);
@@ -2959,7 +2960,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
 
   it("PER-968 repairs the third trap once with a normal same-session continuation", async () => {
     const { sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
-    const wake = vi.fn(async () => ({ id: randomUUID() }));
+    const wake = vi.fn(async (_agentId: string, _opts: any) => ({ id: randomUUID() }));
     const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake as never });
     const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
       resolutionNote: "Continue this task through its normal work path." };
@@ -2987,6 +2988,79 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         resolutionNote: "Continue the task normally." }).expect(409);
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
     expect(await issueRecoveryActionService(db).getActiveForIssue(sourceIssue.companyId, sourceIssueId)).toMatchObject({ id: action.id });
+  });
+
+  it.each(["dependency", "interaction", "execution", "paused", "unrelated"])("PER-968 preserves a %s hold during guarded repair", async (hold) => {
+    const { companyId, sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
+    if (hold === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Real prerequisite", status: "todo" }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: sourceIssueId, type: "blocks" });
+    }
+    if (hold === "interaction") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+      kind: "question", status: "pending", title: "Real decision", payload: { questions: [] }, createdByAgentId: coderId });
+    if (hold === "execution") await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), issueId: sourceIssueId });
+    if (hold === "paused") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
+    if (hold === "unrelated") await db.update(issueRecoveryActions).set({ kind: "active_run_watchdog" }).where(eq(issueRecoveryActions.id, action.id));
+    const before = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const wake = vi.fn(async () => null);
+    await request(createApp(undefined, { recoveryActionEnqueueWakeup: wake })).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
+        resolutionNote: "Continue only after all existing gates pass." }).expect(409);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(before);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(actions);
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  it("PER-968 serializes concurrent exact board repairs", async () => {
+    const { sourceIssueId, action, repair } = await seedTrappedDisposition();
+    const wake = vi.fn(async () => null);
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
+      resolutionNote: "Continue the existing task normally." };
+    const responses = await Promise.all([request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body),
+      request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body)]);
+    expect(responses.map(response => response.status)).toEqual([200, 200]);
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
+    expect(wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("PER-968 recovers a lost delivery ACK without a second normal turn", async () => {
+    const { companyId, sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
+    const userId = randomUUID();
+    await db.insert(authUsers).values({ id: userId, name: "Board operator", email: userId + "@example.test", emailVerified: true,
+      createdAt: new Date(), updatedAt: new Date() });
+    await db.update(companies).set({ defaultResponsibleUserId: userId }).where(eq(companies.id, companyId));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    // Occupy this agent on another task so the successor stays queued and no
+    // real provider starts. This is still assembled native queue admission.
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    const app = createApp({ type: "board", source: "local_implicit", userId }, { recoveryActionEnqueueWakeup: async () => null });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
+      resolutionNote: "Continue this task in the existing session. Preserve completed work." };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    let runId: string | undefined;
+    await deliverGuardedStatusRepairs(db, async (...args) => {
+      const run = await heartbeat.wakeup(...args);
+      expect(run).not.toBeNull();
+      runId = run!.id;
+      expect(run!.contextSnapshot).toMatchObject({ wakeReason: "issue_commented", guardedStatusRepairId: action.id });
+      expect(run!.contextSnapshot).not.toHaveProperty("recoveryActionId");
+      expect(run!.contextSnapshot).not.toHaveProperty("forceFreshSession");
+      throw new Error("Lost ACK after commit");
+    });
+    expect(runId).toBeDefined();
+    // A later source decision does not erase proof of the committed admission.
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId!));
+    await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, sourceIssueId));
+    await Promise.all([deliverGuardedStatusRepairs(db, heartbeat.wakeup), deliverGuardedStatusRepairs(db, heartbeat.wakeup)]);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${action.id}`));
+    expect(wakes.filter(wake => wake.runId)).toHaveLength(1);
+    expect(wakes.find(wake => wake.runId)!.runId).toBe(runId);
+    const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(settled.evidence.guardedStatusRepair).toMatchObject({ delivery: "delivered" });
   });
 
   it("retries an exhausted disposition action once, preserving the owner and audit trail", async () => {
