@@ -243,6 +243,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/issue-comment-redaction.test.ts \
     src/__tests__/issue-queued-comments-routes.test.ts \
     src/__tests__/issue-thread-interactions-service.test.ts \
+    src/__tests__/api-metrics.test.ts \
     src/__tests__/legacy-continuation-authority.test.ts \
     src/__tests__/legacy-repair-suppressed.test.ts \
     src/__tests__/run-context-keys-db.test.ts \

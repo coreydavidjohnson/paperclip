@@ -1,3 +1,4 @@
+import { apiMetrics } from "./api-metrics.js";
 import { voiceSessionRoutes, voiceWebhookRoutes } from "./routes/voice-sessions.js";
 import { eq } from "drizzle-orm";
 import { chatEndpoints } from "@paperclipai/db";
@@ -545,6 +546,7 @@ export async function createApp(
   },
 ) {
   const app = express();
+  app.use(apiMetrics.middleware);
   app.use(idleAdmissionMiddleware);
   const staticUi = express.Router();
   app.locals.paperclipDb = db;

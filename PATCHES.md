@@ -355,6 +355,22 @@ heartbeat.ts.
   `docs/incidents/2026-10-25-paperclip-comment-delivery.md`.
 - Remove when upstream delivers the same revision-bound acknowledgement guard.
 
+## Bounded delivery and control-failure telemetry (PER-316)
+
+- Why: verify the comment latency target and distinguish an observed lease loss
+  from an adapter-reported disposition failure without exposing task data.
+- Contract: middleware starts before idle admission, parsing and authorization.
+  Histograms use fixed methods, registered route templates and status only,
+  with a 300 ms bucket and bounded overflow. Scrapes do not observe themselves.
+  Process-local counters record one controller abort or one committed
+  `paperclip_disposition_failed` terminal transition, not refused CAS writes.
+- Regression: metrics and real comment-router response/error tests, controller
+  lease expiry and lifecycle stale/replayed failure tests in the image gate.
+- This adds the private scrape surface only. Production ingress exclusion,
+  monitoring configuration and live verification must land together.
+- Remove when equivalent upstream telemetry supplies these exact acceptance
+  measurements and bounded, non-sensitive labels.
+
 ## Homelab-owned settings (not fork patches)
 
 - Database indexes in `luma-homelab` `k8s/paperclip/70-db-indexes.yaml`
