@@ -45,6 +45,16 @@ heartbeat.ts.
 - Retire this carry when upstream supplies the same lossless per-record delta,
   withdrawal, trust and full-snapshot fallback contract. No OmniGenT/Codex patch,
   limit increase or genuine provider-recovery acceptance is implied.
+## PER-316 recovery-authority fixture chronology
+
+- Historical succeeded source runs in `legacy-continuation-authority.test.ts`
+  use an explicit old creation time. Observed source/repair timestamp inversion
+  made the unchanged latest-run guard refuse a correctly bound repair.
+- A deterministic backwards-clock fixture regression preserves admission while
+  a newer unrelated run remains refused. Production recovery, latest-run, Stop,
+  owner, approval and attempt-budget guards are unchanged. This corrects fixture
+  chronology, not production behavior under an actual clock discontinuity.
+
 ## PER-316 queued-interrupt restart carry
 
 - Why: a server exit after saving a queued interrupt but before cancellation
