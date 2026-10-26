@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { runningProcesses } from "../adapters/index.js";
 import { randomUUID } from "node:crypto";
-import express from "express";
+import express, { type ErrorRequestHandler } from "express";
 import request from "supertest";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -388,8 +388,16 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     client.use(express.json());
     client.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession: async () => null }));
     client.use("/api", issueRoutes(db, {} as any, {}));
+    const rawErrors: unknown[] = [];
+    const captureRouteError: ErrorRequestHandler = (error, _req, _res, next) => {
+      rawErrors.push(error instanceof Error
+        ? { name: error.name, message: error.message, stack: error.stack }
+        : error);
+      next(error);
+    };
+    client.use(captureRouteError);
     client.use(errorHandler);
-    return { ...seeded, identity, client, authorization: `Bearer ${token}` };
+    return { ...seeded, identity, client, rawErrors, authorization: `Bearer ${token}` };
   }
 
   it.each([false, true])("commits the HTTP native self-handoff after stopping its own run, with adapter overrides: %s", async withOverrides => {
@@ -399,6 +407,11 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const cancel = vi.spyOn(nativeSessionExecutor, "cancelNativeSession").mockImplementation(async (runId, _reason, options) => {
       expect(runId).toBe(seeded.runId);
       expect(options.scope).toBe("run");
+      // Heartbeat requires both the run-scope decision and its audit receipt.
+      // A null decision tests the unaudited-stop refusal, not a successful stop.
+      const decision = nativeSessionExecutor.resolveNativeCancellationStatus({
+        scope: "run", priorIssueStatus: "in_progress", agentId: seeded.agentId,
+      });
       const receipt = {
         schema: "paperclip.native-cancellation.v1", runId, companyId: seeded.companyId,
         issueId: seeded.issueId, scope: "run", reasonCode: "cancellation_run_only",
@@ -408,7 +421,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       await options.db.update(heartbeatRuns).set({
         resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ nativeCancellation: receipt })}::jsonb`,
       }).where(eq(heartbeatRuns.id, runId));
-      return { dispatched: true, decision: null, decisionId: null, auditId: receipt.acknowledgementAuditId };
+      return { dispatched: true, decision, decisionId: randomUUID(), auditId: receipt.acknowledgementAuditId };
     });
     const body = {
       assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
@@ -420,13 +433,13 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
     // Check cancellation before the HTTP assertion so a RED distinguishes
     // request admission failure from a failure after a confirmed stop.
-    const responseDiagnostic = `HTTP ${response.status}: ${JSON.stringify(response.body)}`;
+    const responseDiagnostic = `HTTP ${response.status}: ${JSON.stringify({ body: response.body, errors: seeded.rawErrors })}`;
     expect(cancel, responseDiagnostic).toHaveBeenCalledTimes(1);
     expect(run, responseDiagnostic).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned",
       activeIdentityContextId: seeded.identity.id, responsibleUserId: "queue-owner",
       resultJson: { reassignmentStopConfirmed: true, issueMutationStopId: expect.any(String) },
     });
-    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.status, responseDiagnostic).toBe(200);
     const [task] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
     expect(task).toMatchObject({ assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
       checkoutRunId: null, executionRunId: null,
@@ -471,7 +484,8 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
         comment: "This stale handoff must not land.",
         assigneeAdapterOverrides: { useProjectWorkspace: false },
       });
-    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(response.status, JSON.stringify({ body: response.body, errors: seeded.rawErrors }))
+      .toBe(mode === "changed_owner" ? 409 : 403);
     if (mode === "changed_owner") expect(response.body.details?.code).toBe("issue_write_assignee_run_lock");
     else expect(response.body.code).toBe("agent_run_cancelled");
     expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(before);
