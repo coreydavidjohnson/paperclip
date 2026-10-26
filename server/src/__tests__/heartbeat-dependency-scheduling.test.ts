@@ -1461,8 +1461,12 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       await wake(candidateId);
       expect(order).toEqual([activeId]);
     } finally { finish(); }
-    expect(await waitForCondition(async () => order.length === 3, 15000)).toBe(true);
+    expect(await waitForCondition(async () => order.includes(internalId) && order.includes(candidateId), 15000)).toBe(true);
     await heartbeat.drainActiveRunExecutions();
-    expect(order.slice(0, 3)).toEqual(candidateFirst ? [activeId, candidateId, internalId] : [activeId, internalId, candidateId]);
+    expect(order.slice(0, 2)).toEqual([activeId, candidateFirst ? candidateId : internalId]);
+    // Resolving the blocker can legitimately wake higher-priority descendants.
+    expect(order.filter(id => id === internalId || id === candidateId)).toEqual(
+      candidateFirst ? [candidateId, internalId] : [internalId, candidateId],
+    );
   }, 60000);
 });
