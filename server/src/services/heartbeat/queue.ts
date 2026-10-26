@@ -1844,28 +1844,39 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     // A server restart or a message/cleanup race can leave a deferred wake
     // after its owner has released the issue lock. Revisit it through the same
     // release admission, so recovery holds and operator Stops still apply.
-    const strandedQueues = await db.select({ wake: agentWakeupRequests, issueStatus: issues.status })
-      .from(agentWakeupRequests)
-      .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
-        sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
-        eq(issues.assigneeAgentId, agentWakeupRequests.agentId)))
-      .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
-      .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
-        isNull(issues.executionRunId),
-        or(and(
-          inArray(issues.status, ["todo", "in_progress"]),
-          lte(agentWakeupRequests.requestedAt, new Date(Date.now() - 120_000)),
-          sql`coalesce(${agentWakeupRequests.idempotencyKey}, '') not like 'chat-inbound:%'`,
-          sql`${agentWakeupRequests.payload}->>'dotRequestId' is null`,
-          sql`coalesce(${agentWakeupRequests.payload}->>'mutation', '') <> 'interaction'`,
-          sql`coalesce(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}', '[]'::jsonb) = '[]'::jsonb`,
-        ), and(
-          sql`jsonb_typeof(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}') = 'array'`,
-          sql`${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}' <> '[]'::jsonb`,
-        ), sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`),
-        sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
-        cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
-      .orderBy(asc(agentWakeupRequests.requestedAt), asc(agentWakeupRequests.id)).limit(50);
+    // Rotate every attempted row, including early returns and held requests.
+    // Lock only the receipt rows and commit before admission: this is a fair
+    // scan cursor, not a delivery claim or permission to bypass any hold.
+    const strandedQueues = await db.transaction(async tx => {
+      const selected = await tx.select({ wake: agentWakeupRequests, issueStatus: issues.status })
+        .from(agentWakeupRequests)
+        .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
+          sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
+          eq(issues.assigneeAgentId, agentWakeupRequests.agentId)))
+        .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
+        .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
+          isNull(issues.executionRunId),
+          or(and(
+            inArray(issues.status, ["todo", "in_progress"]),
+            lte(agentWakeupRequests.requestedAt, new Date(Date.now() - 120_000)),
+            sql`coalesce(${agentWakeupRequests.idempotencyKey}, '') not like 'chat-inbound:%'`,
+            sql`${agentWakeupRequests.payload}->>'dotRequestId' is null`,
+            sql`coalesce(${agentWakeupRequests.payload}->>'mutation', '') <> 'interaction'`,
+            sql`coalesce(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}', '[]'::jsonb) = '[]'::jsonb`,
+          ), and(
+            sql`jsonb_typeof(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}') = 'array'`,
+            sql`${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}' <> '[]'::jsonb`,
+          ), sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`),
+          sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
+          cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
+        .orderBy(asc(agentWakeupRequests.updatedAt), asc(agentWakeupRequests.requestedAt), asc(agentWakeupRequests.id))
+        .limit(50).for("update", { of: agentWakeupRequests, skipLocked: true });
+      if (selected.length) {
+        await tx.update(agentWakeupRequests).set({ updatedAt: sql`statement_timestamp()` })
+          .where(inArray(agentWakeupRequests.id, selected.map(({ wake }) => wake.id)));
+      }
+      return selected;
+    });
     const strandedIssues = new Set<string>();
     for (const { wake, issueStatus } of strandedQueues) {
       const issueKey = `${wake.companyId}:${String(wake.payload?.issueId)}`;
@@ -1898,9 +1909,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         eq(heartbeatRuns.companyId, wake.companyId), eq(heartbeatRuns.agentId, wake.agentId),
         sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${String(wake.payload?.issueId)}`,
       )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
-      await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
-        eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
-      ));
       if (!latest || !isHeartbeatRunTerminalStatus(latest.status)) continue;
       if (latest.runtimeMode === "native" && typeof wake.payload?.dotAssignmentFollowUp === "string") {
         await releaseIssueExecutionAndPromote(latest, { suppressImmediateRecovery: true }).catch(err => {

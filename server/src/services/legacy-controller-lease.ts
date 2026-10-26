@@ -1,3 +1,4 @@
+import { apiMetrics } from "../api-metrics.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, gt, lte, sql } from "drizzle-orm";
 import { heartbeatRuns, persistentDedicatedDb, type Db } from "@paperclipai/db";
@@ -167,6 +168,7 @@ export function watchLegacyControllerLease(sharedDb: Db, run: Run, controller: A
   let deadline: ReturnType<typeof setTimeout> | undefined;
   const lost = (cause: LegacyControllerLeaseLossCause) => {
     if (stopped || controller.signal.aborted) return;
+    apiMetrics.failure("lease_loss");
     const now = Date.now();
     const oldestRenewal = Math.min(...[...renewalsInFlight].map((renewal) => renewal.startedAt));
     controller.abort(new LegacyControllerLeaseLostError(cause, {

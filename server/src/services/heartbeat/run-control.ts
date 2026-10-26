@@ -1,3 +1,4 @@
+import { operatorInterruptCancelOptions } from "../operator-interrupt.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { DEFERRED_WAKE_CONTEXT_KEY } from "./queue.js";
 import { CANCELLABLE_HEARTBEAT_RUN_STATUSES } from "./recovery.js";
@@ -553,10 +554,56 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     if (!actorId) return;
     const agent = await getAgent(wake.agentId);
     if (!agent || agent.companyId !== companyId || (agent.adapterType === "paperclip_runner" && !response?.source.requiresFreshSession)) return;
+    // New runs use indexed identity; historical rows may use either context key.
+    // A conflicting context must never override an explicit issue binding.
+    const targetIssueCondition = or(eq(heartbeatRuns.issueId, issueId),
+      and(isNull(heartbeatRuns.issueId),
+        or(sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+          sql`${heartbeatRuns.contextSnapshot}->>'taskId' = ${issueId}`)));
+    const interruptIntent = parseObject(payload.queuedCommentInterrupt);
+    const targetRunId = readNonEmptyString(interruptIntent.targetRunId);
+    if (interrupted && targetRunId) {
+      if (!isUuidLike(targetRunId)) return;
+      const target = await db.transaction(async tx => {
+        // Use the same issue-first fence as queue edits, discards and admission.
+        const [task] = await tx.select().from(issues).where(and(
+          eq(issues.companyId, companyId), eq(issues.id, issueId),
+        )).for("update");
+        const [current] = await tx.select().from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.id, queueId), eq(agentWakeupRequests.companyId, companyId),
+          eq(agentWakeupRequests.agentId, wake.agentId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+          sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt'->>'actorId' = ${actorId}`,
+          sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt'->>'targetRunId' = ${targetRunId}`,
+        )).for("update");
+        if (!task || task.assigneeAgentId !== wake.agentId || ["done", "cancelled"].includes(task.status) ||
+            !current || (!queuedCommentIdsFromWakePayload(current.payload).length &&
+              !await readQueuedInteractionResponse(tx as unknown as Db, companyId, issueId, current.payload))) return false;
+        const [original] = await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, targetRunId), eq(heartbeatRuns.companyId, companyId),
+          eq(heartbeatRuns.agentId, wake.agentId),
+          targetIssueCondition,
+        ));
+        if (!original || (original.status !== "running" && !isHeartbeatRunTerminalStatus(original.status))) return false;
+        return original.status === "running" ? original.id : null;
+      });
+      if (target === false) return;
+      // Never join the adapter while holding the issue lock. Concurrent/restart
+      // workers can only retry the recorded original, not a newer execution.
+      if (target) {
+        const options = operatorInterruptCancelOptions({ issueId, actor: { actorType: "user", actorId } });
+        await cancelRunInternal(target, "Interrupted to send queued messages", {
+          ...options, suppressImmediateRecovery: true,
+          resultJson: { ...options.resultJson, queuedCommentInterruptQueueId: queueId },
+        });
+      }
+    }
+    // Old receipts without a target may deliver after a stop, but must never
+    // acquire authority to cancel the current run by inference.
     const [active] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
       eq(heartbeatRuns.companyId, companyId),
       eq(heartbeatRuns.agentId, wake.agentId),
-      sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`,
+      targetIssueCondition,
       inArray(heartbeatRuns.status, ["running", "queued", "scheduled_retry"]),
     )).limit(1);
     if (active) return;

@@ -1,3 +1,4 @@
+import { apiMetrics } from "../api-metrics.js";
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -72,8 +73,12 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await renewLegacyControllerLease(db, run, "dispatching")).toBe(false);
     const controller = new AbortController();
     const watch = watchLegacyControllerLease(db, run, controller);
+    const count = () => Number(apiMetrics.render().match(/paperclip_control_failures_total[{]reason="lease_loss"[}] ([0-9]+)/)![1]);
+    const before = count();
     try {
       await expect(watch.assertOwned("dispatching")).rejects.toThrow("lease lost");
+      await expect(watch.assertOwned("dispatching")).rejects.toThrow("lease lost");
+      expect(count()).toBe(before + 1);
       expect(controller.signal.aborted).toBe(true);
       expect(controller.signal.reason).toBeInstanceOf(LegacyControllerLeaseLostError);
       expect(controller.signal.reason.leaseLossCause).toBe("renewal_rejected");
