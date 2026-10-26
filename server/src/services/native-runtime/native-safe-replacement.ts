@@ -260,6 +260,12 @@ export async function reconcileSafeNativeReplacements(
             current.failureDetail?.replacementDenied
           )
             return;
+          if (
+            !task ||
+            task.assigneeAgentId !== run.agentId ||
+            ["done", "cancelled"].includes(task.status)
+          )
+            return;
           await tx
             .update(nativeRunFinalizations)
             .set({
@@ -271,12 +277,6 @@ export async function reconcileSafeNativeReplacements(
               updatedAt: now,
             })
             .where(eq(nativeRunFinalizations.runId, run.id));
-          if (
-            !task ||
-            task.assigneeAgentId !== run.agentId ||
-            ["done", "cancelled"].includes(task.status)
-          )
-            return;
           await issueRecoveryActionService(
             tx as unknown as Db,
           ).upsertSourceScoped({
@@ -330,19 +330,23 @@ export async function reconcileSafeNativeReplacements(
           current.attempt >= 3
         )
           return false;
-        if (task.status === "blocked") {
-          const failureHolds = await tx.select().from(issueRecoveryActions).where(and(
-            eq(issueRecoveryActions.companyId, run.companyId),
-            eq(issueRecoveryActions.sourceIssueId, task.id),
-            eq(issueRecoveryActions.kind, "active_run_watchdog"),
-            eq(issueRecoveryActions.cause, current.failureCode!),
-            sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
-          )).for("update");
-          const ownsBlock = failureHolds.some(hold => {
+        const failureHolds = await tx.select().from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, run.companyId),
+          eq(issueRecoveryActions.sourceIssueId, task.id),
+          eq(issueRecoveryActions.kind, "active_run_watchdog"),
+          eq(issueRecoveryActions.cause, current.failureCode!),
+          sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
+        )).for("update");
+        // Operational holds now retain todo instead of projecting a naked
+        // blocked status. Scheduling and retiring the hold still require its
+        // exact status receipt. Only historical blocked receipts omit status.
+        if (task.status === "blocked" || failureHolds.length > 0) {
+          const ownsStatus = failureHolds.some(hold => {
             const receipt = record(hold.evidence.nativeFailureBlock);
-            return receipt.runId === run.id && receipt.statusVersion === task.statusVersion;
+            return receipt.runId === run.id && receipt.statusVersion === task.statusVersion &&
+              (receipt.status ?? "blocked") === task.status;
           });
-          if (!ownsBlock) return false;
+          if (!ownsStatus) return false;
         }
         if (stoppedSession) {
           const [currentRun] = await tx.select().from(heartbeatRuns).where(and(

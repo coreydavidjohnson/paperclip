@@ -395,11 +395,21 @@ heartbeat.ts.
   show real navigable blocker identifiers as sibling links, not nested anchors.
 - Tests: `blocked-wait-invariant.test.ts`, `issues-service.test.ts`, and
   `IssueRow.test.tsx`. The MCP projection and regressions live in homelab.
-- Delivery prerequisite: native recovery still writes descriptor-only Blocked
-  dispositions (reproduced in `issue-recovery-actions.test.ts`, stranded assigned
-  escalation). PER-968 owns the independently tracked recovery/status contract.
-  Adapt genuine automated recovery liveness and all direct status writers before
-  deployment; do not exempt system callers, fabricate waits, or weaken this guard.
-  This ledger records candidate scope, not publication/deployment verification.
+- Recovery producers retain real source-scoped actions and original ownership.
+  Without an actual question/dependency, a Board-held task projects `todo`, not
+  a fabricated Blocked wait; a pending execution stage remains `in_review`.
+  Exhaustion is fenced from another automatic turn. Unknown execution outcomes
+  retain their no-replay evidence even when the source status changes truthfully.
+- Native result arbitration binds prose-only blockers and exhausted provider
+  failures to real Board recovery actions without creating cards or replaying.
+  The shared status service still refuses unsupported direct Blocked writes.
+  Exact source/action provenance governs any verified safe replacement.
+- PER-968's transactional repair is retained in the running base. Board retry
+  must use its exact source/action snapshots and preserve normal saved-session
+  continuation. Compatibility here is not an exemption from that contract.
+- Added native producer, finalization, workspace-preflight, review-path and
+  provenance regressions to the production image gate. Diagnostic passes do not
+  establish image qualification or live delivery. The agreed board sweep,
+  owner-wake and observation acceptance remain separate release evidence.
 - Retire when a released upstream service enforces equivalent first-class waits
   across supported writes and includes/navigates blocker links in board lists.

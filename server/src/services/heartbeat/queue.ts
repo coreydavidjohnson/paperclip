@@ -147,7 +147,12 @@ import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
 } from "../execution-workspace-policy.js";
-import { readContinuationAttempt } from "../recovery/index.js";
+import {
+  buildStrandedRecoveryEscalationNotice,
+  noticeMetadataReferencesRecoveryAction,
+  readContinuationAttempt,
+} from "../recovery/index.js";
+import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { allowsIssueInteractionWake } from "../../modules/run-dispatch/index.js";
 import { withAgentStartLock } from "../agent-start-lock.js";
 import { admitAgentRun } from "../run-admission.js";
@@ -165,7 +170,7 @@ import type { createHeartbeatRunState } from "./run-state.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { HeartbeatRetryDependencies } from "./retries.js";
 import type { HeartbeatRecoveryDependencies, createHeartbeatRecovery } from "./recovery.js";
-import type { issueService } from "../issues.js";
+import { hasIssueBlockedWait, type issueService } from "../issues.js";
 import type { issueTreeControlService } from "../issue-tree-control.js";
 import type { budgetService } from "../budgets.js";
 import type { instanceSettingsService } from "../instance-settings.js";
@@ -3980,10 +3985,94 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 `- Reason: ${WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE}`,
                 `- Next action: ${WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION}`,
               ].join("\n");
+              const recoveryCause = WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE;
+              const recoveryAction = await issueRecoveryActionService(
+                tx as unknown as Db,
+              ).upsertSourceScoped({
+                companyId: issue.companyId,
+                sourceIssueId: issue.id,
+                kind: "workspace_validation",
+                ownerType: "board",
+                previousOwnerAgentId: issue.assigneeAgentId,
+                returnOwnerAgentId: issue.assigneeAgentId,
+                cause: recoveryCause,
+                fingerprint: [
+                  "workspace_preflight:v1",
+                  recoveryCause,
+                  resolvedMode,
+                  resolvedStrategy,
+                ].join(":"),
+                evidence: {
+                  code: recoveryCause,
+                  reason: WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
+                  remediation: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+                  requestedReason: reason,
+                  source,
+                  triggerDetail,
+                  resolvedMode,
+                  resolvedStrategy,
+                  hasResolvablePriorSessionWorkspace,
+                  routingPolicy: "board_escalation_no_takeover_v1",
+                },
+                nextAction: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+                wakePolicy: {
+                  type: "board_escalation",
+                  reason: recoveryCause,
+                  preservesSourceAssignee: true,
+                },
+                attemptCount: 1,
+                maxAttempts: null,
+                lastAttemptAt: now,
+                supersedeOnIdentityChange: true,
+                preserveExistingOwner: true,
+              });
+              const notice = buildStrandedRecoveryEscalationNotice({
+                seed: {
+                  title: "Workspace settings need attention",
+                  tone: "danger",
+                  body: blockedComment,
+                  nextAction: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+                },
+                recoveryCause,
+                recoveryActionId: recoveryAction.id,
+                recoveryOwner: null,
+                sourceRun: null,
+              });
+              const [existingComment] = await tx
+                .select({ id: issueComments.id, metadata: issueComments.metadata })
+                .from(issueComments)
+                .where(and(
+                  eq(issueComments.companyId, issue.companyId),
+                  eq(issueComments.issueId, issue.id),
+                  eq(issueComments.body, blockedComment),
+                  or(isNull(issueComments.authorType), eq(issueComments.authorType, "system")),
+                  isNull(issueComments.deletedAt),
+                ))
+                .limit(1);
+              if (existingComment) {
+                if (!noticeMetadataReferencesRecoveryAction(existingComment.metadata, recoveryAction.id)) {
+                  await tx.update(issueComments).set({
+                    metadata: notice.metadata,
+                    presentation: notice.presentation,
+                  }).where(eq(issueComments.id, existingComment.id));
+                }
+              } else {
+                await tx.insert(issueComments).values({
+                  companyId: issue.companyId,
+                  issueId: issue.id,
+                  authorType: "system",
+                  body: notice.body,
+                  presentation: notice.presentation,
+                  metadata: notice.metadata,
+                  createdAt: now,
+                  updatedAt: now,
+                });
+              }
+              const hasRealWait = await hasIssueBlockedWait(tx as unknown as Db, issue);
               await tx
                 .update(issues)
                 .set({
-                  status: "blocked",
+                  status: hasRealWait ? "blocked" : "todo",
                   checkoutRunId: null,
                   executionRunId: null,
                   executionAgentNameKey: null,
@@ -3991,13 +4080,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   updatedAt: now,
                 })
                 .where(eq(issues.id, issue.id));
-              await tx.insert(issueComments).values({
-                companyId: issue.companyId,
-                issueId: issue.id,
-                body: blockedComment,
-                createdAt: now,
-                updatedAt: now,
-              });
               await tx.insert(agentWakeupRequests).values({
                 ...durableReceiptFields,
                 companyId: agent.companyId,

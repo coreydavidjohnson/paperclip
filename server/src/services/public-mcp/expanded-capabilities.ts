@@ -69,7 +69,7 @@ export const expandedMcpCapabilities: Capability[] = [
   },
   {
     name: "paperclip_block_task", write: true, destructive: true,
-    description: "Block a task with an explicit owner and action needed to unblock it. Existing dependency, approval and execution controls apply; this does not impersonate its assigned agent.",
+    description: "Block a task only with an unresolved linked prerequisite or a pending question/approval card. Owner/action prose alone is rejected; use paperclip_update_task to link the exact prerequisite first. Existing execution controls apply; this does not impersonate its assigned agent.",
     schema: z.object({ ...task, requestId, unblockDescriptor: taskChanges.shape.unblockDescriptor.unwrap().unwrap() }).strict(),
     run: async (p, a, api) => ({ task: pick(await api(p, "PATCH", `/issues/${pathId(a.taskId)}`, { status: "blocked", unblockDescriptor: a.unblockDescriptor }), taskFields) }),
   },

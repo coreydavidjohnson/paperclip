@@ -7,6 +7,7 @@ import { externalConversationStateSql } from "../slack-conversation-state.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import {
   executeIssuePostCommitActions,
+  hasIssueBlockedWait,
   issueService,
   TERMINAL_HEARTBEAT_RUN_STATUSES,
   type IssuePostCommitAction,
@@ -19,6 +20,7 @@ import {
 } from "./review-path-recovery.js";
 import { buildStrandedRecoveryEscalationNotice } from "./stranded-notice.js";
 import { hasUnconsumedIssueMonitorPath } from "./issue-graph-liveness.js";
+import { parseIssueExecutionState } from "../issue-execution-policy.js";
 
 /** A spent repair wake must leave an operator action, never another automatic wake. */
 export async function escalateExhaustedIssueReviewPathRecovery(
@@ -97,14 +99,22 @@ export async function escalateExhaustedIssueReviewPathRecovery(
       maxAttempts: 1,
       lastAttemptAt: run.finishedAt ?? new Date(),
     });
+    const hasRealWait = await hasIssueBlockedWait(tx as unknown as Db, issue);
+    const hasPendingExecutionStage =
+      parseIssueExecutionState(issue.executionState)?.status === "pending";
+    const status = hasRealWait
+      ? "blocked"
+      : hasPendingExecutionStage
+        ? "in_review"
+        : "todo";
     await issuesSvc.update(issueId, {
-      status: "blocked", companyGuard: run.companyId,
+      status, companyGuard: run.companyId,
     }, tx, publications, postCommitActions);
     const notice = buildStrandedRecoveryEscalationNotice({
       seed: {
         title: "No follow-up scheduled",
         tone: "danger",
-        body: "The automatic review-path repair finished without saving a scheduled check, reviewer, approval, or other maintained path. Paperclip has blocked this task for a board decision; no further automatic follow-up is scheduled.",
+        body: "The automatic review-path repair finished without saving a scheduled check, reviewer, approval, or other maintained path. Paperclip left the task under a board-owned recovery action; no automatic follow-up is scheduled.",
         nextAction,
       },
       recoveryCause: ISSUE_REVIEW_PATH_LOST_WAKE_REASON,
