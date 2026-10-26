@@ -594,6 +594,59 @@ describe("P6-25 pre-result native session recovery", () => {
       .resolves.toHaveLength(1);
   });
 
+  it.each([
+    { hasWait: false, status: "in_review" as const },
+    { hasWait: true, status: "blocked" as const },
+  ])("PER-626 pending execution-stage ambiguous recovery preserves $status", async ({ hasWait, status }) => {
+    const sourceId = randomUUID();
+    const sourceRunId = randomUUID();
+    const stageId = randomUUID();
+    const executionState = {
+      status: "pending" as const, currentStageId: stageId, currentStageIndex: 0,
+      currentStageType: "review" as const,
+      currentParticipant: { type: "agent" as const, agentId, userId: null },
+      returnAssignee: { type: "agent" as const, agentId, userId: null },
+      reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+    };
+    const executionPolicy = {
+      mode: "normal" as const, commentRequired: true,
+      stages: [{ id: stageId, type: "review" as const, approvalsNeeded: 1 as const,
+        participants: [{ id: randomUUID(), type: "agent" as const, agentId, userId: null }] }],
+    };
+    await db.insert(issues).values({ id: sourceId, companyId, title: "Preserve pending review stage",
+      status: "in_review", assigneeAgentId: agentId, executionState, executionPolicy });
+    await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId, agentId, nativeIssueId: sourceId,
+      status: "running", runtimeMode: "native", runtimeModeResolvedAt: new Date(),
+      runnerProfileJson: { nativeExecutionInput: {
+        ...persistedProfile.nativeExecutionInput, binding: { runId: sourceRunId },
+      } }, contextSnapshot: { issueId: sourceId } });
+    await db.insert(nativeRunFinalizations).values({ runId: sourceRunId, companyId, issueId: sourceId,
+      phase: "retryable_failure", attempt: 1, nextAttemptAt: new Date(0) });
+    if (hasWait) await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceId,
+      kind: "ask_user_questions", sourceRunId,
+      payload: { version: 1, questions: [{ id: "review_input", prompt: "Which review input is required?" }] } as never });
+    const [before] = await db.select().from(issues).where(eq(issues.id, sourceId));
+
+    await expect(claimNativeSessionResumptions({ db, runnerInstanceId: "reaper", runIds: [sourceRunId] }))
+      .resolves.toEqual([]);
+    const [after] = await db.select().from(issues).where(eq(issues.id, sourceId));
+    expect(after.status).toBe(status);
+    expect(after).toMatchObject({ assigneeAgentId: before.assigneeAgentId, assigneeUserId: before.assigneeUserId,
+      executionState: before.executionState, executionPolicy: before.executionPolicy });
+    expect(await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, sourceRunId)))
+      .toEqual([expect.objectContaining({ phase: "terminal_failure", nextAttemptAt: null })]);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, sourceId)))
+      .toEqual([expect.objectContaining({ ownerType: "board", ownerAgentId: null, returnOwnerAgentId: agentId,
+        cause: "native_session_interrupted", wakePolicy: null,
+        evidence: expect.objectContaining({ runId: sourceRunId, hasCheckpoint: false }) })]);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.nativeIssueId, sourceId)))
+      .toEqual([expect.objectContaining({ id: sourceRunId, status: "failed", agentId })]);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId)))
+      .not.toEqual(expect.arrayContaining([expect.objectContaining({ payload: expect.objectContaining({ issueId: sourceId }) })]));
+    if (hasWait) expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, sourceId)))
+      .toEqual([expect.objectContaining({ status: "pending" })]);
+  });
+
   it("does not mistake the pre-first-attempt observed coordinator for an orphan", async () => {
     await expect(claimNativeSessionResumptions({
       db,

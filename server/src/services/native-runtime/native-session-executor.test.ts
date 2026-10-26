@@ -5212,6 +5212,7 @@ function leaseDb(
   runnerProfileJson: Record<string, unknown> = {},
   runStatus = "running",
   priorAccountingEvents: PrpEvent[] = [],
+  issueOverrides: Partial<typeof issues.$inferSelect> = {},
 ): Db {
   const coordinator: LeaseCoordinator = {
     runId: boundExecution.binding.runId,
@@ -5268,6 +5269,7 @@ function leaseDb(
                     status: "in_progress",
                     executionRunId: boundExecution.binding.runId,
                     checkoutRunId: null,
+                    ...issueOverrides,
                   },
                 ]
               : table === heartbeatRunEvents
@@ -9285,6 +9287,56 @@ describe("native session bounded recovery", () => {
           ),
         }),
       );
+      expect(state.execute).toHaveBeenCalledOnce();
+    } finally {
+      service.mockRestore();
+      blockedWait.mockRestore();
+    }
+  });
+
+  it.each([
+    { hasWait: false, status: "in_review" as const },
+    { hasWait: true, status: "blocked" as const },
+  ])("PER-626 pending execution-stage executor failure preserves $status", async ({ hasWait, status }) => {
+    const updates: Array<{ table: unknown; values: Record<string, unknown> }> = [];
+    const failure = new NativeSessionCleanupQuarantinedError();
+    state.execute.mockReset().mockRejectedValueOnce(failure);
+    state.upsertRecoveryAction.mockReset().mockResolvedValue({});
+    const stageId = randomUUID();
+    const pendingStage: Partial<typeof issues.$inferSelect> = {
+      status: "in_review",
+      executionState: {
+        status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: execution.binding.agentId, userId: null },
+        returnAssignee: { type: "agent", agentId: execution.binding.agentId, userId: null },
+        reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+      },
+      executionPolicy: { mode: "normal", commentRequired: true,
+        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: execution.binding.agentId, userId: null }] }] },
+    };
+    const updateIssue = vi.fn(async (_id: string, patch: { status?: string }) => ({ status: patch.status, statusVersion: 7 }));
+    const blockedWait = vi.spyOn(issueServiceModule, "hasIssueBlockedWait").mockResolvedValue(hasWait);
+    const service = vi.spyOn(issueServiceModule, "issueService").mockReturnValue({ update: updateIssue }
+      as unknown as ReturnType<typeof issueServiceModule.issueService>);
+    try {
+      await expect(executePaperclipNativeSession({
+        db: leaseDb(execution, {}, {}, updates, {}, "running", [], pendingStage), execution, runnerInstanceId: "runner",
+      })).rejects.toBe(failure);
+      expect(updateIssue).toHaveBeenCalledExactlyOnceWith(execution.binding.issueId, { status }, expect.anything());
+      expect(blockedWait).toHaveBeenCalledOnce();
+      expect(updates.find(entry => entry.table === nativeRunFinalizations && entry.values.phase === "terminal_failure")?.values)
+        .toMatchObject({ failureCode: "native_session_cleanup_quarantined", nextAttemptAt: null });
+      expect(state.upsertRecoveryAction).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        ownerType: "board", ownerAgentId: null, returnOwnerAgentId: execution.binding.agentId,
+        cause: "native_session_cleanup_quarantined", wakePolicy: null,
+        evidence: expect.objectContaining({ runId: execution.binding.runId }),
+      }));
+      expect(state.upsertRecoveryAction).toHaveBeenCalledWith(expect.objectContaining({
+        evidence: hasWait ? expect.objectContaining({
+          nativeFailureBlock: { runId: execution.binding.runId, statusVersion: 7, status: "blocked" },
+        }) : expect.not.objectContaining({ nativeFailureBlock: expect.anything() }),
+      }));
       expect(state.execute).toHaveBeenCalledOnce();
     } finally {
       service.mockRestore();
