@@ -22,6 +22,7 @@ import {
   issueThreadInteractions,
   issueRecoveryActions,
   issues,
+  principalPermissionGrants,
   runIdentityContexts,
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
@@ -29,6 +30,7 @@ import { actorMiddleware } from "../middleware/auth.js";
 import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { issueRoutes } from "../routes/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
+import { authorizationService } from "../services/authorization.js";
 import { issueService } from "../services/issues.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
@@ -363,7 +365,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .rejects.toMatchObject({ status: 403, details: { code: "agent_run_cancelled" } });
   });
 
-  async function nativeHandoffClient() {
+  async function nativeHandoffClient(target: "human" | "report_agent" = "human") {
     const seeded = await seedQueue();
     // Real JWT auth requires an existing user as well as the company membership.
     await db.insert(authUsers).values({
@@ -381,6 +383,45 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       companyId: seeded.companyId, issueId: seeded.issueId, runId: seeded.runId,
       responsibleUserId: "queue-owner", cause: "dispatch",
     });
+    let reportAgentId: string | null = null;
+    if (target === "report_agent") {
+      reportAgentId = randomUUID();
+      await db.update(agents).set({ name: "Task manager", role: "cto" })
+        .where(eq(agents.id, seeded.agentId));
+      await db.insert(agents).values({
+        id: reportAgentId, companyId: seeded.companyId, name: "Permitted report", role: "engineer",
+        status: "idle", reportsTo: seeded.agentId, adapterType: "paperclip_runner",
+        runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } },
+        // Require a real grant, rather than default-open assignment permission.
+        permissions: { authorizationPolicy: { assignmentPolicy: { mode: "protected" } } },
+      });
+      await db.insert(companyMemberships).values({
+        companyId: seeded.companyId, principalType: "agent", principalId: seeded.agentId,
+        status: "active", membershipRole: "member",
+      });
+      await db.insert(principalPermissionGrants).values([
+        { principalType: "agent", principalId: seeded.agentId },
+        { principalType: "user", principalId: "queue-owner" },
+      ].map(principal => ({
+        ...principal, companyId: seeded.companyId, permissionKey: "tasks:assign_scope",
+        scope: { managedSubtreeAgentIds: [seeded.agentId] }, grantedByUserId: "queue-owner",
+      })));
+      const scope = { issueId: seeded.issueId, assigneeAgentId: reportAgentId, assigneeUserId: null };
+      expect(await authorizationService(db).decide({
+        actor: { type: "agent", source: "agent_jwt", companyId: seeded.companyId,
+          agentId: seeded.agentId, runId: seeded.runId, onBehalfOfUserId: "queue-owner" },
+        action: "tasks:assign", resource: { type: "issue", companyId: seeded.companyId, ...scope }, scope,
+      })).toMatchObject({ allowed: true, reason: "allow_explicit_grant",
+        grant: { principalType: "agent", principalId: seeded.agentId, permissionKey: "tasks:assign_scope" } });
+      // Keep the report at capacity on unrelated work. Handoff admission can
+      // queue its successor, but this test must never invoke a model/provider.
+      await db.insert(heartbeatRuns).values({
+        companyId: seeded.companyId, agentId: reportAgentId, status: "running", runtimeMode: "legacy",
+        runtimeModeResolvedAt: new Date(), controllerBootId: randomUUID(),
+        controllerLeaseExpiresAt: new Date(Date.now() + 60_000), contextSnapshot: { issueId: randomUUID() },
+      });
+    }
+    const assignment = { assigneeAgentId: reportAgentId, assigneeUserId: reportAgentId ? null : "queue-owner" };
     vi.stubEnv("PAPERCLIP_AGENT_JWT_SECRET", "native-handoff-route-test-secret");
     const token = createLocalAgentJwt(seeded.agentId, seeded.companyId, "paperclip_runner", seeded.runId, "queue-owner");
     expect(token).toBeTruthy();
@@ -397,11 +438,12 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     };
     client.use(captureRouteError);
     client.use(errorHandler);
-    return { ...seeded, identity, client, rawErrors, authorization: `Bearer ${token}` };
+    return { ...seeded, identity, client, rawErrors, assignment, reportAgentId, authorization: `Bearer ${token}` };
   }
 
-  it.each([false, true])("commits the HTTP native self-handoff after stopping its own run, with adapter overrides: %s", async withOverrides => {
-    const seeded = await nativeHandoffClient();
+  it.each((["human", "report_agent"] as const).flatMap(target => [false, true].map(withOverrides => ({ target, withOverrides }))))(
+    "commits the HTTP native self-handoff to $target after stopping its own run, with adapter overrides: $withOverrides", async ({ target, withOverrides }) => {
+    const seeded = await nativeHandoffClient(target);
     // Only the provider boundary is simulated. The HTTP auth, route stop token,
     // heartbeat cancellation, issue transaction and comment service stay real.
     const cancel = vi.spyOn(nativeSessionExecutor, "cancelNativeSession").mockImplementation(async (runId, _reason, options) => {
@@ -424,8 +466,10 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       return { dispatched: true, decision, decisionId: randomUUID(), auditId: receipt.acknowledgementAuditId };
     });
     const body = {
-      assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
-      comment: "Handing this same task back for the human decision.",
+      ...seeded.assignment, status: "todo",
+      comment: target === "report_agent"
+        ? "Handing this same task to my permitted report."
+        : "Handing this same task back for the human decision.",
       ...(withOverrides ? { assigneeAdapterOverrides: { useProjectWorkspace: false } } : {}),
     };
     const response = await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
@@ -441,7 +485,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     });
     expect(response.status, responseDiagnostic).toBe(200);
     const [task] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
-    expect(task).toMatchObject({ assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
+    expect(task).toMatchObject({ id: seeded.issueId, ...seeded.assignment, status: "todo",
       checkoutRunId: null, executionRunId: null,
       assigneeAdapterOverrides: withOverrides ? { useProjectWorkspace: false } : null,
     });
@@ -451,6 +495,20 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
         createdByRunId: seeded.runId, onBehalfOfUserId: "queue-owner" }),
     ]);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId))).toEqual([]);
+    expect(await db.select().from(issues).where(eq(issues.companyId, seeded.companyId))).toHaveLength(1);
+    if (seeded.reportAgentId) {
+      // The route enqueues assignment after commit. Observe that bounded
+      // asynchronous work before teardown, without dispatching the successor.
+      await vi.waitFor(async () => {
+        const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, seeded.reportAgentId!));
+        const wake = wakes.find(row => row.payload?.issueId === seeded.issueId);
+        expect(wake).toMatchObject({ reason: "issue_assigned", requestedByActorType: "agent", requestedByActorId: seeded.agentId });
+        expect(wake?.runId).toEqual(expect.any(String));
+        const [successor] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake!.runId!));
+        expect(successor).toMatchObject({ agentId: seeded.reportAgentId, status: "queued",
+          contextSnapshot: { issueId: seeded.issueId } });
+      }, { timeout: 5_000 });
+    }
     // The server-only stop token cannot authorize a replay or a later report.
     await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
       .set("Authorization", seeded.authorization).send(body).expect(403);
@@ -460,8 +518,10 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["cancelled", "cancelling", "changed_owner"] as const)("refuses HTTP native handoff from a %s source without partial edits", async mode => {
-    const seeded = await nativeHandoffClient();
+  it.each((["human", "report_agent"] as const).flatMap(target =>
+    (["cancelled", "cancelling", "changed_owner"] as const).map(mode => ({ target, mode }))))(
+    "refuses HTTP native handoff to $target from a $mode source without partial edits", async ({ target, mode }) => {
+    const seeded = await nativeHandoffClient(target);
     const cancel = vi.spyOn(nativeSessionExecutor, "cancelNativeSession");
     if (mode === "changed_owner") {
       const ownerId = randomUUID();
@@ -480,7 +540,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const [before] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
     const response = await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
       .set("Authorization", seeded.authorization).send({
-        assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
+        ...seeded.assignment, status: "todo",
         comment: "This stale handoff must not land.",
         assigneeAdapterOverrides: { useProjectWorkspace: false },
       });
