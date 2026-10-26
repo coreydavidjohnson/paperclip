@@ -774,6 +774,21 @@ async function materializeDecisionEffect(input: {
       )
       .returning({ id: issues.id });
     if (!bound) throw new Error("native_blocker_binding_not_persisted");
+    if (effect.recoveryHold) {
+      const recovery = await issueRecoveryActionService(input.tx).upsertSourceScoped({
+        companyId: input.companyId, sourceIssueId: input.issue.id,
+        kind: "deliberate_wait_without_target", ownerType: "board",
+        previousOwnerAgentId: input.issue.assigneeAgentId, returnOwnerAgentId: input.issue.assigneeAgentId,
+        cause: "deliberate_wait_without_target",
+        fingerprint: `native-blocked:${input.companyId}:${input.issue.id}:${input.runId}`,
+        preserveExistingOwner: true,
+        evidence: { runId: input.runId, decisionId: input.decisionId },
+        nextAction: effect.action,
+        wakePolicy: { type: "board_escalation", preservesSourceAssignee: true },
+      });
+      return { effectKind: effect.kind, targetType: "issue_recovery_action", targetId: recovery.id,
+        payload: { owner: "board", action: effect.action, wakeId: null } };
+    }
     let wakeId: string | null = null;
     if (effect.owner !== "board") {
       wakeId = await enqueueWake({

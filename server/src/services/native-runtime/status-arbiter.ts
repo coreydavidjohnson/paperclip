@@ -1,7 +1,7 @@
 import type { NativeEvidenceAssessment } from "./evidence-classifier.js";
 import { NATIVE_MODEL_REJECTION_MESSAGE, NATIVE_PROVIDER_CAPACITY_MAX_RETRIES, NATIVE_PROVIDER_OVERLOADED_CODE, NATIVE_PROVIDER_OVERLOADED_MESSAGE } from "./native-provider-failure.js";
 
-export const NATIVE_STATUS_ARBITER_POLICY_VERSION = "phase6-v11";
+export const NATIVE_STATUS_ARBITER_POLICY_VERSION = "phase6-v12";
 
 export type NativeAuthoritativeIssueStatus =
   | "backlog"
@@ -42,6 +42,8 @@ export type NativeStatusEffect =
     }
   | {
       kind: "bind_blocker";
+      /** No actual linked wait exists; persist a Board hold, never wake the provider. */
+      recoveryHold?: true;
       owner: { agentId: string } | "board";
       action: string;
     }
@@ -92,7 +94,7 @@ export interface NativeStatusDecision {
 }
 
 /** Pure authority boundary: model prose is evidence, never a status command. */
-export function arbitrateNativeStatus(input: {
+function decideNativeStatus(input: {
   assessment: NativeEvidenceAssessment;
   terminalState: "succeeded" | "failed" | "cancelled";
   workspaceFinalizeStatus: "succeeded" | "failed";
@@ -628,4 +630,15 @@ export function arbitrateNativeStatus(input: {
       },
     ],
   };
+}
+
+/** Descriptive blocker prose cannot grant blocked status or replay authority. */
+export function arbitrateNativeStatus(input: Parameters<typeof decideNativeStatus>[0]): NativeStatusDecision {
+  const decision = decideNativeStatus(input);
+  if (decision.statusAction !== "blocked" || input.hasUnresolvedIssueBlockers) return decision;
+  const action = decision.unblockDescriptor?.action ?? "Link the exact unresolved prerequisite or resolve the reported wait.";
+  const status = input.governanceGate ? "in_review" : "todo";
+  return { ...decision, statusAction: status, toStatus: status,
+    unblockDescriptor: { owner: "board", action },
+    effects: [{ kind: "bind_blocker", owner: "board", action, recoveryHold: true }] };
 }
