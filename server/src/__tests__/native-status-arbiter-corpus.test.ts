@@ -2982,6 +2982,25 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
     expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
   });
 
+  it.each(["dependency", "confirmation", "stage"] as const)("preserves the actual %s gate when native finalization exhausts", async (gate) => {
+    const template = corpus.fixtures.find(candidate => candidate.mode === "native")!;
+    const seeded = await seedFixture({ ...template, id: `gated-finalization-${gate}`, given: { ...template.given, priorIssueStatus: "in_progress" } });
+    if (gate === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Exact prerequisite", status: "todo" }).returning();
+      await issueService(db).update(seeded.issueId, { blockedByIssueIds: [blocker!.id] });
+    } else if (gate === "confirmation") {
+      await db.insert(issueThreadInteractions).values({ companyId, issueId: seeded.issueId, kind: "request_confirmation", status: "pending",
+        payload: { version: 1, prompt: "Authorize the protected action", target: { type: "custom", key: "protected_action" } } });
+    } else {
+      await db.update(issues).set({ executionState: { status: "pending" } }).where(eq(issues.id, seeded.issueId));
+    }
+    await recordNativeFinalizationFailure({ db, runId: seeded.runId, error: new Error("native_fixture_finalization_failure"),
+      failureScope: "workspace", permanent: true, projectRunStatus: true });
+    expect(await issueService(db).getById(seeded.issueId)).toMatchObject({ status: gate === "stage" ? "in_review" : "blocked", assigneeAgentId: agentId });
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
+  });
+
   it("fails the transaction closed for an unknown status effect", async () => {
     const fixture = corpus.fixtures.find((candidate) => candidate.mode === "native");
     if (!fixture) throw new Error("native corpus fixture missing");
