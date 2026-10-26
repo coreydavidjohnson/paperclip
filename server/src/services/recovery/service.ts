@@ -1760,10 +1760,24 @@ export function recoveryService(
       if (paths.hasActiveExecutionPath || paths.hasDurableWaitingPath)
         return false;
 
+      // A typed blocker with prose alone is not a pending question. Preserve
+      // the exact request under a real Board recovery hold, without a new turn.
+      await issueRecoveryActionService(tx as unknown as Db).upsertSourceScoped({
+        companyId: current.companyId, sourceIssueId: current.id,
+        kind: "deliberate_wait_without_target", ownerType: "board",
+        previousOwnerAgentId: current.assigneeAgentId, returnOwnerAgentId: current.assigneeAgentId,
+        cause: "deliberate_wait_without_target",
+        fingerprint: `native-blocked:${current.companyId}:${current.id}:${proof.resultId}`,
+        preserveExistingOwner: true,
+        evidence: { latestRunId: source.id, nativeResultId: proof.resultId,
+          completionContractId: proof.contractId, routingPolicy: STRANDED_BOARD_ESCALATION_POLICY },
+        nextAction: proof.action,
+        wakePolicy: { type: "board_escalation", preservesSourceAssignee: true },
+      });
       const updated = await issuesSvc.update(
         current.id,
         {
-          status: "blocked",
+          status: "todo",
           unblockDescriptor: { owner: "board", action: proof.action },
         },
         tx,
@@ -1794,7 +1808,7 @@ export function recoveryService(
           entityId: current.id,
           details: {
             source: "recovery.native_blocked_wait",
-            status: "blocked",
+            status: updated.status,
             previousStatus: "in_progress",
             latestRunId: source.id,
             nativeResultId: proof.resultId,
