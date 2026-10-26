@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -257,4 +257,89 @@ describe("issuesApi.list", () => {
       },
     );
   });
+});
+
+
+describe("explicit replay-safe comment client (not the default composer path)", () => {
+  const issueId = "5e5f9946-c706-4785-8988-d4d6f0f499ab";
+  const clientRequestId = "12b44216-bd46-408b-a68e-1af6449e019a";
+  const receipt = { id: "9af8228f-0be7-45ae-a104-6fbe0af6f1d3", issueId, clientRequestId, body: "Exact saved input" };
+  beforeEach(() => { mockApi.post.mockReset(); vi.useFakeTimers(); });
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each([new TypeError("network lost before saving"), new SyntaxError("receipt lost after saving"), new ApiError("post-commit outage", 503, {})])(
+    "retries only the dedicated safe endpoint with the same immutable operation %#", async error => {
+      mockApi.post.mockRejectedValueOnce(error).mockResolvedValueOnce(receipt);
+      const data = { clientRequestId, body: receipt.body, interrupt: true, attachmentIds: [receipt.id] };
+      const pending = issuesApi.addReplaySafeComment(issueId, data);
+      data.body = "Edited during outage";
+      data.attachmentIds.push(issueId);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pending).toEqual(receipt);
+      expect(mockApi.post).toHaveBeenCalledTimes(2);
+      for (const [path, payload, options] of mockApi.post.mock.calls) {
+        expect(path).toBe(`/issues/${issueId}/comments/replay-safe`);
+        expect(payload).toEqual({ clientRequestId, body: receipt.body, interrupt: true, attachmentIds: [receipt.id] });
+        expect(options.signal).toBeInstanceOf(AbortSignal);
+      }
+    },
+  );
+
+  it("bounds every hanging request with an abort deadline", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(ms => {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(new DOMException("Timed out", "TimeoutError")), ms);
+      return controller.signal;
+    });
+    mockApi.post.mockImplementation((_path, _payload, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(options.signal.reason), { once: true });
+    }));
+    try {
+      const pending = issuesApi.addReplaySafeComment(issueId, { clientRequestId, body: receipt.body });
+      const assertion = expect(pending).rejects.toBeInstanceOf(CommentSubmissionUnknownError);
+      await vi.advanceTimersByTimeAsync(31_000);
+      await assertion;
+      expect(timeout.mock.calls).toEqual([[10_000], [10_000], [10_000]]);
+      expect(mockApi.post).toHaveBeenCalledTimes(3);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("bounds an outage at three safe attempts and never falls back to the ordinary route", async () => {
+    mockApi.post.mockRejectedValue(new TypeError("offline"));
+    const pending = issuesApi.addReplaySafeComment(issueId, { clientRequestId, body: receipt.body });
+    const assertion = expect(pending).rejects.toBeInstanceOf(CommentSubmissionUnknownError);
+    await vi.advanceTimersByTimeAsync(1000);
+    await assertion;
+    expect(mockApi.post).toHaveBeenCalledTimes(3);
+    expect(mockApi.post.mock.calls.map(([path]) => path)).toEqual(Array(3).fill(`/issues/${issueId}/comments/replay-safe`));
+  });
+
+  it.each([401, 403, 404, 409, 422])("does not retry or fall back after an initial known HTTP %d refusal", async status => {
+    const error = new ApiError("Refused", status, { details: { code: "comment_operation_not_replay_safe" } });
+    mockApi.post.mockRejectedValueOnce(error);
+    await expect(issuesApi.addReplaySafeComment(issueId, { clientRequestId, body: receipt.body })).rejects.toBe(error);
+    expect(mockApi.post).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves uncertainty when a later refusal cannot disprove the first attempt committed", async () => {
+    mockApi.post.mockRejectedValueOnce(new TypeError("lost response"))
+      .mockRejectedValueOnce(new ApiError("Task is now paused", 409, {}));
+    const pending = issuesApi.addReplaySafeComment(issueId, { clientRequestId, body: receipt.body });
+    const assertion = expect(pending).rejects.toBeInstanceOf(CommentSubmissionUnknownError);
+    await vi.advanceTimersByTimeAsync(250);
+    await assertion;
+    expect(mockApi.post).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([{ ...receipt, clientRequestId: issueId }, { ...receipt, issueId: clientRequestId }, null])(
+    "does not confirm an unrelated or missing receipt %#", async invalid => {
+      mockApi.post.mockResolvedValueOnce(invalid).mockResolvedValueOnce(receipt);
+      const pending = issuesApi.addReplaySafeComment(issueId, { clientRequestId, body: receipt.body });
+      await vi.advanceTimersByTimeAsync(250);
+      expect(await pending).toEqual(receipt);
+      expect(mockApi.post).toHaveBeenCalledTimes(2);
+    },
+  );
 });

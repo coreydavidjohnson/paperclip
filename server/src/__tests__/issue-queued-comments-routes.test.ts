@@ -23,6 +23,7 @@ import {
   issues,
   runIdentityContexts,
 } from "@paperclipai/db";
+import { createApiMetrics } from "../api-metrics.js";
 import { errorHandler } from "../middleware/index.js";
 import { issueRoutes } from "../routes/issues.js";
 import { getTaskDrainStatus, heartbeatService } from "../services/heartbeat.js";
@@ -80,8 +81,9 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await tempDb?.cleanup();
   });
 
-  function app(companyId: string, userId = "queue-owner", agentActor?: { agentId: string; runId: string }) {
+  function app(companyId: string, userId = "queue-owner", agentActor?: { agentId: string; runId: string }, metrics?: ReturnType<typeof createApiMetrics>) {
     const testApp = express();
+    if (metrics) testApp.use(metrics.middleware);
     testApp.use(express.json());
     testApp.use((req, _res, next) => {
       (req as any).actor = {
@@ -2201,6 +2203,15 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(1);
   });
 
+
+  it.each(["comments", "comments/replay-safe"])("keeps bounded request metrics on the normal and replay-safe routes (%s)", async path => {
+    const metrics = createApiMetrics();
+    const response = await request(app(randomUUID(), "queue-owner", undefined, metrics))
+      .post(`/api/issues/${randomUUID()}/${path}`).send({});
+    expect(response.status).toBe(400);
+    expect(metrics.render()).toContain(`route="/api/issues/:id/${path}",status="400"`);
+    expect(metrics.render()).not.toContain('route="unmatched"');
+  });
 
   it.each(["unassigned", "reopen", "resume", "review", "runner-interrupt", "conversation"])(
     "rejects an unsupported replay-safe operation before comment/control effects (%s)", async variant => {

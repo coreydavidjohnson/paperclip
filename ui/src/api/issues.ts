@@ -2,6 +2,7 @@ import type { SetIssueTitle } from "@paperclipai/shared";
 import type { ExecutionReconciliation } from "@paperclipai/shared";
 import type {
   AcceptedPlanDecompositionSummary,
+  AddIssueComment,
   AskUserQuestionsAnswer,
   Approval,
   CompactIssue,
@@ -552,6 +553,29 @@ export const issuesApi = {
       }),
       hasCommentReceipt,
     ),
+  // Explicit qualification path only. Existing composers keep their one-shot
+  // addComment behavior until the complete staged recovery contract is verified.
+  addReplaySafeComment: async (id: string, data: AddIssueComment & { clientRequestId: string }): Promise<IssueComment> => {
+    const payload: AddIssueComment & { clientRequestId: string } = JSON.parse(JSON.stringify(data));
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await confirmedCommentResponse(
+          api.post<IssueComment>(`/issues/${id}/comments/replay-safe`, payload, { signal: AbortSignal.timeout(10_000) }),
+          response => hasCommentReceipt(response) && response.clientRequestId === payload.clientRequestId && response.issueId === id,
+        );
+      } catch (error) {
+        if (!(error instanceof CommentSubmissionUnknownError)) {
+          // A later refusal (for example, a new Stop) says nothing about whether
+          // an earlier attempt committed. Never clear that uncertainty or fall
+          // back to the legacy endpoint with a potentially in-flight operation.
+          if (attempt > 0) throw new CommentSubmissionUnknownError();
+          throw error;
+        }
+        if (attempt === 2) throw error;
+        await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 250 : 750));
+      }
+    }
+  },
   cancelComment: (id: string, commentId: string) =>
     api.delete<IssueComment>(`/issues/${id}/comments/${commentId}?mode=cancel`),
   deleteComment: (id: string, commentId: string) =>

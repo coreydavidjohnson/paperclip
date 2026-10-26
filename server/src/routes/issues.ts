@@ -18402,7 +18402,7 @@ export function issueRoutes(
   }
 
   router.post(
-    "/issues/:id/comments",
+    ["/issues/:id/comments", "/issues/:id/comments/replay-safe"],
     validate(addIssueCommentSchema),
     async (req, res) => {
       const id = req.params.id as string;
@@ -18413,6 +18413,16 @@ export function issueRoutes(
         "Issue not found",
       );
       if (!issue) return;
+      // Use a separate endpoint, not an optional body field that an older server
+      // could silently strip before executing a non-replay-safe operation.
+      const replaySafeRequired = /\/comments\/replay-safe\/?$/.test(req.path);
+      if (replaySafeRequired) {
+        if (req.actor.type !== "board" || !req.actor.userId) throw forbidden("Board user access required");
+        if (!req.body.clientRequestId) throw unprocessable("Replay-safe comments require a clientRequestId");
+        if (issue.conversationAgentId) throw conflict("This comment variant is not replay-safe", {
+          code: "comment_operation_not_replay_safe",
+        });
+      }
       if (issue.conversationAgentId && req.actor.type === "board") {
         if (!(await instanceSettings.getExperimental()).enableAgentChat) throw notFound("Agent Chat is disabled");
         if (!req.actor.userId) throw forbidden("Board user access required");
@@ -18708,6 +18718,9 @@ export function issueRoutes(
             eq(issueComments.clientRequestId, commentClientRequestId),
           ));
           if (legacyComment) {
+            if (replaySafeRequired) throw conflict("This request has no replay-safe operation receipt", {
+              code: "comment_operation_retry_disabled",
+            });
             const attachmentRows = await tx.select({ id: issueAttachments.id }).from(issueAttachments)
               .where(eq(issueAttachments.issueCommentId, legacyComment.id));
             const savedAttachmentIds = attachmentRows.map(row => row.id).sort();
@@ -18730,6 +18743,11 @@ export function issueRoutes(
             if (agent?.adapterType === "paperclip_runner") operationSupported = false;
           }
           if (!operationSupported) {
+            // The opt-in route must refuse BEFORE the legacy control path,
+            // including variants that cannot persist an agent-bound receipt.
+            if (replaySafeRequired) throw conflict("This comment variant is not replay-safe", {
+              code: "comment_operation_not_replay_safe",
+            });
             if (!actor.actorId || !lockedIssue.assigneeAgentId) return { kind: "untracked_unsupported" as const };
             const receiptId = randomUUID();
             await tx.insert(agentWakeupRequests).values({
