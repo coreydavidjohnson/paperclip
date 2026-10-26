@@ -2779,7 +2779,7 @@ export async function hasIssueBlockedWait(
   const [approval] = await dbOrTx.select({ id: approvals.id }).from(issueApprovals)
     .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
     .where(and(eq(issueApprovals.companyId, issue.companyId), eq(approvals.companyId, issue.companyId),
-      eq(issueApprovals.issueId, issue.id), eq(approvals.status, "pending"))).limit(1);
+      eq(issueApprovals.issueId, issue.id), inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
   return Boolean(approval);
 }
 
@@ -2788,6 +2788,14 @@ async function assertIssueBlockedWait(
   issue: { id: string; companyId: string },
   requestedBlockerIds?: string[],
 ) {
+  // Validate after acquiring the dependency locks, not against a version that
+  // can finish while relation synchronization waits for that same row.
+  const blockerIds = requestedBlockerIds ?? dbOrTx.select({ id: issueRelations.issueId })
+    .from(issueRelations).where(and(eq(issueRelations.companyId, issue.companyId),
+      eq(issueRelations.relatedIssueId, issue.id), eq(issueRelations.type, "blocks")));
+  await dbOrTx.select({ id: issues.id }).from(issues)
+    .where(and(eq(issues.companyId, issue.companyId), inArray(issues.id, blockerIds)))
+    .orderBy(issues.id).for("update");
   if (!await hasIssueBlockedWait(dbOrTx, issue, requestedBlockerIds)) {
     throw unprocessable("Blocked requires an unresolved linked ticket or a pending question/approval card", {
       code: "blocked_wait_required", issueId: issue.id,

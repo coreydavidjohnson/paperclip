@@ -524,7 +524,7 @@ export async function claimNativeSessionResumptions(input: {
           updatedRun && updatedRun.status !== row.run.status ? updatedRun : null;
         const recoveryStatus = await hasIssueBlockedWait(tx as unknown as Db, issue)
           ? "blocked"
-          : "todo";
+          : record(issue.executionState).status === "pending" ? "in_review" : "todo";
         if (issue.status !== recoveryStatus) {
           await issueService(tx as unknown as Db).update(
             row.coordinator.issueId,

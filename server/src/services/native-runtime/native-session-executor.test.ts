@@ -9317,8 +9317,8 @@ describe("native session bounded recovery", () => {
     };
     const updateIssue = vi.fn(async (_id: string, patch: { status?: string }) => ({ status: patch.status, statusVersion: 7 }));
     const blockedWait = vi.spyOn(issueServiceModule, "hasIssueBlockedWait").mockResolvedValue(hasWait);
-    const service = vi.spyOn(issueServiceModule, "issueService").mockReturnValue({ update: updateIssue }
-      as unknown as ReturnType<typeof issueServiceModule.issueService>);
+    const service = vi.spyOn(issueServiceModule, "issueService").mockReturnValue(
+      { update: updateIssue } as unknown as ReturnType<typeof issueServiceModule.issueService>);
     try {
       await expect(executePaperclipNativeSession({
         db: leaseDb(execution, {}, {}, updates, {}, "running", [], pendingStage), execution, runnerInstanceId: "runner",
