@@ -482,6 +482,21 @@ describe("native status authority", () => {
     );
   });
 
+  it.each(["task_wide", "current_track"] as const)("keeps an unlinked %s native result under a real recovery hold instead of blocked", (scope) => {
+    const decision = arbitrate({ assessment: assessment({ reportedDisposition: "blocked",
+      blocker: { boardOwned: false, scope, unblockAction: "Repair the exact prerequisite" } }) });
+    expect(decision).toMatchObject({ statusAction: "todo", toStatus: "todo",
+      unblockDescriptor: { owner: "board", action: "Repair the exact prerequisite" } });
+    expect(decision.effects).toEqual([{ kind: "bind_blocker", owner: "board",
+      action: "Repair the exact prerequisite", recoveryHold: true }]);
+  });
+
+  it.each(["providerModelRejected", "providerOverloaded"] as const)("keeps %s exhaustion under a no-replay recovery hold without a fabricated wait", (flag) => {
+    const decision = arbitrate({ terminalState: "failed", [flag]: true, failureRetryCount: 100 });
+    expect(decision).toMatchObject({ statusAction: "todo", toStatus: "todo" });
+    expect(decision.effects).toEqual([expect.objectContaining({ kind: "bind_blocker", owner: "board", recoveryHold: true })]);
+  });
+
   it("blocks only for a task-wide blocker with a named owner and action", () => {
     expect(
       arbitrate({

@@ -69,6 +69,7 @@ const mockIssuesApi = vi.hoisted(() => ({
   markRead: vi.fn(),
   update: vi.fn(),
   resolveRecoveryAction: vi.fn(),
+  recoveryActions: vi.fn(),
   previewTreeControl: vi.fn(),
   getTreeControlState: vi.fn(),
   listTreeHolds: vi.fn(),
@@ -702,6 +703,10 @@ vi.mock("@/components/ui/sheet", () => ({
   SheetTitle: ({ children }: { children?: ReactNode }) => <h2>{children}</h2>,
 }));
 
+vi.mock("@/hooks/useWorkspaceIsolationControls", () => ({ useWorkspaceIsolationControls: () => ({ visible: false, loaded: true }) }));
+
+vi.mock("@/hooks/useWorkspaceIsolationControls", () => ({ useWorkspaceIsolationControls: () => ({ visible: false, loaded: true }) }));
+
 vi.mock("@/components/ui/scroll-area", () => ({
   ScrollArea: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
@@ -817,6 +822,49 @@ function createIssue(overrides: Partial<Issue> = {}): Issue {
     documentSummaries: [],
     ...overrides,
   } as Issue;
+}
+
+function createExhaustedBoardRecoveryAction(
+  overrides: Partial<NonNullable<Issue["activeRecoveryAction"]>> = {},
+): NonNullable<Issue["activeRecoveryAction"]> {
+  const now = new Date("2026-10-26T12:00:00.000Z");
+  return {
+    id: "recovery-action-exhausted",
+    companyId: "company-1",
+    sourceIssueId: "issue-1",
+    recoveryIssueId: null,
+    kind: "deliberate_wait_without_target",
+    status: "active",
+    ownerType: "board",
+    ownerAgentId: null,
+    ownerUserId: null,
+    previousOwnerAgentId: "agent-1",
+    returnOwnerAgentId: "agent-1",
+    cause: "deliberate_wait_without_target",
+    fingerprint: "stored-action-fingerprint",
+    evidence: {
+      terminalReason: "unchanged_source_state_exhausted",
+      sourceAttemptCount: 5,
+      sourceMaxAttempts: 5,
+    },
+    nextAction: "Choose the next source disposition.",
+    wakePolicy: {
+      type: "board_escalation",
+      reason: "unchanged_source_state_exhausted",
+      preservesSourceAssignee: true,
+    },
+    monitorPolicy: null,
+    attemptCount: 5,
+    maxAttempts: null,
+    timeoutAt: null,
+    lastAttemptAt: null,
+    outcome: null,
+    resolutionNote: null,
+    resolvedAt: null,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  } as NonNullable<Issue["activeRecoveryAction"]>;
 }
 
 function createIssueComment(
@@ -1377,6 +1425,7 @@ describe("IssueDetail", () => {
     mockIssuesApi.getTreeControlState.mockResolvedValue({
       activePauseHold: null,
     });
+    mockIssuesApi.recoveryActions.mockResolvedValue({ active: null, actions: [] });
     mockIssuesApi.listTreeHolds.mockResolvedValue([]);
     mockActivityApi.forIssue.mockResolvedValue([]);
     mockActivityApi.runsForIssue.mockResolvedValue([]);
@@ -2669,6 +2718,124 @@ describe("IssueDetail", () => {
     });
 
     mockIssuesApi.resolveRecoveryAction.mockReset();
+  });
+
+  it("keeps the existing Board recovery choices available after exhaustion returns the source to todo", async () => {
+    const action = createExhaustedBoardRecoveryAction();
+    const issue = createIssue({ status: "todo", assigneeAgentId: "agent-1", activeRecoveryAction: action });
+    mockIssuesApi.get.mockResolvedValue(issue);
+
+    await act(async () => renderIssueView());
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Board decision required");
+    const resolveRecovery = container.querySelector<HTMLButtonElement>(
+      `[data-testid="recovery-action-resolve-trigger"]`,
+    );
+    expect(resolveRecovery).not.toBeNull();
+    await act(async () => resolveRecovery!.click());
+    expect(container.textContent).toContain("Try again");
+  });
+
+  it("requires a Board note and uses fresh source and action data for the exact PER-968 retry", async () => {
+    const storedAction = createExhaustedBoardRecoveryAction();
+    const sourceIssue = {
+      ...createIssue({ status: "todo", assigneeAgentId: "agent-1", activeRecoveryAction: storedAction }),
+      statusVersion: 4,
+    } as Issue & { statusVersion: number };
+    const freshAction = createExhaustedBoardRecoveryAction({
+      fingerprint: "fresh-action-fingerprint",
+      updatedAt: "2026-10-26T12:05:00.000Z",
+    });
+    const freshIssue = {
+      ...sourceIssue,
+      updatedAt: new Date("2026-10-26T12:05:30.000Z"),
+      statusVersion: 9,
+      activeRecoveryAction: freshAction,
+    };
+    let returnFreshSnapshot = false;
+    mockIssuesApi.get.mockImplementation(async () => returnFreshSnapshot ? freshIssue : sourceIssue);
+    mockIssuesApi.recoveryActions.mockResolvedValue({ active: freshAction, actions: [freshAction] });
+    mockIssuesApi.resolveRecoveryAction.mockResolvedValue({
+      issue: { ...freshIssue, status: "todo", activeRecoveryAction: null },
+      recoveryAction: { ...freshAction, status: "resolved", outcome: "handed_back" },
+    });
+
+    await act(async () => renderIssueView());
+    await flushReact();
+    await flushReact();
+
+    const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as {
+      onResolveRecoveryAction?: (outcome: "todo" | "done" | "in_review" | "false_positive_done" | "false_positive_in_review") => void;
+    } | undefined;
+    expect(props?.onResolveRecoveryAction).toBeDefined();
+    await act(async () => props!.onResolveRecoveryAction!("todo"));
+
+    const noteField = container.querySelector<HTMLTextAreaElement>(
+      `textarea[aria-label="Message to the original owner"]`,
+    );
+    expect(noteField).not.toBeNull();
+    expect(mockIssuesApi.resolveRecoveryAction).not.toHaveBeenCalled();
+
+    const note = "Continue the remaining work in the existing session and preserve completed work.";
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+    setValue?.call(noteField!, note);
+    noteField!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushReact();
+
+    returnFreshSnapshot = true;
+    const submit = container.querySelector<HTMLButtonElement>(
+      `[data-testid="recovery-status-repair-submit"]`,
+    );
+    expect(submit).not.toBeNull();
+    expect(submit!.disabled).toBe(false);
+    await act(async () => submit!.click());
+
+    await waitForAssertion(() => {
+      expect(mockIssuesApi.get).toHaveBeenCalled();
+      expect(mockIssuesApi.recoveryActions).toHaveBeenCalledWith(issue.identifier);
+      expect(mockIssuesApi.resolveRecoveryAction).toHaveBeenCalledExactlyOnceWith(
+        issue.identifier,
+        {
+          actionId: freshAction.id,
+          outcome: "restored",
+          sourceIssueStatus: "todo",
+          statusRepair: {
+            sourceUpdatedAt: freshIssue.updatedAt.toISOString(),
+            sourceStatus: "todo",
+            sourceStatusVersion: 9,
+            assigneeAgentId: "agent-1",
+            actionUpdatedAt: freshAction.updatedAt,
+            actionFingerprint: "fresh-action-fingerprint",
+          },
+          resolutionNote: note,
+        },
+      );
+    });
+  });
+
+  it("keeps non-retry recovery outcomes on the existing resolver", async () => {
+    const action = createExhaustedBoardRecoveryAction();
+    const issue = createIssue({ status: "todo", assigneeAgentId: "agent-1", activeRecoveryAction: action });
+    mockIssuesApi.get.mockResolvedValue(issue);
+    mockIssuesApi.resolveRecoveryAction.mockResolvedValue({
+      issue: { ...issue, status: "done", activeRecoveryAction: null },
+      recoveryAction: { ...action, status: "resolved", outcome: "owner_completed" },
+    });
+
+    await act(async () => renderIssueView());
+    await flushReact();
+    const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as {
+      onResolveRecoveryAction?: (outcome: "todo" | "done" | "in_review" | "false_positive_done" | "false_positive_in_review") => void;
+    } | undefined;
+    expect(props?.onResolveRecoveryAction).toBeDefined();
+    await act(async () => props!.onResolveRecoveryAction!("done"));
+
+    expect(mockIssuesApi.resolveRecoveryAction).toHaveBeenCalledWith(
+      issue.identifier,
+      { actionId: action.id, outcome: "restored", sourceIssueStatus: "done" },
+    );
   });
 
   it.each(["success", "failure", "pending question"])("connects the inline disposition retry to current state (%s)", async outcome => {

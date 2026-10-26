@@ -2939,6 +2939,35 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
     }
   });
 
+  it.each(["task_wide", "current_track"] as const)("commits an unlinked %s native blocker as one held todo without replay", async (scope) => {
+    const template = corpus.fixtures.find(candidate => candidate.mode === "native")!;
+    const seeded = await seedFixture({ ...template, id: `unlinked-native-${scope}`, given: { ...template.given, priorIssueStatus: "in_progress" } });
+    const assessment = { reportedDisposition: "blocked", objectiveClaimSatisfied: false,
+      objectiveSatisfied: false, allCriteriaSatisfied: false, verificationPassed: false,
+      hasFailedVerification: false, hasBlockingRemainingWork: true, summary: "Need the exact prerequisite",
+      contractRevisionMatches: true, criterionAssessments: [], verificationAssessments: [],
+      verificationCaveats: [], acceptedEvidenceRefs: [], missingRequirements: [], rejectedEvidence: [],
+      unverifiableEvidence: [], attentionRequests: [], ignoredAttentionRequests: [], continuation: null,
+      blocker: { boardOwned: false, scope, unblockAction: "Repair the exact prerequisite" } } satisfies NativeEvidenceAssessment;
+    const decision = resolveNativeFinalizerStatus({ assessment, terminalState: "succeeded", workspaceFinalizeStatus: "succeeded",
+      agentId, priorIssueStatus: "in_progress" });
+    const commit = (failpoint?: NativeStatusCommitFailpoint) => commitNativeStatusDecision({ db, companyId,
+      issueId: seeded.issueId, runId: seeded.runId, assessmentId: seeded.assessmentId,
+      priorStatus: "in_progress", priorStatusVersion: 0, priorDecisionId: null, decision, failpoint });
+    await expect(commit("status_projection")).rejects.toThrow();
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId))).toHaveLength(0);
+    expect((await issueService(db).getById(seeded.issueId))!.status).toBe("in_progress");
+    await commit();
+    expect((await commit()).replayed).toBe(true);
+    expect(await issueService(db).getById(seeded.issueId)).toMatchObject({ status: "todo", assigneeAgentId: agentId, statusVersion: 1 });
+    const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId));
+    expect(actions).toEqual([expect.objectContaining({ status: "active", ownerType: "board", returnOwnerAgentId: agentId,
+      kind: "deliberate_wait_without_target", nextAction: "Repair the exact prerequisite" })]);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, seeded.issueId))).toHaveLength(0);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
+  });
+
   it("fails the transaction closed for an unknown status effect", async () => {
     const fixture = corpus.fixtures.find((candidate) => candidate.mode === "native");
     if (!fixture) throw new Error("native corpus fixture missing");
