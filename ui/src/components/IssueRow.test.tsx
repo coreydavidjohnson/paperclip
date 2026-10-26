@@ -3,7 +3,7 @@
 import { act as reactAct } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
-import type { Issue } from "@paperclipai/shared";
+import type { Issue, IssueRelationIssueSummary } from "@paperclipai/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { IssueRow } from "./IssueRow";
 import { StatusIcon } from "./StatusIcon";
@@ -99,7 +99,7 @@ describe("IssueRow", () => {
 
   it.each(["task", "legacy"] as const)("shows real clickable blocker identifiers in %s rows", (presentation) => {
     const root = createRoot(container);
-    const blocker = { id: "blocker-1125", identifier: "PER-1125", title: "CI owner", status: "todo", priority: "high", assigneeAgentId: null, assigneeUserId: null };
+    const blocker: IssueRelationIssueSummary = { id: "blocker-1125", identifier: "PER-1125", title: "CI owner", status: "todo", priority: "high", assigneeAgentId: null, assigneeUserId: null };
     act(() => root.render(<IssueRow presentation={presentation} issue={createIssue({ status: "blocked", blockedBy: [blocker] })} />));
     const link = Array.from(container.querySelectorAll("a")).find(a => a.textContent === "PER-1125");
     expect(link).toBeDefined();

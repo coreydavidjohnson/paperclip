@@ -125,3 +125,10 @@ empty configuration otherwise. Do not change contention behavior or use a
 cast to hide either compiler refusal. The full compiler gate caught these
 errors after the earlier runtime diagnostics; neither diagnostic test passes
 nor runner preparation imply compiler or image qualification.
+
+The corrected server passed compilation in the next reserved build. The full
+recursive gate then found TS2322 in the blocker-display test fixture: its
+unannotated object widened status and priority to string. Type that existing
+fixture as IssueRelationIssueSummary; retain both row variants and all exact
+link assertions. This changes no product behavior and does not weaken the
+full typecheck gate. Native test and image qualification still remain open.
