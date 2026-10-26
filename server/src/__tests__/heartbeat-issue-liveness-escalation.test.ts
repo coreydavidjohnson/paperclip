@@ -652,7 +652,10 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       expect(second.escalated).toBe(0);
       expect(await db.select().from(agentWakeupRequests)).toHaveLength(1);
       expect(mockAdapterExecute).not.toHaveBeenCalled();
-      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "todo", assigneeAgentId: agentId });
+      expect((await db.select().from(issueRecoveryActions))[0]).toMatchObject({
+        ownerType: "board", returnOwnerAgentId: agentId, status: "escalated",
+      });
     } finally {
       await singleConnectionDb.$client.end({ timeout: 1 });
     }

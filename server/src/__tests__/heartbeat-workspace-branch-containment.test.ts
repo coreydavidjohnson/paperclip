@@ -661,7 +661,7 @@ async function expectContainedWorkspaceBranchFailure(input: {
   });
   const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
   expect(issueById.get(input.sourceIssueId)).toMatchObject({
-    status: "blocked",
+    status: "todo",
     executionRunId: null,
     checkoutRunId: null,
   });
@@ -1070,7 +1070,12 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       const [issue] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
       expect(issue).toMatchObject({ executionWorkspaceId: seeded.executionWorkspaceId,
         projectWorkspaceId: kind === "explicit_conflict" ? seeded.newWorkspaceId : null });
-      if (kind === "explicit_conflict" || kind === "unproven") expect(issue.status).toBe("blocked");
+      if (kind === "explicit_conflict" || kind === "unproven") {
+        expect(issue.status).toBe("todo");
+        expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId)))
+          .toEqual([expect.objectContaining({ ownerType: "board", returnOwnerAgentId: seeded.agentId,
+            kind: "workspace_validation", status: "active" })]);
+      }
       expect(await readFile(path.join(seeded.worktree, "retained.txt"), "utf8")).toBe("unexported original task edits\n");
       expect(await readFile(path.join(seeded.replacement, "replacement.txt"), "utf8")).toBe("replacement source must stay untouched\n");
     },
@@ -1100,7 +1105,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     expect(adapterExecute).not.toHaveBeenCalled();
     expect(mockCaptureRunFailure).not.toHaveBeenCalled();
     const [issue] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
-    expect(issue).toMatchObject({ status: "blocked", executionRunId: null, executionWorkspaceId: seeded.executionWorkspaceId });
+    expect(issue).toMatchObject({ status: "todo", assigneeAgentId: seeded.agentId, executionRunId: null, executionWorkspaceId: seeded.executionWorkspaceId });
     const comments = await db.select({ body: issueComments.body }).from(issueComments).where(eq(issueComments.issueId, seeded.issueId));
     expect(comments.map(comment => comment.body).join("\n")).toContain("shared project checkout that also holds another task's workspace");
     const actions = await db.select({ nextAction: issueRecoveryActions.nextAction }).from(issueRecoveryActions)

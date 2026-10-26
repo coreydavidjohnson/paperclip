@@ -395,7 +395,7 @@ const support = externalDatabaseUrl
       const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, source.issueId));
       expect(action).toMatchObject({ status: "resolved", outcome: "blocked" });
       if (status === "in_progress") expect(action!.evidence.managedCompressionBlock).toEqual({
-        runId: source.runId, statusVersion: task!.statusVersion, updatedAt: task!.updatedAt.toISOString(),
+        runId: source.runId, statusVersion: task!.statusVersion, status: "todo", updatedAt: task!.updatedAt.toISOString(),
       });
       else expect(action!.evidence).not.toHaveProperty("managedCompressionBlock");
     });
@@ -405,7 +405,7 @@ const support = externalDatabaseUrl
       await Promise.all([settleUnrecoverableExecutions(db), settleUnrecoverableExecutions(db)]);
       await settleUnrecoverableExecutions(db);
       const [task] = await db.select().from(issues).where(eq(issues.id, source.issueId));
-      expect(task).toMatchObject({ status: "blocked", assigneeAgentId: source.agentId, executionRunId: null, checkoutRunId: null });
+      expect(task).toMatchObject({ status: "todo", assigneeAgentId: source.agentId, executionRunId: null, checkoutRunId: null });
       const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, source.issueId));
       expect(actions).toHaveLength(1);
       expect(actions[0]).toMatchObject({ status: "resolved", outcome: "blocked", evidence: {
@@ -430,7 +430,7 @@ const support = externalDatabaseUrl
           await db.update(nativeRunFinalizations).set({ failureDetail: { replacementDenied: "uncertain_external_action" } }).where(eq(nativeRunFinalizations.runId, source.runId));
           await settleUnrecoverableExecutions(db);
           const [task] = await db.select().from(issues).where(eq(issues.id, source.issueId));
-          expect(task.status).toBe("blocked");
+          expect(task.status).toBe("todo");
         }
       }
       await db.update(issueRecoveryActions).set({ status: "resolved" }).where(inArray(issueRecoveryActions.sourceIssueId, sources.map(source => source.issueId)));
@@ -446,7 +446,7 @@ const support = externalDatabaseUrl
       expect(pending.status).toBe("active");
       await settleUnrecoverableExecutions(db);
       const [after] = await db.select().from(issues).where(eq(issues.id, source.issueId));
-      expect(after.status).toBe("blocked");
+      expect(after.status).toBe("todo");
       const logs = await db.select().from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, source.runId));
       expect(logs.filter(log => log.payload?.automaticRecovery === "preserve_without_replay_v1")).toHaveLength(1);
     });
@@ -538,7 +538,7 @@ const support = externalDatabaseUrl
         await settleUnrecoverableExecutions(db);
       }
       const [task] = await db.select().from(issues).where(eq(issues.id, source.issueId));
-      expect(task.status).toBe("blocked");
+      expect(task.status).toBe(status === "pending" ? "blocked" : "todo");
       const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, source.issueId));
       expect(actions).toHaveLength(1);
       const [action] = actions;

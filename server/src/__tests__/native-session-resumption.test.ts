@@ -256,7 +256,7 @@ describe("P6-25 pre-result native session recovery", () => {
       { runId: cancelledRunId, companyId, issueId, phase: "retryable_failure", attempt: 1, nextAttemptAt: new Date(0) },
       { runId: exhaustedRunId, companyId, issueId, phase: "terminal_failure", attempt: 3 },
       { runId: missingCheckpointRunId, companyId, issueId, phase: "retryable_failure", attempt: 1 },
-      { runId: pendingQuestionRunId, companyId, issueId: pendingQuestionRunId, phase: "retryable_failure", attempt: 1 },
+      { runId: pendingQuestionRunId, companyId, issueId: pendingQuestionRunId, phase: "retryable_failure", attempt: 1, nextAttemptAt: new Date("2100-01-01T00:00:00Z") },
       { runId: initialRunId, companyId, issueId, phase: "observed", attempt: 0 },
       {
         runId: bootstrapRetryRunId,
@@ -409,8 +409,8 @@ describe("P6-25 pre-result native session recovery", () => {
       dispatch: (claim) => dispatched.push(claim),
     })).resolves.toHaveLength(1);
     expect(dispatched).toEqual([{ runId, leaseOwner: expect.stringContaining("heartbeat-reaper:resume:") }]);
-    await expect(db.select().from(heartbeatRuns)).resolves.toHaveLength(8);
-    await expect(db.select().from(nativeRunFinalizations)).resolves.toHaveLength(8);
+    await expect(db.select().from(heartbeatRuns)).resolves.toHaveLength(fixtureRunIds.length);
+    await expect(db.select().from(nativeRunFinalizations)).resolves.toHaveLength(fixtureRunIds.length);
   });
 
   it("uses provider-neutral checkpoint-free bootstrap retry only when durable evidence proves no session existed", async () => {
@@ -573,8 +573,11 @@ describe("P6-25 pre-result native session recovery", () => {
 
   it("keeps a pending question as the real blocked wait during ambiguous native recovery", async () => {
     await db.insert(issueThreadInteractions).values({
-      companyId, issueId: pendingQuestionRunId, kind: "ask_user_questions", payload: { questions: [] } as never,
+      companyId, issueId: pendingQuestionRunId, kind: "ask_user_questions", sourceRunId: pendingQuestionRunId,
+      payload: { version: 1, questions: [{ id: "next_step", prompt: "Which next step must the agent use?" }] } as never,
     });
+    await db.update(nativeRunFinalizations).set({ nextAttemptAt: new Date(0) })
+      .where(eq(nativeRunFinalizations.runId, pendingQuestionRunId));
     await expect(claimNativeSessionResumptions({
       db, runnerInstanceId: "reaper", runIds: [pendingQuestionRunId],
     })).resolves.toEqual([]);
