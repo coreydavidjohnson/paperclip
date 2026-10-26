@@ -11,6 +11,12 @@ describe("legacy continuation authority", () => {
   it("requests agent repair for a successful process without a task disposition", () => {
     expect(decideLegacyContinuation(input)).toMatchObject({ kind: "enqueue", nextAttempt: 1 });
   });
+  it("PER-404 repairs bare blocked through the same bounded owner episode", () => {
+    const blocked = { ...input, issue: { ...input.issue!, status: "blocked" } };
+    expect(decideLegacyContinuation(blocked)).toMatchObject({ kind: "enqueue", nextAttempt: 1 });
+    expect(decideLegacyContinuation({ ...blocked, episode: { ...input.episode, attempt: 2 } }).kind).toBe("exhausted");
+    expect(decideLegacyContinuation({ ...blocked, gates: { ...input.gates, pendingWait: true } })).toEqual({ kind: "skip", reason: "durable_wait" });
+  });
   it.each(["done", "cancelled", "blocked", "in_review"])("respects persisted %s disposition", status => {
     expect(decideLegacyContinuation({ ...input, issue: { ...input.issue!, status } }).kind).toBe("skip");
   });

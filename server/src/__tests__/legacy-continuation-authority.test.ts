@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, agentWakeupRequests, activityLog, companies, createDb, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { agents, agentWakeupRequests, activityLog, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
 import { createChildIssueSchema } from "@paperclipai/shared";
 import { issueService } from "../services/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -11,7 +11,7 @@ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.j
 describe("legacy continuation persisted authority", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
-  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, 20_000);
+  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await db?.$client.end({ timeout: 0 }); await temporary?.cleanup(); });
   async function fixture(context: Record<string, unknown> = {}, continuationAttempt = 0) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
@@ -245,6 +245,45 @@ describe("legacy continuation persisted authority", () => {
     await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, f.issueId));
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
     expect(await f.runs()).toHaveLength(1);
+  });
+  it("PER-404 returns a bare-blocked task within one sweep without board action", async () => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(repair).toBeDefined();
+    expect(repair.agentId).toBe(f.agentId);
+    expect(repair.contextSnapshot).toMatchObject({ issueId: f.issueId, legacyDispositionEpisode: { id: f.runId, attempt: 1, maxAttempts: 2 } });
+    expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBeNull();
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(await f.runs()).toHaveLength(2);
+    expect((await f.actions())[0]).toMatchObject({ ownerType: "agent", attemptCount: 1 });
+  });
+  it.each(["descriptor", "dependency", "question", "approval"])("PER-404 preserves a blocked %s gate", async gate => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked", ...(gate === "descriptor" ? {
+      unblockDescriptor: { owner: "board" as const, action: "Provide credentials" },
+    } : {}) }).where(eq(issues.id, f.issueId));
+    if (gate === "dependency") {
+      const blockerId = randomUUID();
+      await db.insert(issues).values({ id: blockerId, companyId: f.companyId, title: "Real dependency", status: "todo" });
+      await db.insert(issueRelations).values({ companyId: f.companyId, issueId: blockerId, relatedIssueId: f.issueId, type: "blocks" });
+    }
+    if (gate === "question" || gate === "approval") await db.insert(issueThreadInteractions).values({
+      companyId: f.companyId, issueId: f.issueId, kind: gate === "question" ? "ask_user_questions" : "request_confirmation",
+      status: "pending", payload: { version: 1, prompt: "Human input required" },
+    });
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it.each(["failed", "interrupted", "native"])("PER-404 never replays a blocked %s source", async source => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.update(heartbeatRuns).set(source === "native" ? { runtimeMode: "native" } : { status: source }).where(eq(heartbeatRuns.id, f.runId));
+    await f.createRecovery().reconcileStrandedAssignedIssues();
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
   });
   it("the delayed sweep ignores old diagnostic labels and uses the same repair path", async () => {
     const f = await fixture();
