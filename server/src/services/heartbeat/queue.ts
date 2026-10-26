@@ -1,4 +1,4 @@
-import { assertRecoveryStatusWriteAllowed } from "../guarded-status-repair.js";
+import { assertRecoveryStatusWriteAllowed, isSupportedBoardTodoHandback } from "../guarded-status-repair.js";
 import { admitReconciledUserContinuation } from "../execution-recovery-resolution.js";
 import { startClaimedLegacyControllerLease } from "../legacy-controller-lease.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
@@ -3179,7 +3179,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             const receipt = parseObject(action?.evidence.guardedStatusRepair);
             if (!action || action.status !== "resolved" || action.outcome !== "handed_back" ||
                 action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
-                action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
                 action.returnOwnerAgentId !== agentId || receipt.actorType !== "user" ||
                 opts.requestedByActorType !== "user" || opts.requestedByActorId !== receipt.actorId ||
                 source !== "automation" || triggerDetail !== "system" || reason !== "issue_commented" ||
@@ -3200,7 +3199,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               return run ? { kind: "replayed" as const, run } : { kind: "deferred" as const };
             }
             const [current] = await tx.select().from(issues).where(eq(issues.id, issue.id));
-            if (receipt.delivery !== "pending" || current.status !== "todo" || current.assigneeAgentId !== agentId ||
+            // An already committed wake above is adoption, not a new turn. Only
+            // a new admission needs the current native source projection.
+            const supportedProjection = parseObject(receipt.request).mode === "board_todo_handback"
+              ? await isSupportedBoardTodoHandback(tx as unknown as Db, current, action)
+              : action.evidence.terminalReason === "unchanged_source_state_exhausted";
+            if (!supportedProjection || receipt.delivery !== "pending" || current.status !== "todo" || current.assigneeAgentId !== agentId ||
                 current.assigneeUserId || current.hiddenAt || current.updatedAt.toISOString() !== receipt.sourceUpdatedAt ||
                 current.statusVersion !== receipt.sourceStatusVersion) {
               await tx.update(issueRecoveryActions).set({ evidence: sql`jsonb_set(${issueRecoveryActions.evidence},

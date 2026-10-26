@@ -218,6 +218,8 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/issue-review-attention.test.ts \
     src/__tests__/decision-queues-routes.test.ts \
     src/__tests__/authorization-service.test.ts \
+    src/__tests__/agent-auth-middleware.test.ts \
+    src/__tests__/agent-run-authentication.test.ts \
     src/__tests__/decision-retention-service.test.ts \
     src/__tests__/recovery-run-query-db.test.ts \
     src/__tests__/issue-recovery-actions.test.ts \

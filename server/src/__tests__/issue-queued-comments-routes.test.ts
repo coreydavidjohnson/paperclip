@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { createServer, request as httpRequest } from "node:http";
 import { runningProcesses } from "../adapters/index.js";
 import { createHash, randomUUID } from "node:crypto";
 import express, { type ErrorRequestHandler } from "express";
@@ -370,6 +371,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
 
   async function nativeHandoffClient(
     target: "human" | "report_agent" = "human", credential: "agent_jwt" | "agent_key" = "agent_jwt",
+    observeRequest?: express.RequestHandler,
   ) {
     const seeded = await seedQueue();
     // Real bearer auth requires an existing responsible user and company membership.
@@ -443,18 +445,25 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(token).toBeTruthy();
     const client = express();
     client.use(express.json());
+    client.use((_req, res, next) => {
+      res.locals.handoffRequestId = randomUUID();
+      res.setHeader("X-Handoff-Test-Request-Id", res.locals.handoffRequestId);
+      next();
+    });
+    if (observeRequest) client.use(observeRequest);
     client.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession: async () => null }));
     client.use("/api", issueRoutes(db, {} as any, {}));
-    const rawErrors: unknown[] = [];
-    const captureRouteError: ErrorRequestHandler = (error, _req, _res, next) => {
-      rawErrors.push(error instanceof Error
-        ? { name: error.name, message: error.message, stack: error.stack }
-        : error);
+    const rawErrors: { requestId: string; method: string; path: string; error: unknown }[] = [];
+    const captureRouteError: ErrorRequestHandler = (error, req, res, next) => {
+      rawErrors.push({ requestId: res.locals.handoffRequestId, method: req.method, path: req.originalUrl,
+        error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : error });
       next(error);
     };
+    const errorsForRequest = (requestId: string | undefined) => rawErrors.filter(error => error.requestId === requestId);
+    const errorsForResponse = (response: request.Response) => errorsForRequest(response.headers["x-handoff-test-request-id"]);
     client.use(captureRouteError);
     client.use(errorHandler);
-    return { ...seeded, identity, client, rawErrors, assignment, reportAgentId, keyId, authorization: `Bearer ${token}` };
+    return { ...seeded, identity, client, errorsForRequest, errorsForResponse, assignment, reportAgentId, keyId, authorization: `Bearer ${token}` };
   }
 
   it.each((["human", "report_agent"] as const).flatMap(target => [false, true].map(withOverrides => ({ target, withOverrides }))))(
@@ -493,7 +502,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
     // Check cancellation before the HTTP assertion so a RED distinguishes
     // request admission failure from a failure after a confirmed stop.
-    const responseDiagnostic = `HTTP ${response.status}: ${JSON.stringify({ body: response.body, errors: seeded.rawErrors })}`;
+    const responseDiagnostic = `HTTP ${response.status}: ${JSON.stringify({ body: response.body, errors: seeded.errorsForResponse(response) })}`;
     expect(cancel, responseDiagnostic).toHaveBeenCalledTimes(1);
     expect(run, responseDiagnostic).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned",
       activeIdentityContextId: seeded.identity.id, responsibleUserId: "queue-owner",
@@ -560,7 +569,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
         comment: "This stale handoff must not land.",
         assigneeAdapterOverrides: { useProjectWorkspace: false },
       });
-    expect(response.status, JSON.stringify({ body: response.body, errors: seeded.rawErrors }))
+    expect(response.status, JSON.stringify({ body: response.body, errors: seeded.errorsForResponse(response) }))
       .toBe(mode === "changed_owner" ? 409 : 403);
     if (mode === "changed_owner") expect(response.body.details?.code).toBe("issue_write_assignee_run_lock");
     else expect(response.body.code).toBe("agent_run_cancelled");
@@ -569,8 +578,8 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(cancel).not.toHaveBeenCalled();
   });
 
-  async function ownedAdapterHandoffClient() {
-    const seeded = await nativeHandoffClient("report_agent", "agent_key");
+  async function ownedAdapterHandoffClient(observeRequest?: express.RequestHandler) {
+    const seeded = await nativeHandoffClient("report_agent", "agent_key", observeRequest);
     await db.update(agents).set({ adapterType: "omnigent" }).where(eq(agents.id, seeded.agentId));
     await db.update(heartbeatRuns).set({
       runtimeMode: "legacy", runtimeModeResolvedAt: new Date(), nativeIssueId: null,
@@ -622,7 +631,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     try {
       const boundary = await Promise.race([
         seeded.stopRequested.then(() => ({ phase: "stop_requested" })),
-        handoff.then(response => ({ phase: "response", status: response.status, body: response.body, errors: seeded.rawErrors })),
+        handoff.then(response => ({ phase: "response", status: response.status, body: response.body, errors: seeded.errorsForResponse(response) })),
       ]);
       expect(boundary, JSON.stringify(boundary)).toEqual({ phase: "stop_requested" });
       expect(adapterExecutionControls.get(seeded.runId)).toBe(seeded.control);
@@ -642,7 +651,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(before);
       seeded.control.finish();
       const response = await handoff;
-      const diagnostic = `HTTP ${response.status}: ${JSON.stringify({ body: response.body, errors: seeded.rawErrors })}`;
+      const diagnostic = `HTTP ${response.status}: ${JSON.stringify({ body: response.body, errors: seeded.errorsForResponse(response) })}`;
       expect(response.status, diagnostic).toBe(200);
       expect((await db.select().from(agentApiKeys).where(eq(agentApiKeys.id, seeded.keyId!)))[0].lastUsedAt).toBeInstanceOf(Date);
       const [task] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
@@ -658,17 +667,124 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       await seeded.waitForQueuedHandoff();
       const replay = await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
         .set("Authorization", seeded.authorization).set("X-Paperclip-Run-Id", seeded.runId).send(body);
-      expect.soft(replay.status, JSON.stringify({ body: replay.body, errors: seeded.rawErrors })).toBe(403);
+      expect.soft(replay.status, JSON.stringify({ body: replay.body, errors: seeded.errorsForResponse(replay) })).toBe(403);
       const late = await request(seeded.client).post(`/api/issues/${seeded.issueId}/comments`)
         .set("Authorization", seeded.authorization).set("X-Paperclip-Run-Id", seeded.runId)
         .send({ body: "Late report from the stopped Agent Tools turn" });
-      expect.soft(late.status, JSON.stringify({ body: late.body, errors: seeded.rawErrors })).toBe(403);
+      expect.soft(late.status, JSON.stringify({ body: late.body, errors: seeded.errorsForResponse(late) })).toBe(403);
       expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(task);
       expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId)).orderBy(issueComments.id)).toEqual(comments);
       expect(nativeCancel).not.toHaveBeenCalled();
     } finally {
       seeded.control.finish();
       try { await handoff; } finally { adapterExecutionControls.delete(seeded.runId); }
+    }
+  });
+
+  it("commits agent-key owned-adapter HTTP handoff after client disconnect between Stop acknowledgement and settlement", async () => {
+    let disconnected = false;
+    let observedRequest = false;
+    let requestId: string | undefined;
+    const responseAttempts: { status: number; body: unknown }[] = [];
+    const seeded = await ownedAdapterHandoffClient((req, res, next) => {
+      if (req.header("X-Handoff-Test-Phase") === "disconnect") {
+        observedRequest = true;
+        requestId = res.locals.handoffRequestId;
+        res.on("close", () => { disconnected = !res.writableFinished; });
+        // Observe the original handler's completion even without a client socket.
+        const json = res.json.bind(res);
+        res.json = body => {
+          responseAttempts.push({ status: res.statusCode, body });
+          return json(body);
+        };
+      }
+      next();
+    });
+    const server = createServer(seeded.client);
+    const body = { ...seeded.assignment, status: "todo",
+      comment: "The admitted same-task handoff must survive its tool client disconnecting.",
+      assigneeAdapterOverrides: { useProjectWorkspace: false },
+    };
+    const [before] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
+    const commentsBefore = await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId)).orderBy(issueComments.id);
+    let outgoing: ReturnType<typeof httpRequest> | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected an isolated HTTP test server");
+      const payload = JSON.stringify(body);
+      outgoing = httpRequest({ host: "127.0.0.1", port: address.port,
+        path: `/api/issues/${seeded.issueId}`, method: "PATCH", agent: false,
+        headers: { Authorization: seeded.authorization, "X-Paperclip-Run-Id": seeded.runId,
+          "X-Handoff-Test-Phase": "disconnect", "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
+      });
+      const clientResult = new Promise<{ event: string; status?: number; error?: string }>(resolve => {
+        outgoing!.on("response", response => {
+          response.resume();
+          resolve({ event: "response", status: response.statusCode });
+        });
+        outgoing!.on("error", error => resolve({ event: "error", error: error.message }));
+        outgoing!.on("close", () => resolve({ event: "close" }));
+      });
+      outgoing.end(payload);
+      const boundary = await Promise.race([
+        seeded.stopRequested.then(() => ({ phase: "stop_requested" })),
+        clientResult.then(result => ({ phase: "client_result", ...result })),
+      ]);
+      expect(boundary, JSON.stringify({ boundary, responseAttempts })).toEqual({ phase: "stop_requested" });
+      const stopped = await seeded.acknowledgeStop();
+      expect(stopped).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned", resultJson: {
+        reassignmentStopConfirmed: true, issueMutationStopId: expect.any(String), executionCancellation: { state: "acknowledged" },
+      } });
+      expect(responseAttempts).toEqual([]);
+      expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(before);
+      outgoing.destroy();
+      expect((await clientResult).event).not.toBe("response");
+      await vi.waitFor(() => expect(disconnected).toBe(true), { timeout: 5_000 });
+      // The actual socket is gone while owner settlement is still held.
+      expect(responseAttempts).toEqual([]);
+      expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(before);
+      expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId)).orderBy(issueComments.id)).toEqual(commentsBefore);
+      seeded.control.finish();
+      await vi.waitFor(() => expect(responseAttempts,
+        JSON.stringify({ responseAttempts, errors: seeded.errorsForRequest(requestId) })).toEqual([
+        { status: 200, body: expect.objectContaining({ id: seeded.issueId, ...seeded.assignment, status: "todo" }) },
+      ]), { timeout: 5_000 });
+      const [task] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
+      expect(task).toMatchObject({ ...seeded.assignment, status: "todo", checkoutRunId: null, executionRunId: null,
+        assigneeAdapterOverrides: { useProjectWorkspace: false },
+      });
+      const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId)).orderBy(issueComments.id);
+      expect(comments).toHaveLength(commentsBefore.length + 1);
+      expect(comments.filter(comment => comment.body === body.comment)).toEqual([
+        expect.objectContaining({ authorType: "agent", authorAgentId: seeded.agentId,
+          createdByRunId: seeded.runId, onBehalfOfUserId: "queue-owner" }),
+      ]);
+      expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId))).toEqual([]);
+      await seeded.waitForQueuedHandoff();
+      const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, seeded.reportAgentId!));
+      expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(1);
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId)))[0])
+        .toMatchObject({ status: "cancelled", errorCode: "issue_reassigned",
+          resultJson: { issueMutationStopId: stopped!.resultJson!.issueMutationStopId } });
+      const replay = await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
+        .set("Authorization", seeded.authorization).set("X-Paperclip-Run-Id", seeded.runId).send(body);
+      expect(replay.status, JSON.stringify({ body: replay.body, errors: seeded.errorsForResponse(replay) })).toBe(403);
+      expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(task);
+      expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId)).orderBy(issueComments.id)).toEqual(comments);
+    } finally {
+      outgoing?.destroy();
+      seeded.control.finish();
+      try {
+        // Drain the admitted handler before this case's database is truncated.
+        if (observedRequest) await vi.waitFor(() => expect(responseAttempts.length).toBeGreaterThan(0), { timeout: 5_000 });
+      } finally {
+        adapterExecutionControls.delete(seeded.runId);
+        await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); });
+      }
     }
   });
 
@@ -683,11 +799,17 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
         .where(eq(issues.id, seeded.issueId));
     } else {
       await db.update(heartbeatRuns).set(mode === "cancelled"
-        ? { status: "cancelled", errorCode: "issue_reassigned", resultJson: {
+        ? { status: "cancelled", finishedAt: new Date(), errorCode: "issue_reassigned", resultJson: {
           reassignmentStopConfirmed: true, issueMutationStopId: randomUUID(), executionCancellation: { state: "acknowledged" },
         } }
         : { resultJson: { executionCancellation: { state: "requested" } } })
         .where(eq(heartbeatRuns.id, seeded.runId));
+    }
+    if (mode === "cancelled") {
+      // Model completed owner settlement, not stale terminal locks whose normal
+      // cleanup is independent of assignment/status mutation admission.
+      await db.update(issues).set({ checkoutRunId: null, executionRunId: null,
+        executionAgentNameKey: null, executionLockedAt: null }).where(eq(issues.id, seeded.issueId));
     }
     const [before] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
     const [runBefore] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
@@ -710,7 +832,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       }
       const response = await handoff;
       if (response.status === 200) await seeded.waitForQueuedHandoff();
-      const diagnostic = `HTTP ${response.status}: ${JSON.stringify({ body: response.body, errors: seeded.rawErrors, phase: boundary.phase })}`;
+      const diagnostic = `HTTP ${response.status}: ${JSON.stringify({ body: response.body, errors: seeded.errorsForResponse(response), phase: boundary.phase })}`;
       expect.soft(response.status, diagnostic).toBe(mode === "changed_owner" ? 409 : 403);
       if (mode === "changed_owner") expect.soft(response.body.details?.code, diagnostic).toBe("issue_write_assignee_run_lock");
       else expect.soft(response.body.code ?? response.body.details?.code, diagnostic).toBe("agent_run_cancelled");

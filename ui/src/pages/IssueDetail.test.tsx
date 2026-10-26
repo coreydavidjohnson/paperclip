@@ -2800,9 +2800,9 @@ describe("IssueDetail", () => {
 
     await waitForAssertion(() => {
       expect(mockIssuesApi.get).toHaveBeenCalled();
-      expect(mockIssuesApi.recoveryActions).toHaveBeenCalledWith(issue.identifier);
+      expect(mockIssuesApi.recoveryActions).toHaveBeenCalledWith(sourceIssue.identifier);
       expect(mockIssuesApi.resolveRecoveryAction).toHaveBeenCalledExactlyOnceWith(
-        issue.identifier,
+        sourceIssue.identifier,
         {
           actionId: freshAction.id,
           outcome: "restored",
@@ -2819,6 +2819,129 @@ describe("IssueDetail", () => {
         },
       );
     });
+  });
+
+  it("sends board_todo_handback mode for a Board todo hold with complete native result proof", async () => {
+    const evidence = {
+      latestRunId: "11111111-1111-4111-8111-111111111111",
+      nativeResultId: "22222222-2222-4222-8222-222222222222",
+      completionContractId: "33333333-3333-4333-8333-333333333333",
+    };
+    const storedAction = createExhaustedBoardRecoveryAction({ evidence });
+    const sourceIssue = {
+      ...createIssue({ status: "todo", assigneeAgentId: "agent-1", activeRecoveryAction: storedAction }),
+      statusVersion: 4,
+    } as Issue & { statusVersion: number };
+    const freshAction = createExhaustedBoardRecoveryAction({
+      evidence,
+      fingerprint: "fresh-todo-handback-fingerprint",
+      updatedAt: "2026-10-26T12:05:00.000Z",
+    });
+    const freshIssue = {
+      ...sourceIssue,
+      updatedAt: new Date("2026-10-26T12:05:30.000Z"),
+      statusVersion: 9,
+      activeRecoveryAction: freshAction,
+    };
+    let returnFreshSnapshot = false;
+    mockIssuesApi.get.mockImplementation(async () => returnFreshSnapshot ? freshIssue : sourceIssue);
+    mockIssuesApi.recoveryActions.mockResolvedValue({ active: freshAction, actions: [freshAction] });
+    mockIssuesApi.resolveRecoveryAction.mockResolvedValue({
+      issue: { ...freshIssue, status: "todo", activeRecoveryAction: null },
+      recoveryAction: { ...freshAction, status: "resolved", outcome: "handed_back" },
+    });
+
+    await act(async () => renderIssueView());
+    await flushReact();
+    await flushReact();
+
+    const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as {
+      onResolveRecoveryAction?: (outcome: "todo" | "done" | "in_review" | "false_positive_done" | "false_positive_in_review") => void;
+    } | undefined;
+    expect(props?.onResolveRecoveryAction).toBeDefined();
+    await act(async () => props!.onResolveRecoveryAction!("todo"));
+
+    const noteField = container.querySelector<HTMLTextAreaElement>(
+      `textarea[aria-label="Message to the original owner"]`,
+    );
+    expect(noteField).not.toBeNull();
+    const note = "Continue the existing task with the verified native result.";
+    const setValue = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
+    setValue?.call(noteField!, note);
+    noteField!.dispatchEvent(new Event("input", { bubbles: true }));
+    await flushReact();
+
+    returnFreshSnapshot = true;
+    const submit = container.querySelector<HTMLButtonElement>(
+      `[data-testid="recovery-status-repair-submit"]`,
+    );
+    expect(submit).not.toBeNull();
+    expect(submit!.disabled).toBe(false);
+    await act(async () => submit!.click());
+
+    await waitForAssertion(() => {
+      expect(mockIssuesApi.resolveRecoveryAction).toHaveBeenCalledExactlyOnceWith(
+        sourceIssue.identifier,
+        expect.objectContaining({
+          actionId: freshAction.id,
+          outcome: "restored",
+          sourceIssueStatus: "todo",
+          statusRepair: expect.objectContaining({
+            mode: "board_todo_handback",
+            sourceUpdatedAt: freshIssue.updatedAt.toISOString(),
+            sourceStatus: "todo",
+            sourceStatusVersion: 9,
+            assigneeAgentId: "agent-1",
+            actionUpdatedAt: freshAction.updatedAt,
+            actionFingerprint: "fresh-todo-handback-fingerprint",
+          }),
+          resolutionNote: note,
+        }),
+      );
+    });
+  });
+
+  it("offers Board todo handback for UUID run and decision evidence", async () => {
+    const action = createExhaustedBoardRecoveryAction({
+      evidence: {
+        runId: "11111111-1111-4111-8111-111111111111",
+        decisionId: "22222222-2222-4222-8222-222222222222",
+      },
+    });
+    mockIssuesApi.get.mockResolvedValue(createIssue({
+      status: "todo",
+      assigneeAgentId: "agent-1",
+      activeRecoveryAction: action,
+    }));
+
+    await act(async () => renderIssueView());
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Board decision required");
+    expect(container.querySelector(`[data-testid="recovery-action-resolve-trigger"]`)).not.toBeNull();
+  });
+
+  it("keeps an unproven Board todo hold visible without offering handback", async () => {
+    const action = createExhaustedBoardRecoveryAction({
+      evidence: {
+        latestRunId: "11111111-1111-4111-8111-111111111111",
+        nativeResultId: "22222222-2222-4222-8222-222222222222",
+        completionContractId: "not-a-uuid",
+      },
+    });
+    mockIssuesApi.get.mockResolvedValue(createIssue({
+      status: "todo",
+      assigneeAgentId: "agent-1",
+      activeRecoveryAction: action,
+    }));
+
+    await act(async () => renderIssueView());
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("Board decision required");
+    expect(container.querySelector(`[data-testid="recovery-action-resolve-trigger"]`)).toBeNull();
   });
 
   it("keeps non-retry recovery outcomes on the existing resolver", async () => {

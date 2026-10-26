@@ -1,3 +1,4 @@
+import { isSupportedBoardTodoHandback } from "../services/guarded-status-repair.js";
 import { dismissAutomaticCompletionReviews } from "../services/native-runtime/automatic-completion-reviews.js";
 import * as childCompletionDelivery from "../services/native-runtime/native-child-completion-delivery.js";
 import { nativeCompletionFeedback } from "../services/native-runtime/native-completion-feedback.js";
@@ -2964,6 +2965,10 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
     const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId));
     expect(actions).toEqual([expect.objectContaining({ status: "active", ownerType: "board", returnOwnerAgentId: agentId,
       kind: "deliberate_wait_without_target", nextAction: "Repair the exact prerequisite" })]);
+    const [current] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
+    expect(await isSupportedBoardTodoHandback(db, current!, actions[0]!)).toBe(true);
+    expect(await isSupportedBoardTodoHandback(db, current!, { ...actions[0]!, evidence: {} })).toBe(false);
+
     expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, seeded.issueId))).toHaveLength(0);
     const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
     expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);

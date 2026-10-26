@@ -33,6 +33,24 @@ must still own the task. A stopped/finished source, different action, changed
 snapshot, pending card/approval, unresolved dependency, unavailable owner or
 active execution refuses the entire repair without partial status/action edits.
 
+## Proven native todo hand-back
+
+A native run can report an unlinked blocker without supplying a real prerequisite
+or pending card. The strict wait invariant leaves that task `todo` under its
+actual Board recovery action, not under a fabricated question or dependency.
+
+For this source only, the Board can add `"mode": "board_todo_handback"` inside
+`statusRepair` and use the same exact snapshot fields and short continuation
+note. The source must already be `todo`, with the original owner unchanged.
+The server validates the recorded native decision/effect or accepted finalized
+result and completion contract against this exact action. An unproven generic
+Board hold does not qualify. Omitting `mode` retains the exhausted-repair
+contract above; do not manufacture exhausted terminal evidence.
+
+Both modes keep the same approval, question, dependency, pause, budget and
+execution gates, even when the source remains `todo`. They use the same durable
+normal continuation below. Neither mode authorizes replay of unknown effects.
+
 ## Status writes and replay
 
 Ordinary status writes through the common service refuse this exact escalation

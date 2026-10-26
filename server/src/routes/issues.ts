@@ -1,4 +1,4 @@
-import { deliverGuardedStatusRepairs } from "../services/guarded-status-repair.js";
+import { deliverGuardedStatusRepairs, isSupportedBoardTodoHandback } from "../services/guarded-status-repair.js";
 import { isDeepStrictEqual } from "node:util";
 import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
 import { managedCompressionBlockUnchanged } from "../services/managed-compression-block.js";
@@ -9660,8 +9660,11 @@ export function issueRoutes(
         if (statusRepair) {
           const action = workspaceRepairAction;
           const stale = () => conflict("The task or recovery action changed. Refresh before repairing its status.", { code: "recovery_status_repair_stale" });
+          const supportedProjection = action && (statusRepair.mode === "board_todo_handback"
+            ? await isSupportedBoardTodoHandback(tx as unknown as Db, lockedIssue, action)
+            : action.evidence.terminalReason === "unchanged_source_state_exhausted");
           if (!action || action.id !== actionId || action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
-              action.wakePolicy?.type !== "board_escalation" || action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+              action.wakePolicy?.type !== "board_escalation" || !supportedProjection ||
               action.returnOwnerAgentId !== statusRepair.assigneeAgentId || lockedIssue.assigneeAgentId !== statusRepair.assigneeAgentId ||
               lockedIssue.assigneeUserId || !["blocked", "in_progress", "todo"].includes(statusRepair.sourceStatus)) throw stale();
           const receipt = parseObject(action.evidence.guardedStatusRepair);
@@ -10104,22 +10107,17 @@ export function issueRoutes(
           }
         }
 
+        const safeHandBack =
+          outcome === "restored" && sourceIssueStatus === "todo" &&
+          activeRecoveryAction.returnOwnerAgentId != null &&
+          lockedIssue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId;
+        // A same-status hand-back settles a real execution gate too. It must
+        // not evade approvals, pause/Stop or the recorded owner's authority.
+        if (safeHandBack && !statusRepair) {
+          await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: activeRecoveryAction });
+        }
         if (sourceStatusChanged) {
-          const safeHandBack =
-            outcome === "restored" &&
-            sourceIssueStatus === "todo" &&
-            activeRecoveryAction.returnOwnerAgentId != null &&
-            lockedIssue.assigneeAgentId ===
-              activeRecoveryAction.returnOwnerAgentId;
-          if (safeHandBack) {
-            await assertSafeRecoveryHandBackGates({
-              req,
-              issue: lockedIssue,
-              recoveryAction: activeRecoveryAction,
-            });
-          } else {
-            await requireRecoverySourceMutationAuthority(req, lockedIssue);
-          }
+          if (!safeHandBack) await requireRecoverySourceMutationAuthority(req, lockedIssue);
 
           if (
             lockedIssue.status === "in_review" &&

@@ -22,6 +22,11 @@ import {
   heartbeatRuns,
   heartbeatRunEvents,
   issueComments,
+  completionContracts,
+  nativeRunResults,
+  nativeRunFinalizations,
+  workAssessments,
+  statusDecisions,
   issueInboxArchives,
   issueRecoveryActions,
   issueRelations,
@@ -2996,20 +3001,55 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     } };
   }
 
-  it("PER-626 settles a nonexhausted Board todo hold through exact normal continuation", async () => {
-    const { companyId, sourceIssueId, coderId, action } = await seedTrappedDisposition();
+  async function seedNativeBoardTodoHold() {
+    const fixture = await seedTrappedDisposition();
+    const { companyId, sourceIssueId, coderId, action } = fixture;
     const [source] = await db.update(issues).set({ status: "todo" })
       .where(eq(issues.id, sourceIssueId)).returning();
+    const runId = randomUUID(), resultId = randomUUID(), contractId = randomUUID(), assessmentId = randomUUID(), decisionId = randomUUID();
+    await db.insert(completionContracts).values({ id: contractId, companyId, issueId: sourceIssueId,
+      revision: 1, schemaVersion: "v1", policyVersion: "test", risk: "normal", completionAuthority: "agent",
+      incompleteCriteriaPolicy: "continue", contractJson: {}, canonicalSha256: "a".repeat(64),
+      createdByActorType: "system", createdByActorId: "test" });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: coderId, nativeIssueId: sourceIssueId,
+      runtimeMode: "native", status: "succeeded", completionContractId: contractId });
+    await db.insert(nativeRunResults).values({ id: resultId, companyId, issueId: sourceIssueId, runId,
+      completionContractId: contractId, serverFingerprint: "todo-handback", schemaStatus: "accepted",
+      canonicalSha256: "b".repeat(64), resultJson: {
+        result: { schema: "paperclip.run_result.v1", reportedWorkDisposition: "blocked",
+          blocker: { scope: "task_wide", unblockAction: "Verify the specific request, then continue the existing task." } },
+        terminal: { runTerminalState: "succeeded", reportedWorkDisposition: "blocked" },
+      } });
+    await db.insert(workAssessments).values({ id: assessmentId, companyId, issueId: sourceIssueId, runId,
+      contractId, resultId, triggerKind: "native_result", triggerActorCompanyId: companyId,
+      priorIssueStatus: "in_progress", priorStatusVersion: 0, policyVersion: "test", assessmentJson: {}, inputDigest: "c".repeat(64) });
+    await db.insert(statusDecisions).values({ id: decisionId, companyId, issueId: sourceIssueId, runId,
+      assessmentId, decisionVersion: 1, policyVersion: "test", fromStatus: "in_progress", toStatus: "in_progress",
+      reasonCode: "native_blocked_wait", decisionJson: {}, decisionDigest: "d".repeat(64), applicationState: "applied" });
+    await db.insert(nativeRunFinalizations).values({ runId, companyId, issueId: sourceIssueId,
+      resultId, assessmentId, decisionId, phase: "committed" });
+    const [projected] = await db.update(issues).set({ lastStatusDecisionId: decisionId,
+      unblockDescriptor: { owner: "board", action: "Verify the specific request, then continue the existing task." } })
+      .where(eq(issues.id, sourceIssueId)).returning();
     const [hold] = await db.update(issueRecoveryActions).set({
-      evidence: { runId: randomUUID(), decisionId: randomUUID() },
+      evidence: { latestRunId: runId, nativeResultId: resultId, completionContractId: contractId },
+      fingerprint: `native-blocked:${companyId}:${sourceIssueId}:${resultId}`,
+      previousOwnerAgentId: coderId, wakePolicy: { type: "board_escalation", preservesSourceAssignee: true },
       nextAction: "Verify the specific request, then continue the existing task.",
     }).where(eq(issueRecoveryActions.id, action.id)).returning();
+    return { ...fixture, sourceIssue: projected, action: hold, repair: {
+      mode: "board_todo_handback" as const, sourceUpdatedAt: projected.updatedAt.toISOString(), sourceStatus: projected.status,
+      sourceStatusVersion: projected.statusVersion, assigneeAgentId: coderId,
+      actionUpdatedAt: hold.updatedAt.toISOString(), actionFingerprint: hold.fingerprint,
+    } };
+  }
+
+  it("PER-626 settles a nonexhausted Board todo hold through exact normal continuation", async () => {
+    const { sourceIssueId, coderId, action: hold, repair } = await seedNativeBoardTodoHold();
     const wake = vi.fn(async () => ({ id: randomUUID() }));
     const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
     const body = { actionId: hold.id, outcome: "restored", sourceIssueStatus: "todo",
-      statusRepair: { sourceUpdatedAt: source.updatedAt.toISOString(), sourceStatus: source.status,
-        sourceStatusVersion: source.statusVersion, assigneeAgentId: coderId,
-        actionUpdatedAt: hold.updatedAt.toISOString(), actionFingerprint: hold.fingerprint },
+      statusRepair: repair,
       resolutionNote: "The specific request is verified. Continue this task in the saved session." };
     const first = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
     expect(first.body.issue).toMatchObject({ status: "todo", assigneeAgentId: coderId, activeRecoveryAction: null });
@@ -3026,6 +3066,64 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId))).toEqual([]);
     expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, hold.id)))[0].evidence)
       .not.toHaveProperty("terminalReason");
+  });
+
+  it.each(["owner", "proof", "assessment", "interaction", "dependency", "stage"] as const)("PER-626 refuses a %s change during native todo hand-back", async (gate) => {
+    const { companyId, sourceIssueId, coderId, action, repair } = await seedNativeBoardTodoHold();
+    if (gate === "owner") await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, sourceIssueId));
+    if (gate === "proof") await db.update(issueRecoveryActions).set({ evidence: {} }).where(eq(issueRecoveryActions.id, action.id));
+    if (gate === "assessment") await db.update(workAssessments).set({ triggerKind: "human_comment" }).where(eq(workAssessments.issueId, sourceIssueId));
+    if (gate === "interaction") await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+      kind: "request_confirmation", payload: { version: 1, prompt: "Confirm the protected action." } });
+    if (gate === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Exact prerequisite", status: "todo" }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: sourceIssueId, type: "blocks" });
+    }
+    if (gate === "stage") await db.update(issues).set({ executionState: {
+      status: "pending", currentStageId: randomUUID(), currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: coderId, userId: null },
+      returnAssignee: { type: "agent", agentId: coderId, userId: null }, reviewRequest: null,
+      completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+    } }).where(eq(issues.id, sourceIssueId));
+    const before = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const held = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const wake = vi.fn(async () => null);
+    await request(createApp(undefined, { recoveryActionEnqueueWakeup: wake })).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
+        resolutionNote: "Continue only after all existing gates pass." }).expect(409);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(before);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(held);
+    expect(wake).not.toHaveBeenCalled();
+  });
+
+  async function seedOrdinaryBoardTodoHold(kind: "missing_disposition" | "workspace_validation") {
+    const fixture = await seedTrappedDisposition();
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, fixture.sourceIssueId));
+    const [action] = await db.update(issueRecoveryActions).set({ kind,
+      cause: kind === "missing_disposition" ? "issue_review_path_lost" : "workspace_validation_failed",
+      evidence: {}, previousOwnerAgentId: fixture.coderId,
+      fingerprint: `ordinary-todo:${kind}:${fixture.sourceIssueId}`,
+    }).where(eq(issueRecoveryActions.id, fixture.action.id)).returning();
+    return { ...fixture, action, repair: undefined };
+  }
+
+  it.each(["missing_disposition", "workspace_validation"] as const)(
+    "PER-626 durably continues a restored same-status Board %s hold", async kind => {
+    const { sourceIssueId, coderId, action } = await seedOrdinaryBoardTodoHold(kind);
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action.id, outcome: "restored", sourceIssueStatus: "todo" };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(wake).toHaveBeenCalledExactlyOnceWith(coderId, expect.objectContaining({
+      reason: "issue_commented", idempotencyKey: `guarded-status-repair:${action.id}`,
+      contextSnapshot: expect.objectContaining({ source: "issue.comment",
+        paperclipAgentMessage: { text: "Continue the existing task normally. Preserve completed work.", source: "board" } }),
+    }));
+    const [settled] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    expect(settled.evidence.guardedStatusRepair).toMatchObject({ delivery: "delivered", sameStatusTodoHandback: true });
+    expect(settled.resolutionNote).toBeNull();
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(wake).toHaveBeenCalledTimes(1);
   });
 
   it("PER-626 preserves a pending execution stage during same-status todo hand-back", async () => {
@@ -3204,8 +3302,10 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(settled.evidence.guardedStatusRepair).toMatchObject({ delivery: gate === "newer_source" ? "invalidated" : "pending" });
   });
 
-  it("PER-968 recovers a lost delivery ACK without a second normal turn", async () => {
-    const { companyId, sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
+  it.each(["exhausted", "native_todo", "missing_disposition", "workspace_validation"] as const)("PER-626/PER-968 recovers a lost delivery ACK without a second normal turn (%s)", async (mode) => {
+    const { companyId, sourceIssueId, coderId, action, repair } = mode === "native_todo"
+      ? await seedNativeBoardTodoHold() : mode === "exhausted" ? await seedTrappedDisposition()
+        : await seedOrdinaryBoardTodoHold(mode);
     const userId = randomUUID();
     await db.insert(authUsers).values({ id: userId, name: "Board operator", email: userId + "@example.test", emailVerified: true,
       createdAt: new Date(), updatedAt: new Date() });

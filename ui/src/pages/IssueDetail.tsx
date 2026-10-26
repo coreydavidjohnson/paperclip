@@ -350,6 +350,7 @@ import type { ShareSheetImplicitPrincipal } from "@/components/IssueShareSheet";
 import {
   deriveOriginatingActor,
   isClosedIsolatedExecutionWorkspace,
+  isUuidLike,
   ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY,
   ONBOARDING_FIRST_TASK_ORIGIN_KIND,
   type AskUserQuestionsAnswer,
@@ -506,6 +507,48 @@ function isExhaustedBoardStatusRepairSource(
     !!issue.assigneeAgentId &&
     !issue.assigneeUserId &&
     action.returnOwnerAgentId === issue.assigneeAgentId;
+}
+
+function isRecoveryEvidenceUuid(value: unknown): value is string {
+  return typeof value === "string" && isUuidLike(value);
+}
+
+function hasBoardTodoHandbackProof(
+  action: Issue["activeRecoveryAction"] | null | undefined,
+): boolean {
+  const evidence = action?.evidence;
+  return !!evidence && (
+    (isRecoveryEvidenceUuid(evidence.runId) && isRecoveryEvidenceUuid(evidence.decisionId)) ||
+    (isRecoveryEvidenceUuid(evidence.latestRunId) &&
+      isRecoveryEvidenceUuid(evidence.nativeResultId) &&
+      isRecoveryEvidenceUuid(evidence.completionContractId))
+  );
+}
+
+function isBoardTodoHandbackCandidate(
+  issue: Issue | null | undefined,
+  action: Issue["activeRecoveryAction"] | null | undefined,
+): boolean {
+  return !!issue && issue.status === "todo" && !!action &&
+    action.kind === "deliberate_wait_without_target" &&
+    action.cause === "deliberate_wait_without_target" &&
+    action.ownerType === "board" &&
+    (action.status === "active" || action.status === "escalated") &&
+    action.wakePolicy?.type === "board_escalation" &&
+    action.sourceIssueId === issue.id &&
+    action.companyId === issue.companyId;
+}
+
+function isBoardTodoHandbackSource(
+  issue: Issue | null | undefined,
+  action: Issue["activeRecoveryAction"] | null | undefined = issue?.activeRecoveryAction,
+): boolean {
+  return !!issue && !!action &&
+    isBoardTodoHandbackCandidate(issue, action) &&
+    !!issue.assigneeAgentId &&
+    !issue.assigneeUserId &&
+    action.returnOwnerAgentId === issue.assigneeAgentId &&
+    hasBoardTodoHandbackProof(action);
 }
 
 function recoveryStatusRepairTimestamp(value: Date | string): string | null {
@@ -3156,6 +3199,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   const [fileViewerPromptOpen, setFileViewerPromptOpen] = useState(false);
   const [detailTab, setDetailTab] = useState("chat");
   const [statusRepairActionId, setStatusRepairActionId] = useState<string | null>(null);
+  const [statusRepairMode, setStatusRepairMode] = useState<"board_todo_handback" | null>(null);
   const [statusRepairNote, setStatusRepairNote] = useState("");
   // Redesign: the center tab strip is hidden, so chat is the only surface —
   // deep links that would switch tabs (e.g. #document- hashes) stay on chat.
@@ -6738,17 +6782,23 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   const currentRecoveryAction = issue?.activeRecoveryAction;
   const activeRecoveryActionId = currentRecoveryAction?.id;
   const activeRecoveryActionNeedsStatusRepair =
-    !!issue &&
-    isExhaustedBoardRecoveryAction(currentRecoveryAction) &&
-    currentRecoveryAction.sourceIssueId === issue.id &&
-    currentRecoveryAction.companyId === issue.companyId;
+    isExhaustedBoardStatusRepairSource(issue, currentRecoveryAction);
+  const activeRecoveryActionNeedsBoardTodoHandback =
+    isBoardTodoHandbackSource(issue, currentRecoveryAction);
+  const activeRecoveryActionIsUnprovenBoardTodoHandback =
+    isBoardTodoHandbackCandidate(issue, currentRecoveryAction) &&
+    !activeRecoveryActionNeedsBoardTodoHandback &&
+    !activeRecoveryActionNeedsStatusRepair;
   const handleResolveRecoveryAction = useCallback(
     (
       outcome: import("../components/IssueRecoveryActionCard").RecoveryResolveOutcome,
     ) => {
       const actionId = activeRecoveryActionId;
       if (!actionId) return;
-      if (outcome === "todo" && activeRecoveryActionNeedsStatusRepair) {
+      if (
+        outcome === "todo" &&
+        (activeRecoveryActionNeedsStatusRepair || activeRecoveryActionNeedsBoardTodoHandback)
+      ) {
         if (boardAccess && !canResolveBoardRecoveryAction) {
           pushToast({
             title: "Recovery resolution failed",
@@ -6758,7 +6808,18 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           return;
         }
         setStatusRepairActionId(actionId);
+        setStatusRepairMode(
+          activeRecoveryActionNeedsStatusRepair ? null : "board_todo_handback",
+        );
         setStatusRepairNote("");
+        return;
+      }
+      if (outcome === "todo" && activeRecoveryActionIsUnprovenBoardTodoHandback) {
+        pushToast({
+          title: "Recovery resolution failed",
+          body: "This task does not have complete native proof for a hand-back.",
+          tone: "error",
+        });
         return;
       }
       switch (outcome) {
@@ -6801,7 +6862,9 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     },
     [
       activeRecoveryActionId,
+      activeRecoveryActionNeedsBoardTodoHandback,
       activeRecoveryActionNeedsStatusRepair,
+      activeRecoveryActionIsUnprovenBoardTodoHandback,
       boardAccess,
       canResolveBoardRecoveryAction,
       pushToast,
@@ -6832,7 +6895,9 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         !freshAction ||
         freshAction.id !== statusRepairActionId ||
         freshIssue.activeRecoveryAction?.id !== statusRepairActionId ||
-        !isExhaustedBoardStatusRepairSource(freshIssue, freshAction) ||
+        !(statusRepairMode === "board_todo_handback"
+          ? isBoardTodoHandbackSource(freshIssue, freshAction)
+          : isExhaustedBoardStatusRepairSource(freshIssue, freshAction)) ||
         !assigneeAgentId ||
         typeof sourceStatusVersion !== "number" ||
         !Number.isSafeInteger(sourceStatusVersion) ||
@@ -6850,6 +6915,9 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
         outcome: "restored",
         sourceIssueStatus: "todo",
         statusRepair: {
+          ...(statusRepairMode === "board_todo_handback"
+            ? { mode: "board_todo_handback" as const }
+            : {}),
           sourceUpdatedAt,
           sourceStatus: freshIssue.status,
           sourceStatusVersion,
@@ -6872,6 +6940,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     try {
       await resolveRecoveryAction.mutateAsync(request);
       setStatusRepairActionId(null);
+      setStatusRepairMode(null);
       setStatusRepairNote("");
     } catch {
       // The existing mutation reports stale refusals; never replay a rejected or uncertain write.
@@ -6883,6 +6952,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     pushToast,
     resolveRecoveryAction.mutateAsync,
     statusRepairActionId,
+    statusRepairMode,
     statusRepairNote,
   ]);
   const handleTryAgainNoLiveExecutionPath = useCallback(() => {
@@ -7832,14 +7902,21 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
 
   const taskChatShellRecoveryAction =
     issue.status === "todo" && currentRecoveryAction &&
-    isExhaustedBoardStatusRepairSource(issue, currentRecoveryAction)
+    (isExhaustedBoardStatusRepairSource(issue, currentRecoveryAction) ||
+      isBoardTodoHandbackSource(issue, currentRecoveryAction))
       ? currentRecoveryAction
       : null;
+  const unsupportedBoardTodoHandback =
+    isBoardTodoHandbackCandidate(issue, currentRecoveryAction) &&
+    !isBoardTodoHandbackSource(issue, currentRecoveryAction) &&
+    !isExhaustedBoardStatusRepairSource(issue, currentRecoveryAction);
+  const recoveryStatusRepairFormIsCurrent =
+    statusRepairMode === "board_todo_handback"
+      ? isBoardTodoHandbackSource(issue, currentRecoveryAction)
+      : isExhaustedBoardStatusRepairSource(issue, currentRecoveryAction);
   const recoveryStatusRepairForm =
     statusRepairActionId && currentRecoveryAction?.id === statusRepairActionId &&
-    isExhaustedBoardRecoveryAction(currentRecoveryAction) &&
-    currentRecoveryAction.sourceIssueId === issue.id &&
-    currentRecoveryAction.companyId === issue.companyId ? (
+    recoveryStatusRepairFormIsCurrent ? (
       <form
         className="space-y-2 rounded-md border border-border p-3"
         onSubmit={(event) => {
@@ -7870,6 +7947,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
             variant="ghost"
             onClick={() => {
               setStatusRepairActionId(null);
+              setStatusRepairMode(null);
               setStatusRepairNote("");
             }}
           >
@@ -8329,7 +8407,11 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   blockerAttention={issue.blockerAttention ?? null}
                   successfulRunHandoff={issue.successfulRunHandoff ?? null}
                   scheduledRetry={issue.scheduledRetry ?? null}
-                  recoveryAction={issue.activeRecoveryAction?.cause === "native_workspace_finalization_owner_unverified" ? null : issue.activeRecoveryAction ?? null}
+                  recoveryAction={
+                    issue.activeRecoveryAction?.cause === "native_workspace_finalization_owner_unverified" || unsupportedBoardTodoHandback
+                      ? null
+                      : issue.activeRecoveryAction ?? null
+                  }
                   onResolveRecoveryAction={handleResolveRecoveryAction}
                   onReissueIsolatedRecoveryAction={
                     handleReissueIsolatedRecoveryAction
