@@ -30,6 +30,7 @@ const support = await getEmbeddedPostgresTestSupport();
 
   async function baseline() {
     const [row] = await db.select({
+      id: heartbeatRuns.id, companyId: heartbeatRuns.companyId,
       activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
       responsibleUserId: heartbeatRuns.responsibleUserId,
       status: heartbeatRuns.status,
@@ -110,7 +111,8 @@ const support = await getEmbeddedPostgresTestSupport();
     for (const nativeCancellation of [null, true, [], {}, { ...valid, schema: "unknown" },
       { ...valid, companyId: randomUUID() }, { ...valid, runId: randomUUID() },
       { ...valid, intentId: "" }, { ...valid, intentAuditId: "" },
-      { ...valid, dispatchState: "unknown" }, { ...valid, dispatched: "false" }]) {
+      { ...valid, dispatchState: "unknown" }, { ...valid, dispatched: "false" },
+      { ...valid, scope: ["run"] }, { ...valid, dispatchState: ["pending"] }]) {
       await db.update(heartbeatRuns).set({ status: "running", resultJson: { nativeCancellation } })
         .where(eq(heartbeatRuns.id, runId));
       const [projected] = await loadAgentRunAuthentication(db, input);

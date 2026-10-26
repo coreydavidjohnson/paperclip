@@ -208,6 +208,48 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
     expect(rows.some(row => row.title === "Concurrent blocked creation")).toBe(false);
   });
 
+  it("reports a busy deletion without deadlocking a blocked status update", async () => {
+    const { companyId, issue, svc } = await fixture();
+    const blocker = await svc.create(companyId, { title: "Concurrent deletion target" });
+    await svc.update(issue.id, { blockedByIssueIds: [blocker.id] });
+    let locked!: () => void, proceed!: () => void, reportDelete!: (pid: number) => void;
+    const writerLocked = new Promise<void>(resolve => { locked = resolve; });
+    const writerProceed = new Promise<void>(resolve => { proceed = resolve; });
+    const deleteReady = new Promise<number>(resolve => { reportDelete = resolve; });
+    const writer = ctx.db.transaction(async tx => {
+      await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issue.id)).for("update");
+      locked();
+      await writerProceed;
+      return issueService(tx as unknown as typeof ctx.db).update(issue.id, { status: "blocked" });
+    });
+    // Attach a rejection handler immediately because the old lock inversion may
+    // abort either transaction before the test reaches Promise.allSettled.
+    const writerResult = writer.then(value => ({ value, error: null }), error => ({ value: null, error }));
+    await writerLocked;
+    let deletionSettled = false;
+    const deletion = ctx.db.transaction(async tx => {
+      const [backend] = await tx.execute(sql`select pg_backend_pid() as pid`);
+      reportDelete(Number(backend.pid));
+      return issueService(tx as unknown as typeof ctx.db).remove(blocker.id);
+    }).then(value => ({ value, error: null }), error => ({ value: null, error }))
+      .finally(() => { deletionSettled = true; });
+    try {
+      const pid = await deleteReady;
+      await expect.poll(async () => {
+        const [waiting] = await ctx.db.execute(sql`select cardinality(pg_blocking_pids(${pid})) > 0 as blocked`);
+        return deletionSettled || waiting.blocked;
+      }, { timeout: 5000 }).toBe(true);
+    } finally {
+      proceed();
+    }
+    const [write, remove] = await Promise.all([writerResult, deletion]);
+    expect(write.error).toBeNull();
+    expect(remove.error).toMatchObject({ status: 409, details: { code: "issue_blocker_busy" } });
+    expect((await svc.getById(issue.id))?.status).toBe("blocked");
+    expect(await svc.getById(blocker.id)).not.toBeNull();
+    expect((await svc.getRelationSummaries(issue.id)).blockedBy.map(b => b.id)).toEqual([blocker.id]);
+  });
+
   it("rejects descriptor-only HTTP repeated blocked writes", async () => {
     const { issue, actor } = await fixture("blocked");
     const response = await request(routeApp(ctx.db, actor, issueRoutes))
