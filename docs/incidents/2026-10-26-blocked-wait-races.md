@@ -100,3 +100,11 @@ two more pending-stage projections, in wake-queue terminal recovery and heartbea
 workspace preflight. Both keep real waits first, otherwise retain a pending
 execution stage as in_review. Source recovery actions and original owners stay
 unchanged. Full integrated validation and image qualification remain separate.
+
+The first eight-suite post-review diagnostic on 1b7d7832e1 passed 396 of 397
+cases, with zero pending. Only workspace preflight still lost its pending review:
+its issue projection omitted executionState, so the new fallback never saw it.
+Add that column to the existing locked admission query; do not add another read
+or weaken the pending-stage regression. The other seven suites passed, including
+both native Stop fences, malformed receipt controls, the deletion conflict and
+complete issue-service coverage. This is not an integrated qualification pass.

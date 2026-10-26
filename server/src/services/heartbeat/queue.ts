@@ -3079,6 +3079,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               conversationState: issues.conversationState,
               status: issues.status,
               statusVersion: issues.statusVersion,
+              executionState: issues.executionState,
               projectId: issues.projectId,
               projectWorkspaceId: issues.projectWorkspaceId,
               executionWorkspaceId: issues.executionWorkspaceId,
