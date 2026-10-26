@@ -15,7 +15,7 @@ import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Agent } from "@paperclipai/shared";
 import { CommentSubmissionUnknownError } from "../lib/comment-submit-result";
-import { loadDraft, preserveDraftInTab, settleDraftSubmission } from "../lib/composer-draft";
+import { loadDraft, preserveDraftInTab, settleDraftSubmission, saveDraft, saveDraftSubmission } from "../lib/composer-draft";
 import {
   IssueAssigneePausedNotice,
   IssueChatThread,
@@ -408,6 +408,25 @@ describe("IssueChatThread", () => {
     render("agent:first", "task-two");
     expect(selector().value).toBe("agent:first");
     act(() => root.unmount());
+  });
+  it("offers the same saved-request recovery in the classic composer, without automatic resend", async () => {
+    const key = "classic-safe-request";
+    const attemptId = "9af8228f-0be7-45ae-a104-6fbe0af6f1d3";
+    saveDraft(key, "Exact old request");
+    saveDraftSubmission(key, { attemptId, reviewed: false });
+    const onAdd = vi.fn();
+    const recover = vi.fn().mockResolvedValue(undefined);
+    const root = createRoot(container);
+    try {
+      await act(async () => renderIssueThread(root, { draftKey: key, onAdd,
+        commentRecovery: { canRecover: id => id === attemptId, recover } }));
+      const retry = Array.from(container.querySelectorAll("button")).find(b => b.textContent === "Retry saved request");
+      expect(retry).toBeDefined();
+      expect(recover).not.toHaveBeenCalled();
+      await act(async () => retry!.click());
+      expect(recover.mock.calls).toEqual([[attemptId]]);
+      expect(onAdd).not.toHaveBeenCalled();
+    } finally { await act(async () => root.unmount()); }
   });
   function renderIssueThread(root: ReturnType<typeof createRoot>, props: Partial<ComponentProps<typeof IssueChatThread>> = {}) {
     root.render(

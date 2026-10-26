@@ -2971,3 +2971,37 @@ describe("composer Stop", () => {
     expect(sendButton().disabled).toBe(failed);
   });
 });
+
+describe("saved-request recovery control", () => {
+  it("recovers only the retained request key after remount without resending the draft", async () => {
+    const key = "saved-safe-request";
+    const attemptId = "9af8228f-0be7-45ae-a104-6fbe0af6f1d3";
+    saveDraft(key, "Original request\n\nNext draft");
+    saveDraftSubmission(key, { attemptId, reviewed: false, nextDraftOffset: 18, submittedAttachmentIds: [] });
+    const recover = vi.fn().mockRejectedValueOnce(new CommentSubmissionUnknownError()).mockResolvedValue(undefined);
+    const onAdd = vi.fn();
+    const commentRecovery = { canRecover: (id: string) => id === attemptId, recover };
+    const view = (confirmed = false, paused = false) => <TaskChatComposer onAdd={onAdd} workMode="standard" draftKey={key}
+      commentRecovery={commentRecovery} confirmedSubmissionIds={confirmed ? new Set([attemptId]) : new Set()}
+      pause={paused ? { scope: "leaf" } : null} />;
+    render(view());
+    const retry = () => Array.from(container.querySelectorAll("button")).find(b => b.textContent === "Retry saved request")!;
+    expect(recover).not.toHaveBeenCalled();
+    expect(retry()).toBeDefined();
+    await act(async () => retry().click());
+    expect(recover).toHaveBeenLastCalledWith(attemptId);
+    expect(loadDraftSubmission(key)?.attemptId).toBe(attemptId);
+    expect(container.textContent).toContain("Your saved request is kept");
+    render(<div>Other task</div>);
+    render(view(false, true));
+    expect(retry().disabled).toBe(true);
+    render(view());
+    await act(async () => retry().click());
+    render(view(true));
+    await flushAsync();
+    expect(editable().textContent).toBe("Next draft");
+    expect(loadDraftSubmission(key)).toBeNull();
+    expect(onAdd).not.toHaveBeenCalled();
+    expect(recover.mock.calls).toEqual([[attemptId], [attemptId]]);
+  });
+});

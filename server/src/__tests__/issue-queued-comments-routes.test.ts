@@ -2280,6 +2280,18 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(conflict.body.details?.code).toBe("comment_operation_key_conflict");
   });
 
+  it.each(["user", "company"])("refuses a replay-safe request after the expected %s identity changes", async field => {
+    const seeded = await seedQueue();
+    const clientRequestId = randomUUID();
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`)
+      .set("X-Paperclip-Expected-User-Id", field === "user" ? "previous-user" : "queue-owner")
+      .set("X-Paperclip-Expected-Company-Id", field === "company" ? randomUUID() : seeded.companyId)
+      .send({ clientRequestId, body: "Do not send under a new login" });
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(0);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId))).toHaveLength(1);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId))).toHaveLength(0);
+  });
   it("preserves initial reopen behavior while disabling unsafe transition replay", async () => {
     const seeded = await seedQueue();
     await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, seeded.issueId));

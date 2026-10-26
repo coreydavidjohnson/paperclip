@@ -44,6 +44,38 @@ import type {
 import { api, ApiError, detachInflightGet, type RequestOptions } from "./client";
 import { CommentSubmissionUnknownError } from "../lib/comment-submit-result";
 
+export interface ReplaySafeCommentScope {
+  companyId: string;
+  issueId: string;
+  userId: string;
+}
+type RecoverableCommentInput = Pick<AddIssueComment, "body" | "attachmentIds"> & { clientRequestId: string };
+
+function recoveryKey(scope: ReplaySafeCommentScope, clientRequestId: string): string {
+  return `paperclip:comment-recovery:v1:${JSON.stringify([scope.companyId, scope.issueId, scope.userId, clientRequestId])}`;
+}
+function readRecovery(scope: ReplaySafeCommentScope, clientRequestId: string): RecoverableCommentInput | null {
+  try {
+    const raw = sessionStorage.getItem(recoveryKey(scope, clientRequestId));
+    if (!raw || raw.length > 2_000_000) return null;
+    const row = JSON.parse(raw);
+    const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+    if (row.version !== 1 || JSON.stringify(row.scope) !== JSON.stringify(scope) ||
+        !row.payload || Object.keys(row.payload).some(key => !["body", "attachmentIds", "clientRequestId"].includes(key)) ||
+        row.payload.clientRequestId !== clientRequestId || !uuid.test(clientRequestId) ||
+        typeof row.payload.body !== "string" || !row.payload.body.trim() ||
+        (row.payload.attachmentIds !== undefined && (!Array.isArray(row.payload.attachmentIds) ||
+          row.payload.attachmentIds.length > 20 || !row.payload.attachmentIds.every((id: unknown) => typeof id === "string" && uuid.test(id))))) return null;
+    return row.payload;
+  } catch { return null; }
+}
+function clearRecovery(scope: ReplaySafeCommentScope, payload: RecoverableCommentInput) {
+  try {
+    if (JSON.stringify(readRecovery(scope, payload.clientRequestId)) === JSON.stringify(payload))
+      sessionStorage.removeItem(recoveryKey(scope, payload.clientRequestId));
+  } catch { /* A retained receipt can be reconciled on the next authenticated read. */ }
+}
+
 function hasCommentReceipt(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const row = value as Record<string, unknown>;
@@ -555,13 +587,21 @@ export const issuesApi = {
     ),
   // Explicit qualification path only. Existing composers keep their one-shot
   // addComment behavior until the complete staged recovery contract is verified.
-  addReplaySafeComment: async (id: string, data: AddIssueComment & { clientRequestId: string }): Promise<IssueComment> => {
+  addReplaySafeComment: async (id: string, data: AddIssueComment & { clientRequestId: string }, scope?: ReplaySafeCommentScope): Promise<IssueComment> => {
+    if (scope && scope.issueId !== id) throw new Error("Comment recovery task changed");
     const payload: AddIssueComment & { clientRequestId: string } = JSON.parse(JSON.stringify(data));
     for (let attempt = 0; ; attempt++) {
       try {
         return await confirmedCommentResponse(
-          api.post<IssueComment>(`/issues/${id}/comments/replay-safe`, payload, { signal: AbortSignal.timeout(10_000) }),
-          response => hasCommentReceipt(response) && response.clientRequestId === payload.clientRequestId && response.issueId === id,
+          api.post<IssueComment>(`/issues/${id}/comments/replay-safe`, payload, {
+            signal: AbortSignal.timeout(10_000),
+            ...(scope ? { headers: {
+              "X-Paperclip-Expected-User-Id": scope.userId,
+              "X-Paperclip-Expected-Company-Id": scope.companyId,
+            } } : {}),
+          }),
+          response => hasCommentReceipt(response) && response.clientRequestId === payload.clientRequestId && response.issueId === id &&
+            (!scope || (response.authorUserId === scope.userId && response.companyId === scope.companyId)),
         );
       } catch (error) {
         if (!(error instanceof CommentSubmissionUnknownError)) {
@@ -575,6 +615,54 @@ export const issuesApi = {
         await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 250 : 750));
       }
     }
+  },
+  // Ordinary assigned-task comments only. Persist the exact request before
+  // I/O; never rebuild it from an editable draft or choose a legacy endpoint.
+  addRecoverableComment: async (scope: ReplaySafeCommentScope, input: RecoverableCommentInput): Promise<IssueComment> => {
+    const payload: RecoverableCommentInput = {
+      body: input.body, clientRequestId: input.clientRequestId,
+      ...(input.attachmentIds?.length ? { attachmentIds: [...input.attachmentIds] } : {}),
+    };
+    const key = recoveryKey(scope, payload.clientRequestId);
+    let existed: boolean;
+    try {
+      const raw = sessionStorage.getItem(key);
+      existed = raw !== null;
+      if (existed && JSON.stringify(readRecovery(scope, payload.clientRequestId)) !== JSON.stringify(payload))
+        throw new Error("The original saved request must not be changed");
+      if (!existed) sessionStorage.setItem(key, JSON.stringify({ version: 1, scope, payload }));
+      if (JSON.stringify(readRecovery(scope, payload.clientRequestId)) !== JSON.stringify(payload))
+        throw new Error("Browser storage could not retain this request");
+    } catch (error) {
+      if (error instanceof Error && error.message === "The original saved request must not be changed") throw error;
+      throw new Error("Browser storage is unavailable. No comment request was sent.");
+    }
+    try {
+      const comment = await issuesApi.addReplaySafeComment(scope.issueId, payload, scope);
+      clearRecovery(scope, payload);
+      return comment;
+    } catch (error) {
+      // A known refusal is definitive only on the very first invocation.
+      // Recovery may follow an earlier commit, even after a reload or Stop.
+      if (existed || error instanceof CommentSubmissionUnknownError) throw new CommentSubmissionUnknownError();
+      clearRecovery(scope, payload);
+      throw error;
+    }
+  },
+  canRecoverComment: (scope: ReplaySafeCommentScope, clientRequestId: string): boolean =>
+    readRecovery(scope, clientRequestId) !== null,
+  recoverComment: async (scope: ReplaySafeCommentScope, clientRequestId: string): Promise<IssueComment> => {
+    const payload = readRecovery(scope, clientRequestId);
+    if (!payload) throw new Error("No saved request belongs to this user and task");
+    return issuesApi.addRecoverableComment(scope, payload);
+  },
+  confirmRecoveredComment: (scope: ReplaySafeCommentScope, comment: unknown): void => {
+    if (!hasCommentReceipt(comment)) return;
+    const row = comment as IssueComment & { clientStatus?: string };
+    if (!row.clientRequestId || row.authorUserId !== scope.userId || row.companyId !== scope.companyId ||
+        row.issueId !== scope.issueId || row.clientStatus) return;
+    const payload = readRecovery(scope, row.clientRequestId);
+    if (payload && payload.body === row.body) clearRecovery(scope, payload);
   },
   cancelComment: (id: string, commentId: string) =>
     api.delete<IssueComment>(`/issues/${id}/comments/${commentId}?mode=cancel`),
