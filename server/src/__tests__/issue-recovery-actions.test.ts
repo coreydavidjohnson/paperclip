@@ -37,7 +37,7 @@ import { issueRoutes } from "../routes/issues.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../services/heartbeat.js";
 import { buildExecutionContinuation } from "../services/execution-continuation.js";
 import { getExecutionBlocker } from "../services/execution-blocker.js";
-import { admitReconciledUserContinuation, deliverReconciledExecutions } from "../services/execution-recovery-resolution.js";
+import { admitReconciledUserContinuation, deliverReconciledExecutions, settleUnrecoverableExecutions } from "../services/execution-recovery-resolution.js";
 import { workspaceOperationService, isNativeWorkspaceFinalizationOperationActive } from "../services/workspace-operations.js";
 import { issueRecoveryActionService } from "../services/issue-recovery-actions.js";
 import * as routineServices from "../services/routines.js";
@@ -1836,6 +1836,35 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const list = await request(app).get(`/api/issues/${sourceIssueId}/recovery-actions`).expect(200);
     expect(list.body.active).toMatchObject({ id: action.id });
     expect(list.body.actions).toHaveLength(1);
+  });
+
+  it.each(["native", "legacy", "compression"] as const)("settles %s execution without inventing a blocked wait or replay permission", async (mode) => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId: sourceIssueId, status: "failed" });
+    const cause = mode === "native" ? "native_continuation_requires_reconciliation" : "legacy_execution_requires_reconciliation";
+    await db.update(heartbeatRuns).set({ runtimeMode: mode === "native" ? "native" : "legacy",
+      errorCode: mode === "compression" ? "omnigent_context_compression_failed" : "adapter_failed",
+    }).where(eq(heartbeatRuns.id, runId));
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", status: "active", ownerType: "board", returnOwnerAgentId: coderId,
+      cause, fingerprint: runId, nextAction: "Inspect recorded outcomes.", evidence: { runId,
+        ...(mode === "compression" ? { originalFailureCode: "omnigent_context_compression_failed" } : {}) },
+    }).returning();
+    await settleUnrecoverableExecutions(db);
+    const [task] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    expect(task).toMatchObject({ status: "todo", assigneeAgentId: coderId });
+    const [hold] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id));
+    expect(hold).toMatchObject({ status: "resolved", outcome: "blocked",
+      evidence: { automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } } });
+    expect(await getExecutionBlocker(db, companyId, sourceIssueId)).not.toBeNull();
+    if (mode === "compression") expect(hold!.evidence.managedCompressionBlock).toMatchObject({
+      runId, status: "todo", statusVersion: task!.statusVersion, updatedAt: task!.updatedAt.toISOString(),
+    });
+    await settleUnrecoverableExecutions(db);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action!.id)))[0]).toEqual(hold);
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    expect(await db.select().from(heartbeatRuns)).toHaveLength(1);
   });
 
   it("lists a settled reconciliation hold that still blocks replay", async () => {
