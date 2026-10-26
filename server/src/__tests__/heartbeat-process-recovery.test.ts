@@ -15743,7 +15743,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await db.select().from(issues).where(eq(issues.id, issueId)),
     ).toEqual([
       expect.objectContaining({
-        status: "blocked",
+        status: "todo",
         assigneeAgentId: agentId,
         unblockDescriptor: { owner: "board", action: unblockAction },
       }),
@@ -15781,6 +15781,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(
       (await heartbeat.reconcileStrandedAssignedIssues()).continuationRequeued,
     ).toBe(0);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))
+      .toEqual([expect.objectContaining({ ownerType: "board", returnOwnerAgentId: agentId,
+        cause: "deliberate_wait_without_target", nextAction: expect.stringContaining(unblockAction) })]);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issueId))).toHaveLength(0);
     expect(mockAdapterExecute).not.toHaveBeenCalled();
   });
 
