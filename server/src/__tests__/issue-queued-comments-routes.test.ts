@@ -24,6 +24,8 @@ import {
   runIdentityContexts,
 } from "@paperclipai/db";
 import { errorHandler } from "../middleware/index.js";
+import { actorMiddleware } from "../middleware/auth.js";
+import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import { issueRoutes } from "../routes/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { issueService } from "../services/issues.js";
@@ -42,7 +44,8 @@ vi.mock("../services/native-runtime/native-session-executor.js", async (importOr
   steerNativeSessionMock.mockImplementation(actual.steerNativeSession);
   return { ...actual, steerNativeSession: steerNativeSessionMock };
 });
-const { NativeSessionSteeringError } = await import("../services/native-runtime/native-session-executor.js");
+const nativeSessionExecutor = await import("../services/native-runtime/native-session-executor.js");
+const { NativeSessionSteeringError } = nativeSessionExecutor;
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -65,6 +68,8 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   const testProcesses = new Map<string, ChildProcess>();
 
   afterEach(async () => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     for (const [id, child] of testProcesses) {
       runningProcesses.delete(id);
       child.kill();
@@ -354,6 +359,115 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .toMatchObject({ status: "todo" });
     await expect(issueService(db).update(seeded.issueId, { ...data, status: "done" }))
       .rejects.toMatchObject({ status: 403, details: { code: "agent_run_cancelled" } });
+  });
+
+  async function nativeHandoffClient() {
+    const seeded = await seedQueue();
+    // This is an outgoing native task turn, not the legacy human-handoff
+    // exception. Do not let unrelated saved input obscure the stop/commit fence.
+    await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await db.update(heartbeatRuns).set({ nativeIssueId: seeded.issueId })
+      .where(eq(heartbeatRuns.id, seeded.runId));
+    await db.update(issues).set({ checkoutRunId: seeded.runId, createdByUserId: "queue-owner" })
+      .where(eq(issues.id, seeded.issueId));
+    const identity = await initializeRunIdentity(db, {
+      companyId: seeded.companyId, issueId: seeded.issueId, runId: seeded.runId,
+      responsibleUserId: "queue-owner", cause: "dispatch",
+    });
+    vi.stubEnv("PAPERCLIP_AGENT_JWT_SECRET", "native-handoff-route-test-secret");
+    const token = createLocalAgentJwt(seeded.agentId, seeded.companyId, "paperclip_runner", seeded.runId, "queue-owner");
+    expect(token).toBeTruthy();
+    const client = express();
+    client.use(express.json());
+    client.use(actorMiddleware(db, { deploymentMode: "authenticated", resolveSession: async () => null }));
+    client.use("/api", issueRoutes(db, {} as any, {}));
+    client.use(errorHandler);
+    return { ...seeded, identity, client, authorization: `Bearer ${token}` };
+  }
+
+  it.each([false, true])("commits the HTTP native self-handoff after stopping its own run, with adapter overrides: %s", async withOverrides => {
+    const seeded = await nativeHandoffClient();
+    // Only the provider boundary is simulated. The HTTP auth, route stop token,
+    // heartbeat cancellation, issue transaction and comment service stay real.
+    const cancel = vi.spyOn(nativeSessionExecutor, "cancelNativeSession").mockImplementation(async (runId, _reason, options) => {
+      expect(runId).toBe(seeded.runId);
+      expect(options.scope).toBe("run");
+      const receipt = {
+        schema: "paperclip.native-cancellation.v1", runId, companyId: seeded.companyId,
+        issueId: seeded.issueId, scope: "run", reasonCode: "cancellation_run_only",
+        dispatchState: "acknowledged", dispatched: true,
+        intentAuditId: randomUUID(), acknowledgementAuditId: randomUUID(),
+      };
+      await options.db.update(heartbeatRuns).set({
+        resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({ nativeCancellation: receipt })}::jsonb`,
+      }).where(eq(heartbeatRuns.id, runId));
+      return { dispatched: true, decision: null, decisionId: null, auditId: receipt.acknowledgementAuditId };
+    });
+    const body = {
+      assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
+      comment: "Handing this same task back for the human decision.",
+      ...(withOverrides ? { assigneeAdapterOverrides: { useProjectWorkspace: false } } : {}),
+    };
+    const response = await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
+      .set("Authorization", seeded.authorization).send(body);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
+    // Check cancellation before the HTTP assertion so a RED distinguishes
+    // request admission failure from a failure after a confirmed stop.
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(run).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned",
+      activeIdentityContextId: seeded.identity.id, responsibleUserId: "queue-owner",
+      resultJson: { reassignmentStopConfirmed: true, issueMutationStopId: expect.any(String) },
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const [task] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
+    expect(task).toMatchObject({ assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
+      checkoutRunId: null, executionRunId: null,
+      assigneeAdapterOverrides: withOverrides ? { useProjectWorkspace: false } : null,
+    });
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId));
+    expect(comments.filter(comment => comment.body === body.comment)).toEqual([
+      expect.objectContaining({ authorType: "agent", authorAgentId: seeded.agentId,
+        createdByRunId: seeded.runId, onBehalfOfUserId: "queue-owner" }),
+    ]);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId))).toEqual([]);
+    // The server-only stop token cannot authorize a replay or a later report.
+    await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
+      .set("Authorization", seeded.authorization).send(body).expect(403);
+    await request(seeded.client).post(`/api/issues/${seeded.issueId}/comments`)
+      .set("Authorization", seeded.authorization).send({ body: "Late report from the stopped turn" }).expect(403);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toHaveLength(comments.length);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["cancelled", "cancelling", "changed_owner"] as const)("refuses HTTP native handoff from a %s source without partial edits", async mode => {
+    const seeded = await nativeHandoffClient();
+    const cancel = vi.spyOn(nativeSessionExecutor, "cancelNativeSession");
+    if (mode === "changed_owner") {
+      const ownerId = randomUUID();
+      await db.insert(agents).values({ id: ownerId, companyId: seeded.companyId,
+        name: "New task owner", role: "engineer", status: "idle", adapterType: "paperclip_runner" });
+      await db.update(issues).set({ assigneeAgentId: ownerId, checkoutRunId: null, executionRunId: null })
+        .where(eq(issues.id, seeded.issueId));
+    } else {
+      await db.update(heartbeatRuns).set(mode === "cancelled"
+        ? { status: "cancelled", errorCode: "issue_reassigned", resultJson: {
+            reassignmentStopConfirmed: true, issueMutationStopId: randomUUID(),
+          } }
+        : { resultJson: { executionCancellation: { state: "requested" } } })
+        .where(eq(heartbeatRuns.id, seeded.runId));
+    }
+    const [before] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
+    const response = await request(seeded.client).patch(`/api/issues/${seeded.issueId}`)
+      .set("Authorization", seeded.authorization).send({
+        assigneeAgentId: null, assigneeUserId: "queue-owner", status: "todo",
+        comment: "This stale handoff must not land.",
+        assigneeAdapterOverrides: { useProjectWorkspace: false },
+      });
+    expect(response.status, JSON.stringify(response.body)).toBe(403);
+    if (mode !== "changed_owner") expect(response.body.code).toBe("agent_run_cancelled");
+    expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(before);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toHaveLength(2);
+    expect(cancel).not.toHaveBeenCalled();
   });
 
   it.each(["questions", "verdicts"] as const)("rejects admitted %s responses after Stop revokes the run", async kind => {
