@@ -2280,6 +2280,78 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(conflict.body.details?.code).toBe("comment_operation_key_conflict");
   });
 
+  it.each(["before-save", "after-commit"] as const)("recovers the same replay-safe operation after a real HTTP socket loss (%s)", async boundary => {
+    const seeded = await seedQueue();
+    const payload = { clientRequestId: randomUUID(), body: "Recover the original immutable request" };
+    const wireBody = JSON.stringify(payload);
+    let attempts = 0;
+    let droppedReceipt: { id: string } | null = null;
+    const fixture = express();
+    fixture.use((req, res, next) => {
+      attempts++;
+      if (attempts === 1 && boundary === "before-save") {
+        req.socket.destroy();
+        return;
+      }
+      if (attempts === 1) {
+        // The actual route has committed before producing its JSON receipt.
+        // Destroy the real socket, not a simulated HTTP 500 response.
+        res.json = value => {
+          droppedReceipt = value;
+          res.destroy();
+          return res;
+        };
+      }
+      next();
+    });
+    fixture.use(app(seeded.companyId));
+    const server = fixture.listen(0, "127.0.0.1");
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("listening", resolve); server.once("error", reject);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected a loopback TCP listener");
+      const url = `http://127.0.0.1:${address.port}/api/issues/${seeded.issueId}/comments/replay-safe`;
+      const send = () => fetch(url, { method: "POST", body: wireBody,
+        headers: { "Content-Type": "application/json", "X-Paperclip-Expected-User-Id": "queue-owner",
+          "X-Paperclip-Expected-Company-Id": seeded.companyId }, signal: AbortSignal.timeout(10_000) });
+      await expect(send()).rejects.toThrow();
+      expect(attempts).toBe(1);
+      const afterLoss = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, payload.clientRequestId));
+      expect(afterLoss).toHaveLength(boundary === "before-save" ? 0 : 1);
+      if (boundary === "after-commit") {
+        expect(droppedReceipt).toMatchObject({ id: afterLoss[0].id, clientRequestId: payload.clientRequestId });
+        // A later terminal state must not turn recovery into a new transition.
+        await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, seeded.issueId));
+      } else {
+        expect(droppedReceipt).toBeNull();
+        expect(await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId))).toHaveLength(0);
+      }
+      const response = await send();
+      expect(response.status).toBe(201);
+      const confirmed = await response.json();
+      expect(confirmed).toMatchObject({ body: payload.body, clientRequestId: payload.clientRequestId,
+        companyId: seeded.companyId, issueId: seeded.issueId, authorUserId: "queue-owner" });
+      expect(attempts).toBe(2);
+      const comments = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, payload.clientRequestId));
+      expect(comments).toHaveLength(1);
+      expect(confirmed.id).toBe(comments[0].id);
+      if (boundary === "after-commit") {
+        expect(confirmed.id).toBe(afterLoss[0].id);
+        expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0].status).toBe("done");
+      }
+      const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.source, "issue_comment_operation"));
+      expect(receipts.filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(1);
+      const audit = await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId));
+      expect(audit.filter(row => row.action === "issue.comment_added")).toHaveLength(1);
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId)))[0].status).toBe("running");
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
   it.each(["user", "company"])("refuses a replay-safe request after the expected %s identity changes", async field => {
     const seeded = await seedQueue();
     const clientRequestId = randomUUID();
