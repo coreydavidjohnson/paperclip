@@ -6344,7 +6344,7 @@ export function recoveryService(
 
   return {
     buildRunOutputSilence,
-    escalateStrandedRecoveryIssueInPlace,
+    escalateStrandedRecoveryIssueInPlace: escalateStrandedAssignedIssue,
     escalateStrandedAssignedIssue,
     recordWatchdogDecision,
     scanSilentActiveRuns,
