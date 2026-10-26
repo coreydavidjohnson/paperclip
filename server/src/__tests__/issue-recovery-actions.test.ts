@@ -3277,6 +3277,37 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(wake).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["historical_question", "current_question", "confirmation"] as const)(
+    "PER-626 guarded continuation distinguishes a %s", async (card) => {
+      const { companyId, sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
+      const userId = randomUUID();
+      await db.insert(authUsers).values({ id: userId, name: "Board operator", email: userId + "@example.test",
+        emailVerified: true, createdAt: new Date(), updatedAt: new Date() });
+      await db.update(companies).set({ defaultResponsibleUserId: userId }).where(eq(companies.id, companyId));
+      await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+      // Keep admitted work queued without starting an actual provider.
+      await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+      await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssueId,
+        kind: card === "confirmation" ? "request_confirmation" : "ask_user_questions", status: "pending",
+        createdByAgentId: coderId, createdAt: new Date(Date.now() - 60_000),
+        payload: { version: 1, prompt: "A saved earlier question." } });
+      if (card !== "current_question") await db.insert(issueComments).values({ companyId, issueId: sourceIssueId,
+        authorUserId: userId, authorType: "user", body: "The old question no longer applies. Continue the task." });
+      const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+      const app = createApp({ type: "board", source: "local_implicit", userId }, { recoveryActionEnqueueWakeup: heartbeat.wakeup });
+      await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send({ actionId: action.id,
+        outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
+        resolutionNote: "Continue normally while preserving actual approval gates." }).expect(card === "historical_question" ? 200 : 409);
+      const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${action.id}`));
+      expect(wakes.filter(wake => wake.runId)).toHaveLength(card === "historical_question" ? 1 : 0);
+      const [saved] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      if (card === "historical_question") expect(saved.evidence.guardedStatusRepair).toMatchObject({ delivery: "delivered" });
+      else expect(saved.status).toBe("active");
+      expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, sourceIssueId)))
+        .toEqual([expect.objectContaining({ status: "pending" })]);
+    },
+  );
+
   it.each(["newer_source", "pending_card", "active_action", "live_run", "dependency"])("PER-968 normal delivery preserves %s admitted after resolution", async (gate) => {
     const { companyId, sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
     const userId = randomUUID();
@@ -3309,8 +3340,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(settled.evidence.guardedStatusRepair).toMatchObject({ delivery: gate === "newer_source" ? "invalidated" : "pending" });
   });
 
-  it.each(["exhausted", "native_todo", "native_todo_new_hold", "missing_disposition", "workspace_validation"] as const)("PER-626/PER-968 recovers a lost delivery ACK without a second normal turn (%s)", async (mode) => {
-    const { companyId, sourceIssueId, coderId, action, repair } = mode === "native_todo" || mode === "native_todo_new_hold"
+  it.each(["exhausted", "native_todo", "native_todo_new_hold", "native_todo_corrupt_binding", "missing_disposition", "workspace_validation"] as const)("PER-626/PER-968 recovers a lost delivery ACK without a second normal turn (%s)", async (mode) => {
+    const { companyId, sourceIssueId, coderId, action, repair } = mode === "native_todo" || mode === "native_todo_new_hold" || mode === "native_todo_corrupt_binding"
       ? await seedNativeBoardTodoHold() : mode === "exhausted" ? await seedTrappedDisposition()
         : await seedOrdinaryBoardTodoHold(mode);
     const userId = randomUUID();
@@ -3348,7 +3379,9 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(runId).toBeDefined();
     // A later source decision does not erase proof of the committed admission.
     await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId!));
-    await db.update(issues).set({ status: mode === "native_todo_new_hold" ? "todo" : "done", updatedAt: new Date() }).where(eq(issues.id, sourceIssueId));
+    if (mode !== "native_todo_corrupt_binding") await db.update(issues).set({
+      status: mode === "native_todo_new_hold" ? "todo" : "done", updatedAt: new Date(),
+    }).where(eq(issues.id, sourceIssueId));
     if (mode === "native_todo_new_hold") await issueRecoveryActionService(db).upsertSourceScoped({
       companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
       returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "later-exhausted-hold",
@@ -3357,15 +3390,15 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
     const sourceBeforeAdoption = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
     const activeBeforeAdoption = await issueRecoveryActionService(db).getActiveForIssue(companyId, sourceIssueId);
-    if (mode === "native_todo_new_hold") {
+    if (mode === "native_todo_new_hold" || mode === "native_todo_corrupt_binding") {
       const [committed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId!));
       // An idempotency string alone is not evidence that this action admitted
       // the linked run. A mismatched durable binding must not be acknowledged.
       await db.update(heartbeatRuns).set({ contextSnapshot: { ...committed.contextSnapshot,
         guardedStatusRepairId: randomUUID() } }).where(eq(heartbeatRuns.id, runId!));
       const noAdmission = vi.fn(async () => null);
-      await deliverGuardedStatusRepairs(db, noAdmission);
-      expect(noAdmission).toHaveBeenCalledTimes(1);
+      await deliverGuardedStatusRepairs(db, mode === "native_todo_corrupt_binding" ? heartbeat.wakeup : noAdmission);
+      if (mode === "native_todo_new_hold") expect(noAdmission).toHaveBeenCalledTimes(1);
       const [pending] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
       expect(pending.evidence.guardedStatusRepair).toMatchObject({ delivery: "pending" });
       await db.update(heartbeatRuns).set({ contextSnapshot: committed.contextSnapshot }).where(eq(heartbeatRuns.id, runId!));
