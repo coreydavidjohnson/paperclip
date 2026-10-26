@@ -281,6 +281,7 @@ export async function deliverGuardedStatusRepairs(
           sql`${agentWakeupRequests.payload}->>'issueId' = ${action.sourceIssueId}`,
           sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${action.sourceIssueId}`,
           sql`${heartbeatRuns.contextSnapshot}->>'guardedStatusRepairId' = ${action.id}`,
+          sql`${heartbeatRuns.contextSnapshot}->>'source' = 'issue.comment'`,
         )).limit(1);
       const run = admitted ?? await wake(action.returnOwnerAgentId, {
         source: "automation", triggerDetail: "system", reason: "issue_commented",

@@ -1,4 +1,5 @@
 import { assertRecoveryStatusWriteAllowed, isSupportedBoardTodoHandback } from "../guarded-status-repair.js";
+import { activeIssueInteractionCondition } from "../issue-question-context.js";
 import { admitReconciledUserContinuation } from "../execution-recovery-resolution.js";
 import { startClaimedLegacyControllerLease } from "../legacy-controller-lease.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
@@ -3189,7 +3190,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 enrichedContextSnapshot.recoveryActionId || enrichedContextSnapshot.recovery || opts.failedRunId ||
                 parseObject(enrichedContextSnapshot.paperclipAgentMessage).text !==
                   (typeof receipt.continuationNote === "string" ? receipt.continuationNote : action.resolutionNote)) return { kind: "skipped" as const };
-            const [prior] = await tx.select({ runId: agentWakeupRequests.runId }).from(agentWakeupRequests).where(and(
+            const [prior] = await tx.select({ id: agentWakeupRequests.id, runId: agentWakeupRequests.runId }).from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
               eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
               eq(agentWakeupRequests.requestedByActorType, "user"), eq(agentWakeupRequests.requestedByActorId, String(receipt.actorId)),
@@ -3198,7 +3199,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             )).limit(1);
             if (prior) {
               const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, prior.runId!),
-                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId)));
+                eq(heartbeatRuns.wakeupRequestId, prior.id),
+                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+                sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+                sql`${heartbeatRuns.contextSnapshot}->>'guardedStatusRepairId' = ${action.id}`,
+                sql`${heartbeatRuns.contextSnapshot}->>'source' = 'issue.comment'`,
+              ));
+              // A conflicting durable binding is uncertainty, not permission
+              // to acknowledge it or create a replacement admission.
               return run ? { kind: "replayed" as const, run } : { kind: "deferred" as const };
             }
             const [current] = await tx.select().from(issues).where(eq(issues.id, issue.id));
@@ -3226,7 +3234,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             )).limit(1);
             const [card] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
               eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
-              eq(issueThreadInteractions.status, "pending"),
+              eq(issueThreadInteractions.status, "pending"), activeIssueInteractionCondition(),
             )).limit(1);
             const [approval] = await tx.select({ id: approvals.id }).from(issueApprovals)
               .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId)))
@@ -3263,7 +3271,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               opts.requestedByActorId !== "execution-recovery" ||
               opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
               enrichedContextSnapshot.source !== "execution.reconciled" ||
-              enrichedContextSnapshot.forceFreshSession !== true ||
+              enrichedContextSnapshot.forceFreshSession ||
               payload?.issueId !== issue.id ||
               payload?.recoveryActionId !== actionId ||
               issue.assigneeAgentId !== agentId ||

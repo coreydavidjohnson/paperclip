@@ -471,7 +471,8 @@ export async function deliverReconciledExecutions(
           recoveryActionId: action.id,
           previousRunId: decision.runId,
           retryOfRunId: decision.runId,
-          forceFreshSession: true,
+          // Normal session selection preserves a usable lineage and already
+          // resets sessions when their current configuration is incompatible.
           wakeReason: "issue_recovery_action_restored",
           source: "execution.reconciled",
         },
