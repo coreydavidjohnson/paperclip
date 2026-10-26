@@ -20,8 +20,8 @@ export function agentRunWritesRevoked(run: {
       && run.companyId && nativeIntent.companyId === run.companyId
       && typeof nativeIntent.intentId === "string" && nativeIntent.intentId
       && typeof nativeIntent.intentAuditId === "string" && nativeIntent.intentAuditId
-      && ["turn", "run", "issue"].includes(String(nativeIntent.scope))
-      && ["pending", "acknowledged"].includes(String(nativeIntent.dispatchState))
+      && ["turn", "run", "issue"].includes(nativeIntent.scope as string)
+      && ["pending", "acknowledged"].includes(nativeIntent.dispatchState as string)
       && typeof nativeIntent.dispatched === "boolean");
 }
 

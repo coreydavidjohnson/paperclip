@@ -802,11 +802,14 @@ async function recordNativeTerminalRecoveryIfNeeded(tx: Db, run: HeartbeatRunRow
     )
     .limit(1);
   let nativeFailureBlock: { runId: string; statusVersion: number; status: "todo" | "blocked" } | undefined;
-  const recoveryStatus = await hasIssueBlockedWait(tx, issue) ? "blocked" : "todo";
+  const recoveryStatus = await hasIssueBlockedWait(tx, issue) ? "blocked"
+    : parseIssueExecutionState(issue.executionState)?.status === "pending" ? "in_review" : "todo";
   if (issue.status !== recoveryStatus) {
     const projected = await issueService(tx).update(issue.id, { status: recoveryStatus }, tx);
     if (projected) {
-      nativeFailureBlock = { runId: run.id, statusVersion: projected.statusVersion, status: recoveryStatus };
+      if (projected.status === "todo" || projected.status === "blocked") {
+        nativeFailureBlock = { runId: run.id, statusVersion: projected.statusVersion, status: projected.status };
+      }
       await tx.insert(activityLog).values({
         companyId: issue.companyId, actorType: "system", actorId: "execution-recovery",
         action: "issue.updated", entityType: "issue", entityId: issue.id, runId: run.id,

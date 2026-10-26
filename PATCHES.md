@@ -446,5 +446,13 @@ heartbeat.ts.
   docs/incidents/2026-10-26-blocked-wait-races.md.
 - Native corrective-handoff instructions require real linked waits or pending
   cards, not a descriptor-only alternative; the regression runs in the image gate.
+- Audited, bound native Stop intent revokes new agent writes before executor
+  acknowledgement, in the shared authentication and transactional authority
+  boundary. Preserve exact request-local admitted handoff authority, reject
+  malformed/foreign receipt authority and avoid unbounded auth payload reads.
+- Deletion uses nonblocking source/dependent/remaining-blocker locks and a
+  rollback-safe 409 for contention, avoiding the reproduced update/delete lock
+  inversion without globally serializing work. Queue recovery also preserves
+  pending review stages and genuine wait priority.
 - Retire when a released upstream service enforces equivalent first-class waits
   across supported writes and includes/navigates blocker links in board lists.

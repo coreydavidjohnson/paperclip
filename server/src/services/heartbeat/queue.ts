@@ -4084,10 +4084,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 });
               }
               const hasRealWait = await hasIssueBlockedWait(tx as unknown as Db, issue);
+              const recoveryStatus = hasRealWait ? "blocked"
+                : parseObject(issue.executionState).status === "pending" ? "in_review" : "todo";
               await tx
                 .update(issues)
                 .set({
-                  status: hasRealWait ? "blocked" : "todo",
+                  status: recoveryStatus,
                   checkoutRunId: null,
                   executionRunId: null,
                   executionAgentNameKey: null,

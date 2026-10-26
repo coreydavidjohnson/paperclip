@@ -63,3 +63,40 @@ Retained log: oct26-integrated-thirteen.log in the task workspace.
 This overlay diagnostic uses the digest-pinned running b47/2095 image, the
 candidate diff and unchanged provider fixtures. It is not the official fresh
 compiler/test/image gate. That gate must qualify the final committed source.
+
+## Later review: Stop authority and deletion contention
+
+A native Stop durably records an audited intent before executor acknowledgement
+and terminal run status. The write-authority helper previously inspected only
+executionCancellation and cancelled status. A real PostgreSQL authentication
+projection and transactional check reproduced four missing fences; JWT and
+API-key middleware each admitted a new write. The corrected RED diagnostic had
+31 passes and six genuine failures. An initial middleware fixture reached the
+unrelated responsible-user membership gate, so it was corrected before counting
+those two failures.
+
+The shared predicate now recognizes a same-company, same-run native intent with
+its exact schema, audit reference, scope and pending/acknowledged dispatch state.
+The authentication query projects only those needed fields rather than copying
+provider payloads. Exact request-local self-handoff authority remains unchanged;
+foreign/malformed receipts are not authority. A follow-up array-shaped scope test
+caught implicit String coercion, which was removed. Do not coerce marker fields
+into valid receipt values.
+
+Four complete suites on fd01290c08 passed 160 tests with zero failures or pending
+cases, including native cancellation and admitted authenticated self-handoff.
+This was an overlay diagnostic, not a fresh compiler or image verdict.
+
+A deterministic two-transaction regression also reproduced PostgreSQL 40P01:
+update locked the dependent before its blocker while deletion locked the blocker
+before the dependent. Deletion now takes its source, dependent and remaining
+blocker locks with NOWAIT. Contention rolls back and returns HTTP 409
+issue_blocker_busy rather than waiting in the inverted order. Existing blocked
+create/update contention still waits and revalidates the blocker after completion.
+No company/global serialization or automatic mutation replay was added.
+
+The next three-suite diagnostic passed 98 cases and failed the deadlock case plus
+two more pending-stage projections, in wake-queue terminal recovery and heartbeat
+workspace preflight. Both keep real waits first, otherwise retain a pending
+execution stage as in_review. Source recovery actions and original owners stay
+unchanged. Full integrated validation and image qualification remain separate.

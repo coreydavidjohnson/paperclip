@@ -2787,6 +2787,7 @@ async function assertIssueBlockedWait(
   dbOrTx: Pick<Db, "select">,
   issue: { id: string; companyId: string },
   requestedBlockerIds?: string[],
+  noWait = false,
 ) {
   // Validate after acquiring the dependency locks, not against a version that
   // can finish while relation synchronization waits for that same row.
@@ -2795,7 +2796,7 @@ async function assertIssueBlockedWait(
       eq(issueRelations.relatedIssueId, issue.id), eq(issueRelations.type, "blocks")));
   await dbOrTx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.companyId, issue.companyId), inArray(issues.id, blockerIds)))
-    .orderBy(issues.id).for("update");
+    .orderBy(issues.id).for("update", { noWait });
   if (!await hasIssueBlockedWait(dbOrTx, issue, requestedBlockerIds)) {
     throw unprocessable("Blocked requires an unresolved linked ticket or a pending question/approval card", {
       code: "blocked_wait_required", issueId: issue.id,
@@ -11776,8 +11777,10 @@ export function issueService(db: Db) {
         // Deletion cascades relation rows. Serialize with blocked decisions so
         // it cannot silently remove a dependent's final first-class wait.
         // Lock the source first: new relations need its FK key-share lock.
+        // Update holds dependent -> blocker. Never wait in the opposite order;
+        // a busy deletion rolls back and returns a retryable conflict instead.
         const [source] = await tx.select({ id: issues.id, companyId: issues.companyId })
-          .from(issues).where(eq(issues.id, id)).for("update");
+          .from(issues).where(eq(issues.id, id)).for("update", { noWait: true });
         if (!source) return null;
         const dependentIds = tx.select({ id: issueRelations.relatedIssueId })
           .from(issueRelations).where(and(eq(issueRelations.companyId, source.companyId),
@@ -11786,14 +11789,14 @@ export function issueService(db: Db) {
         // transition from Todo to Blocked must be rechecked after its row lock.
         const dependents = await tx.select({ id: issues.id, companyId: issues.companyId, status: issues.status })
           .from(issues).where(and(eq(issues.companyId, source.companyId), inArray(issues.id, dependentIds)))
-          .orderBy(issues.id).for("update");
+          .orderBy(issues.id).for("update", { noWait: true });
         for (const dependent of dependents) {
           if (dependent.status !== "blocked") continue;
           const remainingIds = await tx.select({ id: issueRelations.issueId }).from(issueRelations)
             .where(and(eq(issueRelations.companyId, source.companyId),
               eq(issueRelations.relatedIssueId, dependent.id), eq(issueRelations.type, "blocks")))
             .then(rows => rows.map(row => row.id).filter(blockerId => blockerId !== id));
-          await assertIssueBlockedWait(tx, dependent, remainingIds);
+          await assertIssueBlockedWait(tx, dependent, remainingIds, true);
         }
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
@@ -11846,6 +11849,11 @@ export function issueService(db: Db) {
         if (!removedIssue) return null;
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
         return enriched;
+      }).catch((error) => {
+        if (error?.code === "55P03" || error?.cause?.code === "55P03") {
+          throw conflict("Issue or linked tickets are being updated. Retry the deletion.", { code: "issue_blocker_busy" });
+        }
+        throw error;
       }),
 
     checkout: async (

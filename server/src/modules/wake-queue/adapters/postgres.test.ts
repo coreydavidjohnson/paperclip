@@ -429,10 +429,10 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
   });
 
-  it("preserves a pending execution review when native terminal recovery has no typed wait", async () => {
+  it.each(["in_progress", "in_review"] as const)("preserves a pending execution review during native terminal recovery from %s", async (sourceStatus) => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
-    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_review" });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: sourceStatus });
     const executionState = pendingReviewExecutionState(agentId);
     await db.update(issues).set({ executionState }).where(eq(issues.id, issueId));
     const runId = await seedRun({ companyId, agentId, status: "failed", contextSnapshot: { issueId } });
