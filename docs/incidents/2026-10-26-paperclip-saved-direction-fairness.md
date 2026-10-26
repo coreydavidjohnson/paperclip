@@ -47,3 +47,11 @@ repair contracts remain present. Only the import list and additive patch ledger
 conflicts needed manual resolution. No application deployment, lost-before-save
 recovery qualification, latency target or historical queue replay is implied.
 Automatic UI retries stay disabled.
+
+The first combined semantic gate passed the database compiler but rejected the
+new test fixture: it cast real services to mock-only shapes and inferred a
+no-argument/undefined-return release mock. Runtime transpilation had hidden
+those type errors. Keep the real service objects as real dependencies and type
+the release mock to `HeartbeatQueueDependencies` while awaiting its real result.
+Do not coerce through `unknown`, skip the compiler, or change production types
+to accommodate the fixture. Retain the failed exact-revision receipt separately.

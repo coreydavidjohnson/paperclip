@@ -332,10 +332,6 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
             _paperclipWakeContext: { issueId, wakeReason: "issue_commented", wakeCommentIds: [stoppedCommentId] } },
         });
       }
-      const deps = callbacks(db);
-      deps.getAgent.mockResolvedValue(agent);
-      deps.instanceSettings = instanceSettingsService(db) as typeof deps.instanceSettings;
-      deps.issuesSvc = issueService(db) as typeof deps.issuesSvc;
       const wakeQueue = createWakeQueue(db, {
         resolveResponsibleUserId: async () => "board",
         getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
@@ -343,8 +339,15 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
         wakeAdmissionHelpers: {} as never,
         recovery: { escalateStrandedAssignedIssue: async () => {}, escalateStrandedRecoveryIssueInPlace: async () => {} },
       });
-      deps.releaseIssueExecutionAndPromote.mockImplementation(async (source, options) =>
-        wakeQueue.releaseIssueExecution({ companyId: source.companyId, runId: source.id, now: new Date(), ...options }));
+      const deps = {
+        ...callbacks(db),
+        instanceSettings: instanceSettingsService(db),
+        issuesSvc: issueService(db),
+        releaseIssueExecutionAndPromote: vi.fn<HeartbeatQueueDependencies["releaseIssueExecutionAndPromote"]>(async (source, options) => {
+          await wakeQueue.releaseIssueExecution({ companyId: source.companyId, runId: source.id, now: new Date(), ...options });
+        }),
+      };
+      deps.getAgent.mockResolvedValue(agent);
       const queue = createHeartbeatQueue(db, deps);
       if (mode === "sequential") {
         await queue.resumeQueuedRuns();
