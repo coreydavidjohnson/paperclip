@@ -9209,13 +9209,16 @@ describe("native session bounded recovery", () => {
     }
   });
 
-  it("persists actionable operator recovery without an automatic cleanup wake", async () => {
-    const updates: Array<{ table: unknown; values: Record<string, unknown> }> =
-      [];
+  it.each([
+    { hasWait: false, status: "todo" as const },
+    { hasWait: true, status: "blocked" as const },
+  ])("persists actionable operator recovery with a truthful $status projection", async ({ hasWait, status }) => {
+    const updates: Array<{ table: unknown; values: Record<string, unknown> }> = [];
     const failure = new NativeSessionCleanupQuarantinedError();
     state.execute.mockReset().mockRejectedValueOnce(failure);
     state.upsertRecoveryAction.mockReset().mockResolvedValue({});
-    const updateIssue = vi.fn(async () => ({ status: "blocked", statusVersion: 7 }));
+    const updateIssue = vi.fn(async () => ({ status, statusVersion: 7 }));
+    const blockedWait = vi.spyOn(issueServiceModule, "hasIssueBlockedWait").mockResolvedValue(hasWait);
     const service = vi
       .spyOn(issueServiceModule, "issueService")
       .mockReturnValue({ update: updateIssue } as unknown as ReturnType<
@@ -9244,10 +9247,19 @@ describe("native session bounded recovery", () => {
           ),
         },
       });
+      expect(blockedWait).toHaveBeenCalledOnce();
+      expect(updateIssue).toHaveBeenCalledWith(
+        execution.binding.issueId,
+        { status },
+        expect.anything(),
+      );
       expect(state.upsertRecoveryAction).toHaveBeenCalledWith(
         expect.objectContaining({
           cause: "native_session_cleanup_quarantined",
-          evidence: expect.objectContaining({ nativeFailureBlock: { runId: execution.binding.runId, statusVersion: 7 } }),
+          returnOwnerAgentId: execution.binding.agentId,
+          evidence: expect.objectContaining({
+            nativeFailureBlock: { runId: execution.binding.runId, statusVersion: 7, status },
+          }),
           ownerType: "board",
           wakePolicy: null,
           nextAction: expect.stringContaining(
@@ -9255,13 +9267,10 @@ describe("native session bounded recovery", () => {
           ),
         }),
       );
-      expect(updateIssue).toHaveBeenCalledWith(
-        execution.binding.issueId,
-        { status: "blocked" },
-        expect.anything(),
-      );
+      expect(state.execute).toHaveBeenCalledOnce();
     } finally {
       service.mockRestore();
+      blockedWait.mockRestore();
     }
   });
 

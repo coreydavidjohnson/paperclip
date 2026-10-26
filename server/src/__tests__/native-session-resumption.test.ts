@@ -20,6 +20,7 @@ import {
   heartbeatRuns,
   issueRecoveryActions,
   issueComments,
+  issueThreadInteractions,
   issueWorkProducts,
   issues,
   nativeRunFinalizations,
@@ -91,12 +92,13 @@ describe("P6-25 pre-result native session recovery", () => {
   const cancelledRunId = "79000000-0000-4000-8000-000000000005";
   const exhaustedRunId = "79000000-0000-4000-8000-000000000006";
   const missingCheckpointRunId = "79000000-0000-4000-8000-000000000007";
+  const pendingQuestionRunId = "79000000-0000-4000-8000-000000000012";
   const initialRunId = "79000000-0000-4000-8000-000000000008";
   const bootstrapRetryRunId = "79000000-0000-4000-8000-000000000009";
   const observedExpiredRunId = "79000000-0000-4000-8000-000000000010";
   const observedLivePidRunId = "79000000-0000-4000-8000-000000000011";
   const fixtureRunIds = [runId, cancelledRunId, exhaustedRunId, missingCheckpointRunId,
-    initialRunId, bootstrapRetryRunId, observedExpiredRunId, observedLivePidRunId];
+    pendingQuestionRunId, initialRunId, bootstrapRetryRunId, observedExpiredRunId, observedLivePidRunId];
   const issueForRun = (id: string) => id === runId ? issueId : id;
   const persistedProfile = {
     mode: "native",
@@ -176,6 +178,22 @@ describe("P6-25 pre-result native session recovery", () => {
         contextSnapshot: { issueId },
       },
       {
+        id: pendingQuestionRunId,
+        companyId,
+        agentId,
+        nativeIssueId: pendingQuestionRunId,
+        status: "running",
+        runtimeMode: "native",
+        runtimeModeResolvedAt: new Date(),
+        runnerProfileJson: {
+          nativeExecutionInput: {
+            ...persistedProfile.nativeExecutionInput,
+            binding: { runId: pendingQuestionRunId },
+          },
+        },
+        contextSnapshot: { issueId: pendingQuestionRunId },
+      },
+      {
         id: initialRunId,
         companyId,
         agentId,
@@ -238,6 +256,7 @@ describe("P6-25 pre-result native session recovery", () => {
       { runId: cancelledRunId, companyId, issueId, phase: "retryable_failure", attempt: 1, nextAttemptAt: new Date(0) },
       { runId: exhaustedRunId, companyId, issueId, phase: "terminal_failure", attempt: 3 },
       { runId: missingCheckpointRunId, companyId, issueId, phase: "retryable_failure", attempt: 1 },
+      { runId: pendingQuestionRunId, companyId, issueId: pendingQuestionRunId, phase: "retryable_failure", attempt: 1 },
       { runId: initialRunId, companyId, issueId, phase: "observed", attempt: 0 },
       {
         runId: bootstrapRetryRunId,
@@ -522,7 +541,7 @@ describe("P6-25 pre-result native session recovery", () => {
     }
   });
 
-  it("does not resume cancelled or exhausted runs and fails closed without a checkpoint", async () => {
+  it("keeps ambiguous native failure under a board recovery hold without a fabricated blocked wait", async () => {
     await expect(claimNativeSessionResumptions({
       db,
       runnerInstanceId: "reaper",
@@ -530,12 +549,46 @@ describe("P6-25 pre-result native session recovery", () => {
     })).resolves.toEqual([]);
     await expect(db.select().from(nativeRunFinalizations)
       .where(eq(nativeRunFinalizations.runId, missingCheckpointRunId))).resolves.toEqual([
-      expect.objectContaining({ phase: "terminal_failure", failureCode: "native_session_interrupted" }),
+      expect.objectContaining({
+        phase: "terminal_failure",
+        failureCode: "native_session_interrupted",
+        nextAttemptAt: null,
+        failureDetail: expect.objectContaining({ recoveryMode: "ambiguous_state", providerSessionEstablished: false }),
+      }),
+    ]);
+    await expect(db.select().from(issues).where(eq(issues.id, missingCheckpointRunId))).resolves.toEqual([
+      expect.objectContaining({ status: "todo", assigneeAgentId: agentId }),
     ]);
     await expect(db.select().from(issueRecoveryActions)
       .where(eq(issueRecoveryActions.sourceIssueId, missingCheckpointRunId))).resolves.toEqual([
-      expect.objectContaining({ cause: "native_session_interrupted", wakePolicy: null }),
+      expect.objectContaining({
+        status: "active", ownerType: "board", ownerAgentId: null, returnOwnerAgentId: agentId,
+        cause: "native_session_interrupted", wakePolicy: null,
+        evidence: expect.objectContaining({ runId: missingCheckpointRunId, hasCheckpoint: false }),
+      }),
     ]);
+    await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.nativeIssueId, missingCheckpointRunId)))
+      .resolves.toHaveLength(1);
+  });
+
+  it("keeps a pending question as the real blocked wait during ambiguous native recovery", async () => {
+    await db.insert(issueThreadInteractions).values({
+      companyId, issueId: pendingQuestionRunId, kind: "ask_user_questions", payload: { questions: [] } as never,
+    });
+    await expect(claimNativeSessionResumptions({
+      db, runnerInstanceId: "reaper", runIds: [pendingQuestionRunId],
+    })).resolves.toEqual([]);
+    await expect(db.select().from(issues).where(eq(issues.id, pendingQuestionRunId))).resolves.toEqual([
+      expect.objectContaining({ status: "blocked", assigneeAgentId: agentId }),
+    ]);
+    await expect(db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, pendingQuestionRunId)))
+      .resolves.toEqual([expect.objectContaining({ phase: "terminal_failure", nextAttemptAt: null })]);
+    await expect(db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, pendingQuestionRunId)))
+      .resolves.toEqual([expect.objectContaining({ ownerType: "board", returnOwnerAgentId: agentId, wakePolicy: null })]);
+    await expect(db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, pendingQuestionRunId)))
+      .resolves.toEqual([expect.objectContaining({ status: "pending" })]);
+    await expect(db.select().from(heartbeatRuns).where(eq(heartbeatRuns.nativeIssueId, pendingQuestionRunId)))
+      .resolves.toHaveLength(1);
   });
 
   it("does not mistake the pre-first-attempt observed coordinator for an orphan", async () => {
