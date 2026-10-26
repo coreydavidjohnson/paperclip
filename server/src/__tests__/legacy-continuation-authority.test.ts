@@ -183,7 +183,9 @@ describe("legacy continuation persisted authority", () => {
   });
   it.each(["done", "cancelled", "blocked", "in_review"])("honors durable %s instead of the final summary", async status => {
     const f = await fixture();
-    await db.update(issues).set({ status }).where(eq(issues.id, f.issueId));
+    await db.update(issues).set({ status, ...(status === "blocked" ? {
+      unblockDescriptor: { owner: "board" as const, action: "Provide required credentials" },
+    } : {}) }).where(eq(issues.id, f.issueId));
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
     expect(await f.runs()).toHaveLength(1);
   });
@@ -318,7 +320,9 @@ describe("legacy continuation persisted authority", () => {
     await db.insert(issues).values({ companyId: f.companyId, parentId: f.issueId,
       title: "Historical routing", status: history === "done" ? "done" : "todo",
       hiddenAt: history === "hidden" ? new Date() : null, originKind: "routing_child" });
-    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: {
+      owner: "board" as const, action: "Wait for an independent credential decision",
+    } }).where(eq(issues.id, f.issueId));
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
     expect(await f.runs()).toHaveLength(1);
     expect(await f.actions()).toHaveLength(0);

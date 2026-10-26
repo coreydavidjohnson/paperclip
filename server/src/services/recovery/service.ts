@@ -3843,21 +3843,22 @@ export function recoveryService(
       parseObject(context.paperclipWorkspace).mode === "shared_workspace" ? healthyOpenChildIssues(issue, true) : Promise.resolve([]),
     ]);
     const ownsRepair = active?.kind === "deliberate_wait_without_target" && active.ownerType === "agent";
-    // A typed routing hand-back is not a durable prerequisite. Preserve all
-    // other blocked dispositions and every independently persisted wait gate.
+    // A typed routing hand-back is not a durable prerequisite. Preserve every
+    // independently persisted wait gate; blocked alone is not waiting evidence.
     const routingHandback = await currentRoutingHandback(issue, episode.id);
     return decideLegacyContinuation({
       run, issue: routingHandback ? {...issue, status: "in_progress"} : issue, agent, episode,
       gates: {
         stopped: stop.kind !== "clear" || isOperatorCancelledRun(run, run.agentId),
         paused: pause, budgetBlocked: budget,
-        pendingWait: state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
+        pendingWait: Boolean(issue.unblockDescriptor) || state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
         activeExecution: state.hasActiveExecutionPath || latest?.id !== (dispatchRunId ?? run.id),
         ownedLifecycle: run.issueCommentStatus === "retry_queued" || run.issueCommentStatus === "retry_exhausted" ||
           Boolean(readNonEmptyString(context.goalControlRequestId)) || context.resumeSessionGoalHeartbeat === true ||
           isPluginManagedIssueLifecycle(issue) || routine.length > 0 || workspaceChildren.length > 0 ||
           Boolean(goal[0]?.status && goal[0].status !== "complete") || Boolean(active && !ownsRepair),
-        conversation: Boolean(issue.conversationAgentId) || isWaitingConversation(issue),
+        conversation: Boolean(issue.conversationAgentId) || isWaitingConversation(issue) ||
+          (issue.status === "blocked" && issue.originKind === "chat_channel"),
         agentInvokable: Boolean(agent && await isAgentInvokable(agent) && isHeartbeatWakeOnDemandEnabled(agent)),
       },
     });
@@ -3878,6 +3879,9 @@ export function recoveryService(
     if (!source || source.agentId !== run.agentId || legacyDispositionEpisode(source).id !== episode.id) return "invalid_repair_source";
     const [issue] = await db.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).limit(1);
     if (!issue) return "missing_issue";
+    // A routing hand-back admission is bound to the exact disposition whose
+    // stale edge was removed, even though bare-blocked repair is now eligible.
+    if (context.routingParentHandback === true && !await currentRoutingHandback(issue, episode.id)) return "recorded_disposition";
     const state = await collectDispositionRepairSourceState(db, { issue, excludeRunId: run.id, excludeWakeupRequestId: run.wakeupRequestId ?? undefined });
     // This slot has already been reserved. Check admission for that slot rather
     // than allocating or charging another repair attempt during dispatch.
@@ -4487,7 +4491,7 @@ export function recoveryService(
       .where(
         and(
           isNull(issues.assigneeUserId),
-          inArray(issues.status, ["todo", "in_progress", "in_review"]),
+          inArray(issues.status, ["todo", "in_progress", "in_review", "blocked"]),
           or(
             sql`${issues.assigneeAgentId} is not null`,
             eq(issues.status, "in_review"),
@@ -4546,6 +4550,23 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      // An unsupported blocked disposition uses only the successful legacy
+      // owner's bounded repair. Failed/native sources must never fall through
+      // into generic stranded-work replay merely because blocked is included.
+      if (issue.status === "blocked") {
+        const source = await getLatestIssueRun(issue.companyId, issue.id);
+        const outcome = source?.status === "succeeded"
+          ? await reconcileLegacyContinuation(source.id) : "skipped";
+        if (outcome === "queued") {
+          result.continuationRequeued += 1;
+          result.dispositionRepairRequeued += 1;
+          result.issueIds.push(issue.id);
+        } else if (outcome === "escalated") {
+          result.escalated += 1;
+          result.issueIds.push(issue.id);
+        } else result.skipped += 1;
+        continue;
+      }
       if (issue.originKind === "chat_channel") {
         await settleSlackConversation(db, issue.companyId, issue.id);
         const [current] = await db.select({ externalConversationState: externalConversationStateSql() })
