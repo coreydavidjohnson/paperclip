@@ -24,6 +24,10 @@ heartbeat.ts.
 
 ## PER-209 lossless interaction deltas on confirmed session resume
 
+- Compiler gate: keep native interaction fixtures typed to the persisted insert/result
+  contracts, including literal version and confirmation prompt/result fields.
+  Transpiled runtime tests alone do not validate fixture JSON types.
+
 - Extend the existing native `resumeDelta` with new/changed human responses
   and interaction outcomes, plus explicit removed IDs. Compare complete persisted
   JSON records, including resolver attribution, status and result. Reopened or

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
+import type { AskUserQuestionsResult } from "@paperclipai/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -362,8 +363,8 @@ const support = await getEmbeddedPostgresTestSupport();
     it("deltas interaction records losslessly while persisting a complete next baseline", async () => {
       const stableId = randomUUID(), changedId = randomUUID(), withdrawnId = randomUUID();
       const agentResultId = randomUUID(), baselineRunId = randomUUID();
-      const answer = (text: string) => ({ version: 1, answers: [{ questionId: "scope", optionIds: [], otherText: text }] });
-      await db.insert(issueThreadInteractions).values([stableId, changedId, withdrawnId].map(id => ({
+      const answer = (text: string): AskUserQuestionsResult => ({ version: 1, answers: [{ questionId: "scope", optionIds: [], otherText: text }] });
+      await db.insert(issueThreadInteractions).values([stableId, changedId, withdrawnId].map((id): typeof issueThreadInteractions.$inferInsert => ({
         id, companyId, issueId, kind: "ask_user_questions", status: "answered",
         resolvedByUserId: "local-board", resolvedAt: new Date("2026-09-08T10:03:00Z"),
         payload: { version: 1, questions: [] }, result: answer(id === stableId ? "Unchanged decision. ".repeat(5000) : "Original decision."),
@@ -425,16 +426,16 @@ const support = await getEmbeddedPostgresTestSupport();
     });
     it("carries rejection and resolver changes without retaining withdrawn human authority", async () => {
       const rejectedId = randomUUID(), taintedId = randomUUID(), resolverId = randomUUID(), baselineId = randomUUID();
-      await db.insert(issueThreadInteractions).values([rejectedId, taintedId, resolverId].map(id => ({
-        id, companyId, issueId, kind: "request_confirmation", status: "accepted", payload: { version: 1 },
-        resolvedByUserId: "local-board", resolvedAt: new Date("2026-09-08T10:03:00Z"), result: { outcome: "accepted" },
+      await db.insert(issueThreadInteractions).values([rejectedId, taintedId, resolverId].map((id): typeof issueThreadInteractions.$inferInsert => ({
+        id, companyId, issueId, kind: "request_confirmation", status: "accepted", payload: { version: 1, prompt: "May this fixture publish?" },
+        resolvedByUserId: "local-board", resolvedAt: new Date("2026-09-08T10:03:00Z"), result: { version: 1, outcome: "accepted" },
       })));
       const resume = () => buildExecutionContinuation({ db, companyId, issueId, agentId,
         previousContextRunId: baselineId, context: { interactionId }, summary: null, exposeLowTrustRaw: false });
       try {
         await db.insert(heartbeatRuns).values({ id: baselineId, companyId, agentId, status: "succeeded",
           contextSnapshot: { issueId, executionContinuation: await build() } });
-        await db.update(issueThreadInteractions).set({ status: "rejected", result: { outcome: "rejected", reason: "Do not publish." } })
+        await db.update(issueThreadInteractions).set({ status: "rejected", result: { version: 1, outcome: "rejected", reason: "Do not publish." } })
           .where(eq(issueThreadInteractions.id, rejectedId));
         await db.update(issueThreadInteractions).set({ resolvedByAgentId: agentId })
           .where(eq(issueThreadInteractions.id, taintedId));
