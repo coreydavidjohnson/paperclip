@@ -1,3 +1,4 @@
+import { activeIssueInteractionCondition } from "./issue-question-context.js";
 import { assertRecoveryStatusWriteAllowed } from "./guarded-status-repair.js";
 import { issueRunIdsCondition } from "./run-history-query.js";
 import { authorizeHomeLabChild } from "./home-lab-delegation.js";
@@ -2772,7 +2773,8 @@ export async function hasIssueBlockedWait(
   }
   const [question] = await dbOrTx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
     .where(and(eq(issueThreadInteractions.companyId, issue.companyId),
-      eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.status, "pending"))).limit(1);
+      eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.status, "pending"),
+      activeIssueInteractionCondition())).limit(1);
   if (question) return true;
   const [approval] = await dbOrTx.select({ id: approvals.id }).from(issueApprovals)
     .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
