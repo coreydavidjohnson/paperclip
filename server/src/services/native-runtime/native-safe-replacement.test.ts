@@ -2,6 +2,7 @@ import { getExecutionBlocker } from "../execution-blocker.js";
 import { createRunDispatch, deriveCommentId } from "../../modules/run-dispatch/index.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
 import { issueService } from "../issues.js";
+import { registerServerAdapter, unregisterServerAdapter, type AdapterExecutionContext } from "../../adapters/index.js";
 import { activityService } from "../activity.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { buildPaperclipWakePayload, heartbeatService } from "../heartbeat.js";
@@ -23,6 +24,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
+  agentTaskSessions,
   agentWakeupRequests,
   companies,
   createDb,
@@ -575,6 +577,147 @@ const support = externalDatabaseUrl
       const [savedDocument] = await db.select().from(documents).where(eq(documents.id, documentId));
       expect(savedDocument).toMatchObject({ latestBody: "Only the two approved changes.", latestRevisionId: revisionId });
     });
+
+    it.each(["compatible", "model_changed"] as const)(
+      "uses normal session selection for Board-reconciled delivery (%s)",
+      async mode => {
+        const adapterType = "board_reconciled_session_selection_test";
+        const sessionId = "saved-board-reconciliation-session";
+        const captured = new Map<string, AdapterExecutionContext>();
+        registerServerAdapter({
+          type: adapterType,
+          supportsLocalAgentJwt: false,
+          execute: async input => {
+            captured.set(input.runId, input);
+            await db.update(issues).set({ status: "in_review" })
+              .where(eq(issues.id, String(input.context.issueId)));
+            return {
+              exitCode: 0,
+              signal: null,
+              timedOut: false,
+              sessionId,
+              sessionParams: { sessionId, adapterState: "preserved" },
+              resultJson: { session_id: sessionId },
+            };
+          },
+          testEnvironment: async () => ({ adapterType, status: "pass", checks: [], testedAt: new Date().toISOString() }),
+        });
+        const companyId = randomUUID();
+        const agentId = randomUUID();
+        const issueId = randomUUID();
+        const heartbeat = heartbeatService(db);
+        try {
+          await db.insert(companies).values({
+            id: companyId, name: "Board session selection", issuePrefix: `B${companyId.slice(0, 6)}`,
+          });
+          await db.insert(agents).values({
+            id: agentId, companyId, name: "Session owner", role: "engineer", adapterType,
+            status: "idle", adapterConfig: { model: "model-a" },
+            runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } },
+          });
+          await db.insert(issues).values({
+            id: issueId, companyId, title: "Continue reconciled work", status: "todo",
+            assigneeAgentId: agentId,
+          });
+          const initialRun = await heartbeat.wakeup(agentId, {
+            source: "on_demand", triggerDetail: "manual", reason: "manual",
+            payload: { issueId }, contextSnapshot: { issueId },
+          });
+          expect(initialRun).not.toBeNull();
+          await heartbeat.drainActiveRunExecutions();
+          const [storedSession] = await db.select().from(agentTaskSessions).where(and(
+            eq(agentTaskSessions.companyId, companyId),
+            eq(agentTaskSessions.agentId, agentId),
+            eq(agentTaskSessions.adapterType, adapterType),
+            eq(agentTaskSessions.taskKey, issueId),
+          ));
+          expect(storedSession?.sessionDisplayId).toBe(sessionId);
+          const [sourceRun] = await db.select().from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, initialRun!.id));
+          await db.update(issues).set({
+            status: "todo", executionRunId: null, checkoutRunId: null,
+          }).where(eq(issues.id, issueId));
+          await db.update(heartbeatRuns).set({
+            status: "failed", runtimeMode: "legacy", finishedAt: new Date(Date.now() - 1000),
+            errorCode: "omnigent_context_compression_failed", resultJson: { session_id: sessionId },
+          }).where(eq(heartbeatRuns.id, sourceRun!.id));
+          const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
+          const [action] = await db.insert(issueRecoveryActions).values({
+            companyId, sourceIssueId: issueId, kind: "active_run_watchdog", status: "resolved",
+            outcome: "blocked", ownerType: "board", returnOwnerAgentId: agentId,
+            cause: "legacy_execution_requires_reconciliation", fingerprint: sourceRun!.id,
+            nextAction: "Continue the reconciled task without repeating completed actions.",
+            evidence: {
+              runId: sourceRun!.id,
+              originalFailureCode: "omnigent_context_compression_failed",
+              managedCompressionBlock: {
+                runId: sourceRun!.id, status: task!.status,
+                statusVersion: task!.statusVersion, updatedAt: task!.updatedAt.toISOString(),
+              },
+              automaticRecovery: {
+                policy: "preserve_without_replay_v1", runId: sourceRun!.id,
+                replay: "blocked", actionOutcome: "unknown",
+              },
+            },
+          }).returning();
+          const decision = {
+            runId: sourceRun!.id,
+            providerStopped: true as const,
+            actionOutcome: "completed" as const,
+            outcomeEvidence: "Verified the stopped session completed compaction; saved work must not be replayed.",
+          };
+          await expect(validateExecutionReconciliation({
+            db, companyId, issueId, agentId, sourceRunId: sourceRun!.id, decision,
+          })).resolves.toMatchObject({ id: sourceRun!.id });
+          await markExecutionReconciliation(db, action!, decision, "board-operator");
+          if (mode === "model_changed") {
+            await db.update(agents).set({ adapterConfig: { model: "model-b" } })
+              .where(eq(agents.id, agentId));
+          }
+
+          await deliverReconciledExecutions(db, heartbeat.wakeup);
+          await heartbeat.drainActiveRunExecutions();
+          const [successor] = await db.select().from(heartbeatRuns)
+            .where(eq(heartbeatRuns.retryOfRunId, sourceRun!.id));
+          expect(successor).toBeDefined();
+          const selected = captured.get(successor!.id);
+          expect(selected).toBeDefined();
+          expect(selected!.context).not.toHaveProperty("forceFreshSession");
+          if (mode === "compatible") {
+            expect(selected!.runtime).toMatchObject({
+              sessionId,
+              sessionDisplayId: sessionId,
+              sessionParams: { sessionId, adapterState: "preserved" },
+            });
+            expect(successor!.resultJson).toMatchObject({
+              configFreshness: { session: { reset: false, taskSessionReused: true } },
+            });
+          } else {
+            expect(selected!.runtime.sessionId).toBeNull();
+            expect(selected!.runtime.sessionParams).toBeNull();
+            expect(successor!.resultJson).toMatchObject({
+              configFreshness: {
+                session: {
+                  reset: true,
+                  taskSessionReused: false,
+                  resetReasons: expect.arrayContaining([
+                    expect.stringContaining("configured model changed from"),
+                  ]),
+                },
+              },
+            });
+          }
+          const [delivered] = await db.select().from(issueRecoveryActions)
+            .where(eq(issueRecoveryActions.id, action!.id));
+          expect(delivered!.evidence).toMatchObject({
+            continuationDelivery: "delivered", continuationRunId: successor!.id,
+          });
+        } finally {
+          await heartbeat.drainActiveRunExecutions();
+          unregisterServerAdapter(adapterType);
+        }
+      },
+    );
 
     it("does not reopen a reconciled legacy run while continuation is pending", async () => {
       const source = await seed();
