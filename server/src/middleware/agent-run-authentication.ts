@@ -7,13 +7,26 @@ export function loadAgentRunAuthentication(db: Db, input: {
   agentId: string;
 }) {
   return db.select({
+    id: heartbeatRuns.id,
+    companyId: heartbeatRuns.companyId,
     activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
     responsibleUserId: heartbeatRuns.responsibleUserId,
     status: heartbeatRuns.status,
     resultJson: sql<Record<string, unknown>>`jsonb_build_object(
       'executionCancellation', jsonb_build_object(
         'state', ${heartbeatRuns.resultJson}->'executionCancellation'->'state'
-      )
+      ),
+      'nativeCancellation', CASE WHEN jsonb_typeof(${heartbeatRuns.resultJson}->'nativeCancellation') = 'object'
+        THEN jsonb_build_object(
+          'schema', ${heartbeatRuns.resultJson}->'nativeCancellation'->'schema',
+          'runId', ${heartbeatRuns.resultJson}->'nativeCancellation'->'runId',
+          'companyId', ${heartbeatRuns.resultJson}->'nativeCancellation'->'companyId',
+          'intentId', ${heartbeatRuns.resultJson}->'nativeCancellation'->'intentId',
+          'intentAuditId', ${heartbeatRuns.resultJson}->'nativeCancellation'->'intentAuditId',
+          'scope', ${heartbeatRuns.resultJson}->'nativeCancellation'->'scope',
+          'dispatchState', ${heartbeatRuns.resultJson}->'nativeCancellation'->'dispatchState',
+          'dispatched', ${heartbeatRuns.resultJson}->'nativeCancellation'->'dispatched'
+        ) ELSE NULL END
     )`,
     contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
       'conversationMode', ${heartbeatRuns.contextSnapshot}->'conversationMode'
