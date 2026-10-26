@@ -2996,6 +2996,52 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     } };
   }
 
+  it("PER-626 settles a nonexhausted Board todo hold through exact normal continuation", async () => {
+    const { companyId, sourceIssueId, coderId, action } = await seedTrappedDisposition();
+    const [source] = await db.update(issues).set({ status: "todo" })
+      .where(eq(issues.id, sourceIssueId)).returning();
+    const [hold] = await db.update(issueRecoveryActions).set({
+      evidence: { runId: randomUUID(), decisionId: randomUUID() },
+      nextAction: "Verify the specific request, then continue the existing task.",
+    }).where(eq(issueRecoveryActions.id, action.id)).returning();
+    const wake = vi.fn(async () => ({ id: randomUUID() }));
+    const app = createApp(undefined, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: hold.id, outcome: "restored", sourceIssueStatus: "todo",
+      statusRepair: { sourceUpdatedAt: source.updatedAt.toISOString(), sourceStatus: source.status,
+        sourceStatusVersion: source.statusVersion, assigneeAgentId: coderId,
+        actionUpdatedAt: hold.updatedAt.toISOString(), actionFingerprint: hold.fingerprint },
+      resolutionNote: "The specific request is verified. Continue this task in the saved session." };
+    const first = await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(first.body.issue).toMatchObject({ status: "todo", assigneeAgentId: coderId, activeRecoveryAction: null });
+    expect(first.body.recoveryAction).toMatchObject({ status: "resolved", outcome: "handed_back" });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(wake).toHaveBeenCalledOnce();
+    expect(wake).toHaveBeenCalledWith(coderId, expect.objectContaining({ reason: "issue_commented",
+      idempotencyKey: `guarded-status-repair:${hold.id}`, contextSnapshot: expect.objectContaining({
+        source: "issue.comment", paperclipAgentMessage: { text: body.resolutionNote, source: "board" },
+      }) }));
+    expect(wake.mock.calls[0][1].contextSnapshot).not.toHaveProperty("forceFreshSession");
+    expect(wake.mock.calls[0][1].contextSnapshot).not.toHaveProperty("recoveryActionId");
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, sourceIssueId))).toEqual([]);
+    expect(await db.select().from(issueRelations).where(eq(issueRelations.relatedIssueId, sourceIssueId))).toEqual([]);
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, hold.id)))[0].evidence)
+      .not.toHaveProperty("terminalReason");
+  });
+
+  it("PER-626 refuses same-status Board todo settlement without an exact snapshot", async () => {
+    const { sourceIssueId, action } = await seedTrappedDisposition();
+    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+    await db.update(issueRecoveryActions).set({ kind: "missing_disposition", evidence: {} })
+      .where(eq(issueRecoveryActions.id, action.id));
+    const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const wake = vi.fn(async () => null);
+    await request(createApp(undefined, { recoveryActionEnqueueWakeup: wake }))
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo" }).expect(409);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(before);
+    expect(wake).not.toHaveBeenCalled();
+  });
+
   it("PER-968 does not let stale agent-owned coverage resolve a newer board escalation", async () => {
     const { companyId, sourceIssueId, action } = await seedTrappedDisposition();
     const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
