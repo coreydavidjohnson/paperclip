@@ -103,6 +103,7 @@ function createApp(db: any, deploymentMode: "authenticated" | "local_trusted" = 
       resolveSession: async () => null,
     }),
   );
+  app.post("/actor", (req, res) => res.json(req.actor));
   app.get("/actor", (req, res) => {
     res.json(req.actor);
   });
@@ -217,8 +218,8 @@ describe("agent auth middleware", () => {
       } } },
     });
     const token = source === "agent_key" ? key : createLocalAgentJwt(agentId, companyId, "grok_local", runId, "fixture-user");
-    const client = createApp(db), endpoint = `/companies/${companyId}/issues/${randomUUID()}`;
-    const write = await request(client).patch(endpoint).set("Authorization", `Bearer ${token}`).set("X-Paperclip-Run-Id", runId).send({ status: "done" });
+    const client = createApp(db), endpoint = "/actor";
+    const write = await request(client).post(endpoint).set("Authorization", `Bearer ${token}`).set("X-Paperclip-Run-Id", runId).send({ status: "done" });
     expect(write.status).toBe(403);
     expect(write.body.code).toBe("agent_run_cancelled");
     const read = await request(client).get(endpoint).set("Authorization", `Bearer ${token}`).set("X-Paperclip-Run-Id", runId);
