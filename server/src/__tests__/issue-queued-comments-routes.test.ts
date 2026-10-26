@@ -2053,13 +2053,13 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(getTaskDrainStatus().pendingWakes).toBe(0);
   });
 
-  it("serializes concurrent same-key normal comments into one durable operation", async () => {
+  it.each(["comments", "comments/replay-safe"])("serializes concurrent same-key normal comments into one durable operation (%s)", async path => {
     const seeded = await seedQueue();
     const clientRequestId = randomUUID();
     const body = { clientRequestId, body: "One durable comment" };
     const [first, second] = await Promise.all([
-      request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send(body),
-      request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send(body),
+      request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send(body),
+      request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send(body),
     ]);
     expect(first.status, JSON.stringify(first.body)).toBe(201);
     expect(second.status, JSON.stringify(second.body)).toBe(201);
@@ -2104,7 +2104,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(child.exitCode).toBeNull();
   });
 
-  it("rolls back the comment, receipt, interrupt wake, and audit as one operation", async () => {
+  it.each(["comments", "comments/replay-safe"])("rolls back the comment, receipt, interrupt wake, and audit as one operation (%s)", async path => {
     const seeded = await seedQueue();
     await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
       .where(eq(agents.id, seeded.agentId));
@@ -2122,7 +2122,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await db.execute(sql.raw(`CREATE TRIGGER fail_issue_comment_audit
       BEFORE INSERT ON activity_log FOR EACH ROW EXECUTE FUNCTION fail_issue_comment_audit()`));
     try {
-      const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+      const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send({
         clientRequestId, body: "Must roll back with its receipt and stop intent", interrupt: true,
       });
       expect(response.status).toBe(500);
@@ -2142,7 +2142,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     }
   });
 
-  it("persists the original run target for comment interrupt recovery", async () => {
+  it.each(["comments", "comments/replay-safe"])("persists the original run target for comment interrupt recovery (%s)", async path => {
     const seeded = await seedQueue();
     await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
       .where(eq(agents.id, seeded.agentId));
@@ -2155,7 +2155,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       status: "running", contextSnapshot: { issueId: randomUUID() },
     });
     const clientRequestId = randomUUID();
-    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send({
       clientRequestId, body: "Interrupt only the run that received this request", interrupt: true,
     });
     expect(response.status, JSON.stringify(response.body)).toBe(201);
@@ -2179,7 +2179,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       issueId: seeded.issueId, contextSnapshot: { issueId: seeded.issueId },
     });
     await db.update(issues).set({ executionRunId: successorId }).where(eq(issues.id, seeded.issueId));
-    const replay = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`).send({
+    const replay = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send({
       clientRequestId, body: "Interrupt only the run that received this request", interrupt: true,
     });
     expect(replay.status, JSON.stringify(replay.body)).toBe(201);
@@ -2191,6 +2191,59 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       .filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(1);
   });
 
+
+  it.each(["unassigned", "reopen", "resume", "review", "runner-interrupt", "conversation"])(
+    "rejects an unsupported replay-safe operation before comment/control effects (%s)", async variant => {
+      const seeded = await seedQueue();
+      const clientRequestId = randomUUID();
+      if (variant === "unassigned") await db.update(issues).set({ assigneeAgentId: null, executionRunId: null }).where(eq(issues.id, seeded.issueId));
+      if (variant === "reopen" || variant === "resume") await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, seeded.issueId));
+      if (variant === "review") await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, seeded.issueId));
+      if (variant === "conversation") await db.update(issues).set({ conversationAgentId: seeded.agentId, conversationUserId: "queue-owner" }).where(eq(issues.id, seeded.issueId));
+      const before = (await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0];
+      const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send({
+        clientRequestId, body: "Must not enter an unsafe control path",
+        ...(variant === "reopen" ? { reopen: true } : {}),
+        ...(variant === "resume" ? { resume: true } : {}),
+        ...(variant === "runner-interrupt" ? { interrupt: true } : {}),
+      });
+      expect(response.status, JSON.stringify(response.body)).toBe(409);
+      expect(response.body.details?.code).toBe("comment_operation_not_replay_safe");
+      expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(0);
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId))).toHaveLength(1);
+      expect(await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId))).toHaveLength(0);
+      expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(before);
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId)))[0].status).toBe("running");
+    },
+  );
+
+  it.each(["missing-key", "agent"])("requires a keyed authenticated board user on the replay-safe route (%s)", async variant => {
+    const seeded = await seedQueue();
+    const response = await request(app(seeded.companyId, "queue-owner", variant === "agent" ? seeded : undefined))
+      .post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send({
+        body: "Do not accept an unbound request", ...(variant === "agent" ? { clientRequestId: randomUUID() } : {}),
+      });
+    expect(response.status, JSON.stringify(response.body)).toBe(variant === "agent" ? 403 : 422);
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toHaveLength(2);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId))).toHaveLength(1);
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId))).toHaveLength(0);
+  });
+
+  it("replays a safe committed receipt through a fresh router after the issue becomes unsupported", async () => {
+    const seeded = await seedQueue();
+    const body = { clientRequestId: randomUUID(), body: "The response can be lost after commit" };
+    const first = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send(body);
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, seeded.issueId));
+    const replay = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send(body);
+    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
+    expect(replay.body.id).toBe(first.body.id);
+    expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0].status).toBe("done");
+    expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, body.clientRequestId))).toHaveLength(1);
+    const conflict = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send({ ...body, interrupt: true });
+    expect(conflict.status, JSON.stringify(conflict.body)).toBe(409);
+    expect(conflict.body.details?.code).toBe("comment_operation_key_conflict");
+  });
 
   it("preserves initial reopen behavior while disabling unsafe transition replay", async () => {
     const seeded = await seedQueue();
