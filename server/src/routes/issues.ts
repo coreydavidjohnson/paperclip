@@ -18415,6 +18415,13 @@ export function issueRoutes(
       const replaySafeRequired = /\/comments\/replay-safe\/?$/.test(req.path);
       if (replaySafeRequired) {
         if (req.actor.type !== "board" || !req.actor.userId) throw forbidden("Board user access required");
+        // A login/company change must not post another user's retained draft.
+        // These are restrictive expected-identity fences, never authentication.
+        const expectedUserId = req.header("X-Paperclip-Expected-User-Id");
+        const expectedCompanyId = req.header("X-Paperclip-Expected-Company-Id");
+        if ((expectedUserId !== undefined && expectedUserId !== req.actor.userId) ||
+            (expectedCompanyId !== undefined && expectedCompanyId !== issue.companyId))
+          throw forbidden("The saved comment user or company changed");
         if (!req.body.clientRequestId) throw unprocessable("Replay-safe comments require a clientRequestId");
         if (issue.conversationAgentId) throw conflict("This comment variant is not replay-safe", {
           code: "comment_operation_not_replay_safe",

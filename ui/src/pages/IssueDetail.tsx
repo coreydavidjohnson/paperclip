@@ -1,3 +1,4 @@
+import type { CommentRecovery } from "../components/CommentRecoveryButton";
 import { grokBotApi } from "@/api/grokBot";
 import { WorkspaceBaseRefRecoveryProvider } from "../components/WorkspaceBaseRefRecovery";
 import { isLockedIssueStub, LockedIssueChip } from "@/components/LockedIssueChip";
@@ -1297,6 +1298,7 @@ type IssueDetailChatTabProps = {
     runSettings?: ComposerRunSettings,
   ) => Promise<void>;
   onReviewConversation: () => Promise<void>;
+  commentRecovery?: CommentRecovery;
   onImageUpload: (file: File) => Promise<string>;
   onAttachImage: (file: File) => Promise<IssueAttachment | void>;
   onInterruptQueued: (runId: string | null) => Promise<void>;
@@ -1419,6 +1421,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
   onVote,
   onAdd,
   onReviewConversation,
+  commentRecovery,
   onImageUpload,
   onAttachImage,
   onInterruptQueued,
@@ -2614,6 +2617,7 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
             onVote={onVote}
             onAdd={onAdd}
             onReviewConversation={onReviewConversation}
+            commentRecovery={commentRecovery}
             imageUploadHandler={onImageUpload}
             onAttachImage={onAttachImage}
             onInterruptQueued={interruptQueuedComments}
@@ -3535,6 +3539,25 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     enabled: !!selectedCompanyId,
   });
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
+  const commentScope = useMemo(() => loadedIssue && currentUserId
+    ? { companyId: loadedIssue.companyId, issueId: loadedIssue.id, userId: currentUserId } : null,
+    [loadedIssue?.companyId, loadedIssue?.id, currentUserId]);
+  useEffect(() => {
+    if (commentScope) for (const comment of comments) issuesApi.confirmRecoveredComment(commentScope, comment);
+  }, [commentScope, comments]);
+  const commentRecovery = useMemo<CommentRecovery | undefined>(() => commentScope ? {
+    canRecover: attemptId => issuesApi.canRecoverComment(commentScope, attemptId),
+    recover: async attemptId => {
+      await issuesApi.recoverComment(commentScope, attemptId);
+      // The POST receipt confirms delivery even if the following read fails.
+      // Do not turn that confirmed write back into an uncertain submission.
+      void Promise.all([
+        refetchComments({ throwOnError: true }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.issues.detail(commentScope.issueId) }),
+      ]).catch(() => {});
+    },
+  } : undefined, [commentScope, refetchComments, queryClient]);
+
   useEffect(() => {
     if (!streamlinedUiEnabled || !issue || !sessionResolved) return;
     recordRecentTask(issue, currentUserId);
@@ -4770,7 +4793,15 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
       body: string; reopen?: boolean; interrupt?: boolean; attachmentIds?: string[]; clientRequestId?: string;
     }) => {
       if (issue?.conversationAgentId) clearLegacyChatMessageRequests(`${issue.companyId}:${currentUserId}:${issue.conversationAgentId}`);
-      return issuesApi.addComment(await resolveWritableIssueId(), body, reopen, interrupt, attachmentIds, clientRequestId ?? crypto.randomUUID());
+      if (!conversation && !loadedIssue) throw new Error("Wait for the requested task to load before sending a comment.");
+      const writableId = await resolveWritableIssueId();
+      const requestId = clientRequestId ?? crypto.randomUUID();
+      // Ordinary routes can use an identifier. Bind safe delivery to the
+      // verified loaded task's canonical ID, never a cached navigation seed.
+      if (!conversation && commentScope && loadedIssue) {
+        return issuesApi.addComposerComment(commentScope, loadedIssue, { body, reopen, interrupt, attachmentIds, clientRequestId: requestId });
+      }
+      return issuesApi.addComment(writableId, body, reopen, interrupt, attachmentIds, requestId);
     },
     onMutate: async ({ body, reopen, interrupt }) => {
       // Start cache cancellation immediately but do not put it in front of the
@@ -8235,6 +8266,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   queuedCommentReason={queuedCommentReason}
                   onVote={handleCommentVote}
                   onAdd={handleChatAdd}
+                  commentRecovery={commentRecovery}
                   onReviewConversation={async () => {
                     await Promise.all([
                       refetchComments({ throwOnError: true }),

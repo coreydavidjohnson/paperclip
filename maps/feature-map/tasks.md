@@ -68,6 +68,13 @@ that slow workspace restoration does not turn the task Blocked. Try a later edit
 from the outgoing run and verify rejection. Repeat a board
 reassignment and confirm that the outgoing run still stops.
 
+Candidate recovery: ordinary assigned-task comments keep one immutable request
+across bounded retries and reload. Both composers recover only the saved key;
+unsupported initial variants stay one-shot. Test lost-before-save and
+lost-after-commit through real HTTP, same-user identity, next-draft preservation,
+Stop, and failed refresh before production qualification. Candidate unit tests
+do not establish the complete live journey.
+
 Manual: Add a comment and edit authorized properties. Reload and verify history, actor, and values. Complete a disposable task and inspect its deliverable; reopen through an available action and confirm the next execution follows current policy.
 
 ## Gotchas

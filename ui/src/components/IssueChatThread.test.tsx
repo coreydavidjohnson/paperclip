@@ -426,6 +426,7 @@ describe("IssueChatThread", () => {
       await act(async () => retry!.click());
       expect(recover.mock.calls).toEqual([[attemptId]]);
       expect(onAdd).not.toHaveBeenCalled();
+      expect(loadDraft(key)).toBe("");
     } finally { await act(async () => root.unmount()); }
   });
   function renderIssueThread(root: ReturnType<typeof createRoot>, props: Partial<ComponentProps<typeof IssueChatThread>> = {}) {

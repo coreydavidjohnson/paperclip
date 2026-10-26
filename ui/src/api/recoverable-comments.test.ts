@@ -47,6 +47,22 @@ describe("durable replay-safe composer requests", () => {
     await issuesApi.addComposerComment(scope, { ...issue, status: "done" }, payload);
     expect(mockApi.post.mock.calls.map(([path]) => path)).toEqual(Array(4).fill(`/issues/${scope.issueId}/comments/replay-safe`));
   });
+  it("snapshots the expected actor before any in-flight login-context mutation", async () => {
+    const mutableScope = { ...scope };
+    mockApi.post.mockRejectedValueOnce(new TypeError("lost")).mockResolvedValue(receipt);
+    const pending = issuesApi.addRecoverableComment(mutableScope, payload);
+    const outcome = pending.then(value => ({ ok: true, value }), error => ({ ok: false, error }));
+    mutableScope.userId = "different-user";
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await outcome).toEqual({ ok: true, value: receipt });
+    for (const [, , options] of mockApi.post.mock.calls)
+      expect(options.headers["X-Paperclip-Expected-User-Id"]).toBe(scope.userId);
+  });
+  it("never selects a legacy fallback when browser storage cannot establish whether a safe request exists", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => { throw new Error("Storage offline"); });
+    await expect(issuesApi.addComposerComment(scope, { ...issue, status: "done" }, payload)).rejects.toThrow();
+    expect(mockApi.post).not.toHaveBeenCalled();
+  });
   it("persists before sending and removes only its own confirmed request", async () => {
     mockApi.post.mockImplementation(async () => {
       expect(issuesApi.canRecoverComment(scope, clientRequestId)).toBe(true);

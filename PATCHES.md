@@ -497,9 +497,13 @@ heartbeat.ts.
   unsupported variant before content/control effects. Content-only legacy
   receipts cannot qualify an unknown control operation. Legacy compatibility,
   Stop, approval, owner, input and original-target guards remain unchanged.
-- Client: an explicit, unused qualification method snapshots the operation,
-  keeps one key, bounds three attempts with abort deadlines and never falls
-  back to the legacy route. Existing production composers stay one-shot.
+- Client: ordinary assigned-task composer comments select the dedicated safe
+  path and retain an immutable actor/company/task-bound request before I/O.
+  Both composers recover the saved key after reload without rebuilding its
+  body. Unsupported initial variants remain one-shot; unknown safe operations
+  never downgrade to legacy. Expected identity is snapshotted and server-fenced.
+  Production activation still requires full staged qualification. See
+  `docs/incidents/2026-10-26-paperclip-composer-recovery.md`.
 - Controls: complete queued-comment route suite and UI API suite remain in the
   mandatory Dockerfile gate. See the replay-safe admission incident for fault
   injection and activation limits. No production or latency claim.

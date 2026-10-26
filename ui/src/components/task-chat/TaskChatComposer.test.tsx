@@ -2994,10 +2994,10 @@ describe("saved-request recovery control", () => {
     expect(container.textContent).toContain("Your saved request is kept");
     render(<div>Other task</div>);
     render(view(false, true));
-    expect(retry().disabled).toBe(true);
+    expect(retry()).toBeUndefined();
+    expect(recover).toHaveBeenCalledTimes(1);
     render(view());
     await act(async () => retry().click());
-    render(view(true));
     await flushAsync();
     expect(editable().textContent).toBe("Next draft");
     expect(loadDraftSubmission(key)).toBeNull();

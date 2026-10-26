@@ -1,3 +1,4 @@
+import { CommentRecoveryButton, type CommentRecovery } from "../CommentRecoveryButton";
 import { AgentAvatar } from "../AgentAvatar";
 import {
   useEffect,
@@ -150,6 +151,7 @@ interface TaskChatComposerProps {
   /** Storage key used to restore, persist, and clear this task's text draft. */
   draftKey?: string;
   onReviewConversation?: () => Promise<void>;
+  commentRecovery?: CommentRecovery;
   /** When set, the main composer temporarily edits this queued message. */
   queuedEdit?: { commentId: string; body: string; stale?: boolean } | null;
   onSaveQueuedEdit?: (commentId: string, body: string) => Promise<void>;
@@ -404,6 +406,7 @@ export function TaskChatComposer({
   mobile = false,
   draftKey,
   onReviewConversation,
+  commentRecovery,
   queuedEdit = null,
   onSaveQueuedEdit,
   onCancelQueuedEdit,
@@ -420,6 +423,7 @@ export function TaskChatComposer({
   const body = creation ? creation.value : localBody;
   const [submitting, setSubmitting] = useState(false);
   const [reviewError, setReviewError] = useState(false);
+  const [recoveredAttemptId, setRecoveredAttemptId] = useState<string | null>(null);
   const [uncertainSubmission, setUncertainSubmission] =
     useState<ComposerDraftSubmission | null>(() =>
       draftKey ? loadDraftSubmission(draftKey) : null,
@@ -1114,7 +1118,7 @@ export function TaskChatComposer({
   }
 
   useEffect(() => {
-    if (!uncertainSubmission || !confirmedSubmissionIds?.has(uncertainSubmission.attemptId)) return;
+    if (!uncertainSubmission || (!confirmedSubmissionIds?.has(uncertainSubmission.attemptId) && recoveredAttemptId !== uncertainSubmission.attemptId)) return;
     const nextDraft = uncertainSubmission.nextDraftOffset === undefined
       ? "" : bodyRef.current.slice(uncertainSubmission.nextDraftOffset);
     if (draftKey) settleDraftSubmission(draftKey, uncertainSubmission.attemptId, nextDraft);
@@ -1125,7 +1129,7 @@ export function TaskChatComposer({
     setAttachments(current => submittedIds
       ? current.filter(item => !item.attachmentId || !submittedIds.includes(item.attachmentId))
       : []);
-  }, [confirmedSubmissionIds, draftKey, uncertainSubmission]);
+  }, [confirmedSubmissionIds, draftKey, uncertainSubmission, recoveredAttemptId]);
 
   async function reviewUncertainSubmission() {
     if (!uncertainSubmission) return;
@@ -1298,6 +1302,15 @@ export function TaskChatComposer({
             We couldn’t confirm whether this comment was saved. It may already
             be in the conversation. Review it before starting another draft.
           </p>
+          <CommentRecoveryButton key={uncertainSubmission.attemptId} attemptId={uncertainSubmission.attemptId}
+            onConfirmed={() => {
+              if (mountedTaskKey.current !== draftKey) {
+                if (draftKey) settleDraftSubmission(draftKey, uncertainSubmission.attemptId);
+                return;
+              }
+              setRecoveredAttemptId(uncertainSubmission.attemptId);
+            }}
+            recovery={commentRecovery} disabled={disabled || Boolean(pause) || submitting} />
           <Button
             type="button"
             variant="outline"

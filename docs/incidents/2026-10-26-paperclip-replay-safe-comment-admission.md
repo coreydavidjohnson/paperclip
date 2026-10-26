@@ -33,12 +33,13 @@ body. A later known refusal after an unknown attempt must preserve uncertainty
 because the first attempt may have committed. Never fall back to a legacy
 write or infer resend safety from a GET miss.
 
-This method is not wired into any production composer. The existing default
-`addComment` remains one-shot. Candidate implementation and unit tests do not
-authorize activation: complete real HTTP fault injection, image gates,
-isolated comment/answer/follow-up/interrupt/restart acceptance, independent
-review and latency qualification first. Unsupported state recovery and safe
-composer selection remain unfinished. No production repair is claimed.
+The candidate now selects this path for ordinary assigned-task composer
+comments and retains an immutable actor-bound request for recovery. See the
+composer recovery incident and design for selection and reload controls. The
+legacy `addComment` remains one-shot for unsupported initial variants. This is
+not production activation: real HTTP fault injection, image gates, isolated
+comment/answer/follow-up/interrupt/restart acceptance, independent review and
+latency qualification remain required. No production repair is claimed.
 
 ## Tests and retained failures
 

@@ -585,9 +585,10 @@ export const issuesApi = {
       }),
       hasCommentReceipt,
     ),
-  // Explicit qualification path only. Existing composers keep their one-shot
-  // addComment behavior until the complete staged recovery contract is verified.
+  // Dedicated safe transport. Never downgrade an uncertain request to addComment.
+  // Production activation still requires complete staged recovery qualification.
   addReplaySafeComment: async (id: string, data: AddIssueComment & { clientRequestId: string }, scope?: ReplaySafeCommentScope): Promise<IssueComment> => {
+    scope = scope ? { ...scope } : undefined;
     if (scope && scope.issueId !== id) throw new Error("Comment recovery task changed");
     const payload: AddIssueComment & { clientRequestId: string } = JSON.parse(JSON.stringify(data));
     for (let attempt = 0; ; attempt++) {
@@ -616,15 +617,35 @@ export const issuesApi = {
       }
     }
   },
+  addComposerComment: async (
+    scope: ReplaySafeCommentScope,
+    issue: Pick<Issue, "id" | "companyId" | "assigneeAgentId" | "conversationAgentId"> & { status: string },
+    data: RecoverableCommentInput & { reopen?: boolean; interrupt?: boolean },
+  ): Promise<IssueComment> => {
+    if (issue.id !== scope.issueId || issue.companyId !== scope.companyId || !scope.userId)
+      throw new Error("Comment user or task changed");
+    // A retained intent always stays on its original safe path, even if the
+    // latest task snapshot now requires a legacy transition. No downgrade.
+    let retained: boolean;
+    try { retained = sessionStorage.getItem(recoveryKey(scope, data.clientRequestId)) !== null; }
+    catch { throw new Error("Browser storage is unavailable. No comment request was sent."); }
+    if (retained || (issue.assigneeAgentId && !issue.conversationAgentId &&
+        ["backlog", "todo", "in_progress", "blocked"].includes(issue.status) && !data.reopen && !data.interrupt)) {
+      if (retained && (data.reopen || data.interrupt)) throw new CommentSubmissionUnknownError();
+      return issuesApi.addRecoverableComment(scope, data);
+    }
+    return issuesApi.addComment(scope.issueId, data.body, data.reopen, data.interrupt, data.attachmentIds, data.clientRequestId);
+  },
   // Ordinary assigned-task comments only. Persist the exact request before
   // I/O; never rebuild it from an editable draft or choose a legacy endpoint.
   addRecoverableComment: async (scope: ReplaySafeCommentScope, input: RecoverableCommentInput): Promise<IssueComment> => {
+    scope = { companyId: scope.companyId, issueId: scope.issueId, userId: scope.userId };
     const payload: RecoverableCommentInput = {
       body: input.body, clientRequestId: input.clientRequestId,
       ...(input.attachmentIds?.length ? { attachmentIds: [...input.attachmentIds] } : {}),
     };
     const key = recoveryKey(scope, payload.clientRequestId);
-    let existed: boolean;
+    let existed = false;
     try {
       const raw = sessionStorage.getItem(key);
       existed = raw !== null;
@@ -634,7 +655,7 @@ export const issuesApi = {
       if (JSON.stringify(readRecovery(scope, payload.clientRequestId)) !== JSON.stringify(payload))
         throw new Error("Browser storage could not retain this request");
     } catch (error) {
-      if (error instanceof Error && error.message === "The original saved request must not be changed") throw error;
+      if (existed) throw new CommentSubmissionUnknownError();
       throw new Error("Browser storage is unavailable. No comment request was sent.");
     }
     try {

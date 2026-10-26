@@ -167,6 +167,10 @@ RUN pnpm --filter @paperclipai/ui exec vitest run \
     src/components/task-chat/ComposerRunSettingsPicker.test.tsx \
     src/context/FileViewerContext.test.ts \
     src/api/issues.test.ts \
+    src/api/recoverable-comments.test.ts \
+    src/components/task-chat/TaskChatComposer.test.tsx \
+    src/components/IssueChatThread.test.tsx \
+    src/components/TaskChatThread.test.tsx \
     src/lib/query-invalidation-batcher.test.ts \
     src/lib/issue-refresh-budget.test.ts \
     src/context/LiveUpdatesProvider.test.ts \

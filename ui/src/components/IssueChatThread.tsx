@@ -1,3 +1,4 @@
+import { CommentRecoveryButton, type CommentRecovery } from "./CommentRecoveryButton";
 import { resolveIssueChatHumanAuthor } from "@/lib/issue-chat-human-author";
 import { useWorkspaceBaseRefRecovery } from "./WorkspaceBaseRefRecovery";
 import { WorkspaceBaseRefRecoveryNotice } from "./WorkspaceBaseRefRecoveryNotice";
@@ -514,6 +515,7 @@ interface IssueChatComposerProps {
   onSend: IssueChatThreadProps["onAdd"];
   confirmedSubmissionIds: ReadonlySet<string>;
   onReviewConversation?: () => Promise<void>;
+  commentRecovery?: CommentRecovery;
   onStop?: () => Promise<void>;
   stopPending?: boolean;
   stopScope?: "leaf" | "subtree";
@@ -623,6 +625,7 @@ interface IssueChatThreadProps {
     runSettings?: ComposerRunSettings,
   ) => Promise<void>;
   onReviewConversation?: () => Promise<void>;
+  commentRecovery?: CommentRecovery;
   onCancelRun?: () => Promise<void>;
   stopPending?: boolean;
   stopScope?: "leaf" | "subtree";
@@ -4643,6 +4646,7 @@ const IssueChatComposer = forwardRef<
     onSend,
     confirmedSubmissionIds,
     onReviewConversation,
+    commentRecovery,
     onStop,
     stopPending,
     stopScope = "leaf",
@@ -4686,6 +4690,7 @@ const IssueChatComposer = forwardRef<
   const [body, setBody] = useState(() => (draftKey ? loadDraft(draftKey) : ""));
   const [submitting, setSubmitting] = useState(false);
   const [reviewError, setReviewError] = useState(false);
+  const [recoveredAttemptId, setRecoveredAttemptId] = useState<string | null>(null);
   const [uncertainSubmission, setUncertainSubmission] =
     useState<ComposerDraftSubmission | null>(() =>
       draftKey ? loadDraftSubmission(draftKey) : null,
@@ -4838,7 +4843,7 @@ const IssueChatComposer = forwardRef<
   // A server receipt for this exact request settles a restored submission.
   // Text equality is not delivery proof: users may intentionally repeat text.
   useEffect(() => {
-    if (!uncertainSubmission || !confirmedSubmissionIds.has(uncertainSubmission.attemptId)) return;
+    if (!uncertainSubmission || (!confirmedSubmissionIds.has(uncertainSubmission.attemptId) && recoveredAttemptId !== uncertainSubmission.attemptId)) return;
     const { attemptId } = uncertainSubmission;
     const reconciled = reconciledSubmissionRef.current;
     if (reconciled && reconciled.draftKey === draftKey && reconciled.attemptId === attemptId) return;
@@ -4882,7 +4887,7 @@ const IssueChatComposer = forwardRef<
     setBody(nextDraft);
     bodyRef.current = nextDraft;
     setComposerAttachments(nextAttachments);
-  }, [confirmedSubmissionIds, draftKey, sharedDraftKey, uncertainSubmission]);
+  }, [confirmedSubmissionIds, draftKey, sharedDraftKey, uncertainSubmission, recoveredAttemptId]);
 
   useEffect(() => {
     if (
@@ -5421,6 +5426,15 @@ const IssueChatComposer = forwardRef<
             We couldn’t confirm whether this comment was saved. It may already
             be in the conversation. Review it before starting another draft.
           </p>
+          <CommentRecoveryButton key={uncertainSubmission.attemptId} attemptId={uncertainSubmission.attemptId}
+            onConfirmed={() => {
+              if (mountedTaskKey.current !== draftKey) {
+                if (draftKey) settleDraftSubmission(draftKey, uncertainSubmission.attemptId);
+                return;
+              }
+              setRecoveredAttemptId(uncertainSubmission.attemptId);
+            }}
+            recovery={commentRecovery} disabled={Boolean(composerPause || composerDisabledReason) || submitting} />
           <Button
             type="button"
             variant="outline"
@@ -5789,6 +5803,7 @@ export function IssueChatThread({
   onVote,
   onAdd,
   onReviewConversation,
+  commentRecovery,
   onCancelRun,
   stopPending,
   stopScope,
@@ -6754,6 +6769,7 @@ export function IssueChatThread({
                 ref={composerRef}
                 onSend={sendComposerComment}
                 onReviewConversation={onReviewConversation}
+                commentRecovery={commentRecovery}
                 onImageUpload={imageUploadHandler}
                 onAttachImage={onAttachImage}
                 draftKey={draftKey}

@@ -44,7 +44,7 @@ import {
 import { getRecentTasksStorageKey, readRecentTasks } from "../lib/recent-tasks";
 import { getLastProjectId, trackRecentProject } from "../lib/recent-projects";
 import { ApiError } from "../api/client";
-import type { issuesApi } from "../api/issues";
+import { issuesApi } from "../api/issues";
 
 const mockGrokBotApi = vi.hoisted(() => ({ stop: vi.fn().mockResolvedValue({ stopped: true }) }));
 vi.mock("../api/grokBot", () => ({ grokBotApi: mockGrokBotApi }));
@@ -1309,6 +1309,35 @@ describe("IssueDetail", () => {
   let queryClient: QueryClient;
   let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
 
+  it("binds composer submission and saved-request recovery to the resolved signed-in user and task", async () => {
+    const owned = createIssue({ assigneeAgentId: "agent-1" });
+    const requestId = "12b44216-bd46-408b-a68e-1af6449e019a";
+    const saved = createIssueComment({ body: "Retained request", clientRequestId: requestId, authorUserId: "user-1" });
+    mockIssuesApi.get.mockResolvedValue(owned);
+    mockAuthApi.getSession.mockResolvedValue({ session: { userId: "user-1" }, user: { id: "user-1" } });
+    mockIssuesApi.addComment.mockClear();
+    const submit = vi.spyOn(issuesApi, "addComposerComment").mockResolvedValue(saved);
+    const canRecover = vi.spyOn(issuesApi, "canRecoverComment").mockReturnValue(true);
+    const recover = vi.spyOn(issuesApi, "recoverComment").mockResolvedValue(saved);
+    try {
+      await act(async () => renderIssueView());
+      await flushReact();
+      const props = mockIssueChatThreadRender.mock.calls.at(-1)?.[0] as {
+        onAdd: (body: string, reopen?: boolean, reassignment?: undefined, attachments?: string[], requestId?: string) => Promise<void>;
+        commentRecovery: { canRecover: (key: string) => boolean; recover: (key: string) => Promise<void> };
+      };
+      expect(props.commentRecovery).toBeDefined();
+      await act(async () => props.onAdd(saved.body, undefined, undefined, undefined, requestId));
+      const scope = { companyId: owned.companyId, issueId: owned.id, userId: "user-1" };
+      expect(submit).toHaveBeenCalledWith(scope, expect.objectContaining({ id: owned.id }),
+        expect.objectContaining({ body: saved.body, clientRequestId: requestId }));
+      expect(mockIssuesApi.addComment).not.toHaveBeenCalled();
+      expect(props.commentRecovery.canRecover(requestId)).toBe(true);
+      expect(canRecover).toHaveBeenCalledWith(scope, requestId);
+      await act(async () => props.commentRecovery.recover(requestId));
+      expect(recover).toHaveBeenCalledWith(scope, requestId);
+    } finally { submit.mockRestore(); canRecover.mockRestore(); recover.mockRestore(); }
+  });
   function renderIssueView(children: ReactNode = <IssueDetail />) {
     root.render(
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>,

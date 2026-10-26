@@ -112,7 +112,10 @@ Review: `baseline`.
 API: `present` — representative operation IDs:
 
 - `POST /api/issues/{id}/comments`.
-- `POST /api/issues/{id}/comments/replay-safe` (board-only qualification route).
+- `POST /api/issues/{id}/comments/replay-safe` (board-only recovery route).
+  Candidate composer calls also bind restrictive expected-user/company headers;
+  a changed login or company refuses before comment/control effects. These
+  headers do not authenticate or grant access. Legacy agent behavior is unchanged.
 - `POST /api/companies/{companyId}/issues/{issueId}/attachments`.
 
 Agent access: `available` — Native report_progress/comment_on_task/register_deliverable;
