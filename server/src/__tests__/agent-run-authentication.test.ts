@@ -96,6 +96,11 @@ const support = await getEmbeddedPostgresTestSupport();
       .where(eq(heartbeatRuns.id, runId));
     const [projected] = await loadAgentRunAuthentication(db, input);
     expect(agentRunWritesRevoked(projected)).toBe(true);
+  });
+
+  it.each(["pending", "acknowledged"])("rejects a transaction admitted before native Stop: %s", async dispatchState => {
+    await db.update(heartbeatRuns).set({ status: "running", resultJson: { nativeCancellation: nativeIntent(dispatchState) } })
+      .where(eq(heartbeatRuns.id, runId));
     await expect(db.transaction(tx => assertAgentRunWriteAllowed(tx as unknown as typeof db, companyId, { agentId, runId })))
       .rejects.toMatchObject({ status: 403, details: { code: "agent_run_cancelled" } });
   });
