@@ -3357,6 +3357,19 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
     const sourceBeforeAdoption = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
     const activeBeforeAdoption = await issueRecoveryActionService(db).getActiveForIssue(companyId, sourceIssueId);
+    if (mode === "native_todo_new_hold") {
+      const [committed] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId!));
+      // An idempotency string alone is not evidence that this action admitted
+      // the linked run. A mismatched durable binding must not be acknowledged.
+      await db.update(heartbeatRuns).set({ contextSnapshot: { ...committed.contextSnapshot,
+        guardedStatusRepairId: randomUUID() } }).where(eq(heartbeatRuns.id, runId!));
+      const noAdmission = vi.fn(async () => null);
+      await deliverGuardedStatusRepairs(db, noAdmission);
+      expect(noAdmission).toHaveBeenCalledTimes(1);
+      const [pending] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+      expect(pending.evidence.guardedStatusRepair).toMatchObject({ delivery: "pending" });
+      await db.update(heartbeatRuns).set({ contextSnapshot: committed.contextSnapshot }).where(eq(heartbeatRuns.id, runId!));
+    }
     await Promise.all([deliverGuardedStatusRepairs(db, heartbeat.wakeup), deliverGuardedStatusRepairs(db, heartbeat.wakeup)]);
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(sourceBeforeAdoption);
     expect(await issueRecoveryActionService(db).getActiveForIssue(companyId, sourceIssueId)).toEqual(activeBeforeAdoption);

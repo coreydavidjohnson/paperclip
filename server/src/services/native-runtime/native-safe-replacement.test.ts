@@ -591,7 +591,9 @@ const support = externalDatabaseUrl
           supportsLocalAgentJwt: false,
           execute: async input => {
             captured.set(input.runId, input);
-            await db.update(issues).set({ status: "in_review" })
+            // Finish the seed turn without an unbound review that would enqueue
+            // review-path recovery and supersede the source under test.
+            await db.update(issues).set({ status: "done" })
               .where(eq(issues.id, String(input.context.issueId)));
             return {
               exitCode: 0,
@@ -636,6 +638,8 @@ const support = externalDatabaseUrl
           });
           expect(initialRun).not.toBeNull();
           await heartbeat.drainActiveRunExecutions();
+          expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)
+            .where(eq(heartbeatRuns.companyId, companyId))).toEqual([{ id: initialRun!.id }]);
           const [storedSession] = await db.select().from(agentTaskSessions).where(and(
             eq(agentTaskSessions.companyId, companyId),
             eq(agentTaskSessions.agentId, agentId),
@@ -681,7 +685,10 @@ const support = externalDatabaseUrl
           await expect(validateExecutionReconciliation({
             db, companyId, issueId, agentId, sourceRunId: sourceRun!.id, decision,
           })).resolves.toMatchObject({ id: sourceRun!.id });
+          expect(await getExecutionBlocker(db, companyId, issueId))
+            .toMatchObject({ recoveryActionId: action!.id, runId: sourceRun!.id });
           await markExecutionReconciliation(db, action!, decision, responsibleUserId);
+          expect(await getExecutionBlocker(db, companyId, issueId)).toBeNull();
           if (mode === "model_changed") {
             await db.update(agents).set({ adapterConfig: { model: "model-b" } })
               .where(eq(agents.id, agentId));
