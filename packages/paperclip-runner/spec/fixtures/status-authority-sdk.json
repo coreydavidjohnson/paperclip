@@ -99,7 +99,7 @@
       "covers": { "decisionRows": ["SD-07"], "terminalRows": [], "attentionRows": [], "livenessRows": [], "reconciliationRows": [], "compatibilityRows": [], "migrationRows": [] },
       "tags": ["blocked_request", "no_inferred_alternative", "atomic_liveness"],
       "given": { "priorIssueStatus": "in_progress", "turnTerminalState": "completed", "runTerminalState": "succeeded", "reportedWorkDisposition": "blocked", "nativeFinalization": "present", "completionState": "current_track_without_alternative", "trigger": "runner_finalizer" },
-      "expected": { "runStatus": "succeeded", "statusAction": "blocked", "reasonCode": "current_track_blocker_waiting", "requiredEffects": ["bind_blocker"], "forbiddenEffects": ["enqueue_continuation", "notify_owner", "create_interaction"], "livePathKind": "blocker", "preserveClaim": true, "nativeRecords": true, "decisionCount": 1, "maxWakeCount": 0, "maxNotificationCount": 0 },
+      "expected": { "runStatus": "succeeded", "statusAction": "todo", "reasonCode": "current_track_blocker_waiting", "requiredEffects": ["bind_blocker"], "forbiddenEffects": ["enqueue_continuation", "notify_owner", "create_interaction"], "livePathKind": "blocker", "preserveClaim": true, "nativeRecords": true, "decisionCount": 1, "maxWakeCount": 0, "maxNotificationCount": 0 },
       "replay": { "attempts": 2, "sameDecisionDigest": true, "maxSemanticDecisions": 1, "maxDomainEffectsPerKey": 1 }
     },
     {
@@ -117,7 +117,7 @@
       "covers": { "decisionRows": ["SD-08"], "terminalRows": [], "attentionRows": [], "livenessRows": ["LIVE-03"], "reconciliationRows": [], "compatibilityRows": [], "migrationRows": [] },
       "tags": ["real_blocker", "atomic_liveness"],
       "given": { "priorIssueStatus": "in_progress", "turnTerminalState": "completed", "runTerminalState": "succeeded", "reportedWorkDisposition": "blocked", "nativeFinalization": "present", "completionState": "task_wide_owner_action_bound", "trigger": "runner_finalizer" },
-      "expected": { "runStatus": "succeeded", "statusAction": "blocked", "reasonCode": "task_wide_blocker_bound", "requiredEffects": ["bind_blocker", "notify_owner"], "forbiddenEffects": ["enqueue_continuation"], "livePathKind": "blocker", "preserveClaim": true, "nativeRecords": true, "decisionCount": 1, "maxWakeCount": 1, "maxNotificationCount": 1 },
+      "expected": { "runStatus": "succeeded", "statusAction": "todo", "reasonCode": "task_wide_blocker_bound", "requiredEffects": ["bind_blocker"], "forbiddenEffects": ["enqueue_continuation", "notify_owner", "create_interaction"], "livePathKind": "blocker", "preserveClaim": true, "nativeRecords": true, "decisionCount": 1, "maxWakeCount": 0, "maxNotificationCount": 0 },
       "replay": { "attempts": 2, "sameDecisionDigest": true, "maxSemanticDecisions": 1, "maxDomainEffectsPerKey": 1 }
     },
     {

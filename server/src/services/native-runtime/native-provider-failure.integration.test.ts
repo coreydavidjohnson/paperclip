@@ -203,7 +203,7 @@ describe("native completed failure diagnostics", () => {
         expect(finalRun).toMatchObject({ status: "failed", errorCode: "native_provider_model_rejected", error: NATIVE_MODEL_REJECTION_MESSAGE });
         expect(finalRun.resultJson?.nativeTurnFailure).toBeUndefined();
         const [finalIssue] = await db.select().from(issues).where(eq(issues.id, issueId));
-        expect(finalIssue.status).toBe(scenario.endsWith("-review") ? "in_review" : ownerChanged ? "in_progress" : "blocked");
+        expect(finalIssue.status).toBe(scenario.endsWith("-review") ? "in_review" : ownerChanged ? "in_progress" : "todo");
         const decisions = await db.select().from(statusDecisions).where(eq(statusDecisions.runId, runId));
         expect(decisions).toHaveLength(1);
         expect(decisions[0].reasonCode).toBe(reviewAuthorityEnded ? "native_review_action_finished" : ownerChanged ? "run_failed_partial_evidence_preserved" : "native_provider_model_rejected");

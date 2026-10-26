@@ -12,6 +12,7 @@ import {
   companies,
   completionContracts,
   createDb,
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   heartbeatRuns,
   issueThreadInteractions,
   issueRecoveryActions,
@@ -409,7 +410,7 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
         status: "idle",
       },
     ]);
-  }, 30_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterAll(async () => temporary?.cleanup());
 
