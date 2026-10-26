@@ -55,3 +55,27 @@ those type errors. Keep the real service objects as real dependencies and type
 the release mock to `HeartbeatQueueDependencies` while awaiting its real result.
 Do not coerce through `unknown`, skip the compiler, or change production types
 to accommodate the fixture. Retain the failed exact-revision receipt separately.
+
+## Combined image-gate preflight failures
+
+The original exact `bef26c7242e2` 72-file preflight failed with 2,345 tests
+passing and three failures. Its final log, exit 1 and namespace cleanup remain
+preserved. It is not a successful gate.
+
+Two failures are traced fixture assumptions. The new fair-scan transaction
+became the first transaction, so a blanket first-transaction fault no longer
+exercised release promotion. Let the scan complete, then inject the promotion
+failure and require exactly those two calls. Keep the deferred receipt and
+fresh-service single-delivery assertions. The disposable tmpfs also changed
+Git's ordinary-directory error into its filesystem-boundary diagnostic. In
+only the known-local-path fixture, permit discovery across filesystems and
+restore the prior setting in `finally`. Keep the strict production error
+classifier, metadata-absence proof, board action and no-Sentry assertions.
+
+The pending-question receipt failure did not reproduce in either isolated or
+ordered stop-suite diagnostics. No cause or repair is claimed for that
+intermittent result. Its assertion now includes the exact run's outbox state
+on failure, without adding retries, sleeps or changing the assertion. The
+full image gate must still run with this evidence in place. A focused selector
+is not a full-suite result, and its intentionally unselected tests are reported
+as such.

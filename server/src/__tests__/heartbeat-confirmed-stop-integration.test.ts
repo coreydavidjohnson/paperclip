@@ -56,7 +56,8 @@ describe.skipIf(!support.supported)('confirmed operator stop through the real wa
   } else await db.insert(issueThreadInteractions).values({ companyId: run.companyId, issueId: task.id, kind: 'question', status: 'pending', payload: {} } as never);
   await consume(); expect(execute).not.toHaveBeenCalled();
   const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `liveness:${run.id}`));
-  expect(receipt).toMatchObject({ status: 'deferred_issue_execution', runId: null });
+  const delivery = await db.select().from(runLivenessOutbox).where(eq(runLivenessOutbox.runId, run.id));
+  expect(receipt, JSON.stringify({ delivery })).toMatchObject({ status: 'deferred_issue_execution', runId: null });
   if (kind === 'approval') expect((await db.select().from(approvals).where(eq(approvals.companyId, run.companyId)))[0].status).toBe('pending');
   if (kind === 'question') expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, task.id)))[0].status).toBe('pending');
   if (blockerId) expect(await db.select().from(issueRelations).where(eq(issueRelations.issueId, blockerId))).toHaveLength(1);
