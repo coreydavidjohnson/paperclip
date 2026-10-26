@@ -3302,8 +3302,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(settled.evidence.guardedStatusRepair).toMatchObject({ delivery: gate === "newer_source" ? "invalidated" : "pending" });
   });
 
-  it.each(["exhausted", "native_todo", "missing_disposition", "workspace_validation"] as const)("PER-626/PER-968 recovers a lost delivery ACK without a second normal turn (%s)", async (mode) => {
-    const { companyId, sourceIssueId, coderId, action, repair } = mode === "native_todo"
+  it.each(["exhausted", "native_todo", "native_todo_new_hold", "missing_disposition", "workspace_validation"] as const)("PER-626/PER-968 recovers a lost delivery ACK without a second normal turn (%s)", async (mode) => {
+    const { companyId, sourceIssueId, coderId, action, repair } = mode === "native_todo" || mode === "native_todo_new_hold"
       ? await seedNativeBoardTodoHold() : mode === "exhausted" ? await seedTrappedDisposition()
         : await seedOrdinaryBoardTodoHold(mode);
     const userId = randomUUID();
@@ -3341,8 +3341,18 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(runId).toBeDefined();
     // A later source decision does not erase proof of the committed admission.
     await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId!));
-    await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, sourceIssueId));
+    await db.update(issues).set({ status: mode === "native_todo_new_hold" ? "todo" : "done", updatedAt: new Date() }).where(eq(issues.id, sourceIssueId));
+    if (mode === "native_todo_new_hold") await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "deliberate_wait_without_target", ownerType: "board",
+      returnOwnerAgentId: coderId, cause: "deliberate_wait_without_target", fingerprint: "later-exhausted-hold",
+      evidence: { terminalReason: "unchanged_source_state_exhausted" },
+      nextAction: "Preserve the newer hold. Do not start another turn.", wakePolicy: { type: "board_escalation" },
+    });
+    const sourceBeforeAdoption = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    const activeBeforeAdoption = await issueRecoveryActionService(db).getActiveForIssue(companyId, sourceIssueId);
     await Promise.all([deliverGuardedStatusRepairs(db, heartbeat.wakeup), deliverGuardedStatusRepairs(db, heartbeat.wakeup)]);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(sourceBeforeAdoption);
+    expect(await issueRecoveryActionService(db).getActiveForIssue(companyId, sourceIssueId)).toEqual(activeBeforeAdoption);
     const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${action.id}`));
     expect(wakes.filter(wake => wake.runId)).toHaveLength(1);
     expect(wakes.find(wake => wake.runId)!.runId).toBe(runId);

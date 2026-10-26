@@ -26,7 +26,9 @@ import {
   agents,
   agentTaskSessions,
   agentWakeupRequests,
+  authUsers,
   companies,
+  companyMemberships,
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -605,10 +607,19 @@ const support = externalDatabaseUrl
         const companyId = randomUUID();
         const agentId = randomUUID();
         const issueId = randomUUID();
+        const responsibleUserId = "board-reconciliation-user";
         const heartbeat = heartbeatService(db);
         try {
           await db.insert(companies).values({
             id: companyId, name: "Board session selection", issuePrefix: `B${companyId.slice(0, 6)}`,
+          });
+          await db.insert(authUsers).values({
+            id: responsibleUserId, name: "Board reconciliation operator",
+            email: `${responsibleUserId}@example.test`, createdAt: new Date(), updatedAt: new Date(),
+          }).onConflictDoNothing();
+          await db.insert(companyMemberships).values({
+            companyId, principalType: "user", principalId: responsibleUserId,
+            status: "active", membershipRole: "member",
           });
           await db.insert(agents).values({
             id: agentId, companyId, name: "Session owner", role: "engineer", adapterType,
@@ -617,7 +628,7 @@ const support = externalDatabaseUrl
           });
           await db.insert(issues).values({
             id: issueId, companyId, title: "Continue reconciled work", status: "todo",
-            assigneeAgentId: agentId,
+            assigneeAgentId: agentId, responsibleUserId,
           });
           const initialRun = await heartbeat.wakeup(agentId, {
             source: "on_demand", triggerDetail: "manual", reason: "manual",
@@ -634,6 +645,7 @@ const support = externalDatabaseUrl
           expect(storedSession?.sessionDisplayId).toBe(sessionId);
           const [sourceRun] = await db.select().from(heartbeatRuns)
             .where(eq(heartbeatRuns.id, initialRun!.id));
+          expect(sourceRun!.responsibleUserId).toBe(responsibleUserId);
           await db.update(issues).set({
             status: "todo", executionRunId: null, checkoutRunId: null,
           }).where(eq(issues.id, issueId));
@@ -669,7 +681,7 @@ const support = externalDatabaseUrl
           await expect(validateExecutionReconciliation({
             db, companyId, issueId, agentId, sourceRunId: sourceRun!.id, decision,
           })).resolves.toMatchObject({ id: sourceRun!.id });
-          await markExecutionReconciliation(db, action!, decision, "board-operator");
+          await markExecutionReconciliation(db, action!, decision, responsibleUserId);
           if (mode === "model_changed") {
             await db.update(agents).set({ adapterConfig: { model: "model-b" } })
               .where(eq(agents.id, agentId));
@@ -680,6 +692,7 @@ const support = externalDatabaseUrl
           const [successor] = await db.select().from(heartbeatRuns)
             .where(eq(heartbeatRuns.retryOfRunId, sourceRun!.id));
           expect(successor).toBeDefined();
+          expect(successor!.responsibleUserId).toBe(responsibleUserId);
           const selected = captured.get(successor!.id);
           expect(selected).toBeDefined();
           expect(selected!.context).not.toHaveProperty("forceFreshSession");
