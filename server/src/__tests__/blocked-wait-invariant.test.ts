@@ -244,6 +244,7 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
     }
     const [write, remove] = await Promise.all([writerResult, deletion]);
     expect(write.error).toBeNull();
+    expect(remove.error?.cause?.code ?? remove.error?.code ?? remove.error?.status).toBe(409);
     expect(remove.error).toMatchObject({ status: 409, details: { code: "issue_blocker_busy" } });
     expect((await svc.getById(issue.id))?.status).toBe("blocked");
     expect(await svc.getById(blocker.id)).not.toBeNull();

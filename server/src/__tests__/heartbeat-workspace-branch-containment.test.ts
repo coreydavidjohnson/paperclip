@@ -1114,12 +1114,27 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     expect(await readFile(path.join(seeded.worktree, "retained.txt"), "utf8")).toBe("unexported original task edits\n");
   });
 
-  it("holds projectless isolated work behind an idempotent board action before dispatch", async () => {
+  it.each([
+    [false, "todo"],
+    [true, "in_review"],
+  ] as const)("holds projectless isolated work behind an idempotent board action before dispatch (pending stage: %s)", async (pendingStage, expectedStatus) => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
     const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
     const issueIdentifier = `${issuePrefix}-1`;
+    const executionState = pendingStage ? {
+      status: "pending",
+      currentStageId: randomUUID(),
+      currentStageIndex: 0,
+      currentStageType: "review",
+      currentParticipant: { type: "agent", agentId, userId: null },
+      returnAssignee: { type: "agent", agentId, userId: null },
+      reviewRequest: null,
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: null,
+    } : null;
 
     await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
     await db.insert(companies).values({
@@ -1151,7 +1166,8 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       id: issueId,
       companyId,
       title: "Projectless isolated worktree",
-      status: "todo",
+      status: pendingStage ? "in_review" : "todo",
+      executionState,
       workMode: "standard",
       priority: "medium",
       assigneeAgentId: agentId,
@@ -1194,6 +1210,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       .select({
         status: issues.status,
         assigneeAgentId: issues.assigneeAgentId,
+        executionState: issues.executionState,
         checkoutRunId: issues.checkoutRunId,
         executionRunId: issues.executionRunId,
         executionAgentNameKey: issues.executionAgentNameKey,
@@ -1202,8 +1219,9 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
     expect(heldIssue).toEqual({
-      status: "todo",
+      status: expectedStatus,
       assigneeAgentId: agentId,
+      executionState,
       checkoutRunId: null,
       executionRunId: null,
       executionAgentNameKey: null,

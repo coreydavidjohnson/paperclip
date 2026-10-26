@@ -154,6 +154,22 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     return runId;
   }
 
+  function pendingReviewExecutionState(agentId: string) {
+    const principal = { type: "agent", agentId, userId: null };
+    return {
+      status: "pending",
+      currentStageId: randomUUID(),
+      currentStageIndex: 0,
+      currentStageType: "review",
+      currentParticipant: principal,
+      returnAssignee: principal,
+      reviewRequest: null,
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: null,
+    };
+  }
+
   async function seedDeferredWake(input: {
     companyId: string;
     agentId: string;
@@ -413,6 +429,29 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
   });
 
+  it("preserves a pending execution review when native terminal recovery has no typed wait", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_review" });
+    const executionState = pendingReviewExecutionState(agentId);
+    await db.update(issues).set({ executionState }).where(eq(issues.id, issueId));
+    const runId = await seedRun({ companyId, agentId, status: "failed", contextSnapshot: { issueId } });
+    await db.update(heartbeatRuns).set({ runtimeMode: "native", errorCode: "thread_binding_mismatch" }).where(eq(heartbeatRuns.id, runId));
+    await seedDeferredWake({ companyId, agentId, issueId });
+    const adapter = createPostgresWakeQueueAdapter(db, stubDeps);
+    const release = () => adapter.withIssueExecutionLock({ companyId, runId, now: new Date() }, async () => {
+      throw new Error("must not replay an uncertain execution");
+    });
+
+    await release();
+
+    const recoveredIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0];
+    expect(recoveredIssue).toMatchObject({ status: "in_review", assigneeAgentId: agentId, executionState });
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
+    expect(action).toMatchObject({ ownerType: "board", cause: "native_continuation_requires_reconciliation", returnOwnerAgentId: agentId });
+    expect(action?.evidence).not.toHaveProperty("nativeFailureBlock");
+  });
+
   it.each(["in_progress", "blocked"])("projects a native failure to todo under its recovery hold when %s has no typed wait", async (status) => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
@@ -446,7 +485,9 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
   it.each(["dependency", "question"] as const)("keeps a native failure blocked only while its real %s wait remains", async (waitKind) => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
-    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_progress" });
+    const issueId = await seedIssue({ companyId, assigneeAgentId: agentId, status: "in_review" });
+    const executionState = pendingReviewExecutionState(agentId);
+    await db.update(issues).set({ executionState }).where(eq(issues.id, issueId));
     const runId = await seedRun({ companyId, agentId, status: "failed", contextSnapshot: { issueId } });
     await db.update(heartbeatRuns).set({ runtimeMode: "native", errorCode: "thread_binding_mismatch" }).where(eq(heartbeatRuns.id, runId));
     const blockerId = waitKind === "dependency"
@@ -466,7 +507,7 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     const blockedIssue = (await db.select().from(issues).where(eq(issues.id, issueId)))[0];
     expect(blockedIssue).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
     expect((await db.select().from(activityLog).where(eq(activityLog.entityId, issueId)))[0]).toMatchObject({
-      action: "issue.updated", details: { status: "blocked", previousStatus: "in_progress" },
+      action: "issue.updated", details: { status: "blocked", previousStatus: "in_review" },
     });
     const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
     expect(action).toMatchObject({
