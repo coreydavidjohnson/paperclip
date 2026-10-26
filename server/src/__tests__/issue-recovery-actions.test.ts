@@ -3028,9 +3028,14 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       .not.toHaveProperty("terminalReason");
   });
 
-  it("PER-626 refuses same-status Board todo settlement without an exact snapshot", async () => {
-    const { sourceIssueId, action } = await seedTrappedDisposition();
-    await db.update(issues).set({ status: "todo" }).where(eq(issues.id, sourceIssueId));
+  it("PER-626 preserves a pending execution stage during same-status todo hand-back", async () => {
+    const { sourceIssueId, coderId, action } = await seedTrappedDisposition();
+    await db.update(issues).set({ status: "todo", executionState: {
+      status: "pending", currentStageId: randomUUID(), currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: coderId, userId: null },
+      returnAssignee: { type: "agent", agentId: coderId, userId: null }, reviewRequest: null,
+      completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+    } }).where(eq(issues.id, sourceIssueId));
     await db.update(issueRecoveryActions).set({ kind: "missing_disposition", evidence: {} })
       .where(eq(issueRecoveryActions.id, action.id));
     const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
