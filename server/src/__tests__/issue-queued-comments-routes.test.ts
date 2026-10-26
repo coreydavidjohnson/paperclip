@@ -2140,6 +2140,16 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       await db.execute(sql.raw("DROP TRIGGER IF EXISTS fail_issue_comment_audit ON activity_log"));
       await db.execute(sql.raw("DROP FUNCTION IF EXISTS fail_issue_comment_audit()"));
     }
+    if (path === "comments/replay-safe") {
+      const retry = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send({
+        clientRequestId, body: "Must roll back with its receipt and stop intent", interrupt: true,
+      });
+      expect(retry.status, JSON.stringify(retry.body)).toBe(201);
+      expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(1);
+      const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.source, "issue_comment_operation"));
+      expect(receipts.filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(1);
+      expect(receipts.find(row => row.payload?.issueId === seeded.issueId)?.payload?.originalTargetRunId).toBe(seeded.runId);
+    }
   });
 
   it.each(["comments", "comments/replay-safe"])("persists the original run target for comment interrupt recovery (%s)", async path => {
@@ -2199,7 +2209,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       if (variant === "unassigned") await db.update(issues).set({ assigneeAgentId: null, executionRunId: null }).where(eq(issues.id, seeded.issueId));
       if (variant === "reopen" || variant === "resume") await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, seeded.issueId));
       if (variant === "review") await db.update(issues).set({ status: "in_review" }).where(eq(issues.id, seeded.issueId));
-      if (variant === "conversation") await db.update(issues).set({ conversationAgentId: seeded.agentId, conversationUserId: "queue-owner" }).where(eq(issues.id, seeded.issueId));
+      if (variant === "conversation") await db.update(issues).set({ conversationAgentId: seeded.agentId, conversationUserId: "queue-owner", conversationState: "active" }).where(eq(issues.id, seeded.issueId));
       const before = (await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0];
       const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send({
         clientRequestId, body: "Must not enter an unsafe control path",
@@ -2227,6 +2237,20 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toHaveLength(2);
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId))).toHaveLength(1);
     expect(await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId))).toHaveLength(0);
+  });
+
+  it("refuses a legacy content-only receipt on the replay-safe route without repeating control effects", async () => {
+    const seeded = await seedQueue();
+    const clientRequestId = randomUUID();
+    await issueService(db).addComment(seeded.issueId, "Legacy content is not a control-operation receipt", { userId: "queue-owner" }, { clientRequestId, authorType: "user" });
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send({
+      clientRequestId, body: "Legacy content is not a control-operation receipt", interrupt: true,
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(409);
+    expect(response.body.details?.code).toBe("comment_operation_retry_disabled");
+    expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(1);
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId))).toHaveLength(1);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId)))[0].status).toBe("running");
   });
 
   it("replays a safe committed receipt through a fresh router after the issue becomes unsupported", async () => {
