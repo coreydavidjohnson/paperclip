@@ -108,3 +108,20 @@ Add that column to the existing locked admission query; do not add another read
 or weaken the pending-stage regression. The other seven suites passed, including
 both native Stop fences, malformed receipt controls, the deletion conflict and
 complete issue-service coverage. This is not an integrated qualification pass.
+
+
+## Reserved-image compiler qualification
+
+The exact bc220c11e0 full image build reached the server compiler and failed
+with two TS2345 errors and one TS2322 error. The Board-todo proof helper took
+the narrower serialized shared action type, but both actual callers pass raw
+Drizzle rows whose enum-valued columns are strings. Derive the helper input
+from the persisted row type, as the sibling issue input already does. Keep
+every runtime action kind, owner, source and receipt check unchanged.
+
+Drizzle lock configuration accepts literal noWait:true, not a boolean. Supply
+that option only for the existing nonblocking deletion path and the ordinary
+empty configuration otherwise. Do not change contention behavior or use a
+cast to hide either compiler refusal. The full compiler gate caught these
+errors after the earlier runtime diagnostics; neither diagnostic test passes
+nor runner preparation imply compiler or image qualification.

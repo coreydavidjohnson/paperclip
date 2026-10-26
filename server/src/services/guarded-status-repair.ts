@@ -12,7 +12,7 @@ import {
   workAssessments,
   type Db,
 } from "@paperclipai/db";
-import { isUuidLike, type IssueRecoveryAction } from "@paperclipai/shared";
+import { isUuidLike } from "@paperclipai/shared";
 import { parseObject } from "../adapters/utils.js";
 import { conflict } from "../errors.js";
 import type { WakeupOptions } from "./heartbeat/run-preparation.js";
@@ -46,7 +46,7 @@ type BoardTodoHandbackIssue = Pick<
 >;
 
 type BoardTodoHandbackAction = Pick<
-  IssueRecoveryAction,
+  typeof issueRecoveryActions.$inferSelect,
   | "id"
   | "companyId"
   | "sourceIssueId"

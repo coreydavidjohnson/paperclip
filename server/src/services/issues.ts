@@ -2796,7 +2796,7 @@ async function assertIssueBlockedWait(
       eq(issueRelations.relatedIssueId, issue.id), eq(issueRelations.type, "blocks")));
   await dbOrTx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.companyId, issue.companyId), inArray(issues.id, blockerIds)))
-    .orderBy(issues.id).for("update", { noWait });
+    .orderBy(issues.id).for("update", noWait ? { noWait: true } : {});
   if (!await hasIssueBlockedWait(dbOrTx, issue, requestedBlockerIds)) {
     throw unprocessable("Blocked requires an unresolved linked ticket or a pending question/approval card", {
       code: "blocked_wait_required", issueId: issue.id,
