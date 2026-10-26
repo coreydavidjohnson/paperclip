@@ -34,7 +34,7 @@ import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokab
 import { issueTreeControlService, isVerifiedIssueTreeControlInteractionWake } from "../../../services/issue-tree-control.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "../../../services/recovery/pause-hold-guard.js";
 import { classifyContinuationFailure } from "../../../services/recovery/service.js";
-import { issueService } from "../../../services/issues.js";
+import { hasIssueBlockedWait, issueService } from "../../../services/issues.js";
 import { issueRecoveryActionService } from "../../../services/issue-recovery-actions.js";
 import { readContinuationAttempt } from "../../../services/recovery/run-liveness-continuations.js";
 import { withRecoveryContext } from "../../../services/recovery/status-only-context.js";
@@ -801,15 +801,16 @@ async function recordNativeTerminalRecoveryIfNeeded(tx: Db, run: HeartbeatRunRow
       ),
     )
     .limit(1);
-  let nativeFailureBlock: { runId: string; statusVersion: number } | undefined;
-  if (issue.status !== "blocked") {
-    const projected = await issueService(tx).update(issue.id, { status: "blocked" }, tx);
+  let nativeFailureBlock: { runId: string; statusVersion: number; status: "todo" | "blocked" } | undefined;
+  const recoveryStatus = await hasIssueBlockedWait(tx, issue) ? "blocked" : "todo";
+  if (issue.status !== recoveryStatus) {
+    const projected = await issueService(tx).update(issue.id, { status: recoveryStatus }, tx);
     if (projected) {
-      nativeFailureBlock = { runId: run.id, statusVersion: projected.statusVersion };
+      nativeFailureBlock = { runId: run.id, statusVersion: projected.statusVersion, status: recoveryStatus };
       await tx.insert(activityLog).values({
         companyId: issue.companyId, actorType: "system", actorId: "execution-recovery",
         action: "issue.updated", entityType: "issue", entityId: issue.id, runId: run.id,
-        details: { status: "blocked", previousStatus: issue.status, reason: "native_continuation_requires_reconciliation" },
+        details: { status: recoveryStatus, previousStatus: issue.status, reason: "native_continuation_requires_reconciliation" },
       });
     }
   }

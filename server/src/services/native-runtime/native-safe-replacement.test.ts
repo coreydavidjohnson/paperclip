@@ -23,6 +23,7 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
+  agentWakeupRequests,
   companies,
   createDb,
   heartbeatRunEvents,
@@ -153,14 +154,16 @@ const support = externalDatabaseUrl
           } }).where(eq(heartbeatRuns.id, source.runId));
           await db.update(nativeRunFinalizations).set({ failureCode: "native_session_cleanup_quarantined" })
             .where(eq(nativeRunFinalizations.runId, source.runId));
-          const projected = await issueService(db).update(source.issueId, { status: "blocked" });
-          await db.insert(issueRecoveryActions).values({
+          const projected = await issueService(db).update(source.issueId, { status: "todo" });
+          const [hold] = await db.insert(issueRecoveryActions).values({
             companyId: source.companyId, sourceIssueId: source.issueId,
             kind: "active_run_watchdog", cause: "native_session_cleanup_quarantined", fingerprint: source.runId,
             ownerType: "board", returnOwnerAgentId: source.agentId, status: "resolved", outcome: "blocked",
-            evidence: { runId: source.runId, nativeFailureBlock: { runId: source.runId, statusVersion: projected!.statusVersion } },
+            evidence: { runId: source.runId, automaticRecovery: { replay: "blocked" },
+              nativeFailureBlock: { runId: source.runId, statusVersion: projected!.statusVersion, status: "todo" } },
             nextAction: "Verify the stopped execution before restarting.",
-          });
+          }).returning();
+          expect(await getExecutionBlocker(db, source.companyId, source.issueId)).toMatchObject({ runId: source.runId });
           const body = "Keep the saved work and explain the result.";
           const comment = await issueService(db).addComment(source.issueId, body, { userId: "operator" });
           if (mode === "unknown_action") await appendHeartbeatRunEvent(db, {
@@ -183,7 +186,11 @@ const support = externalDatabaseUrl
           const [task] = await db.select().from(issues).where(eq(issues.id, source.issueId));
           if (mode === "verified") {
             expect(retire).toHaveBeenCalledOnce();
-            expect(task!.status).toBe("in_progress");
+            expect(task!.status).toBe("todo");
+            expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, hold!.id)))[0])
+              .toMatchObject({ status: "resolved", outcome: "handed_back",
+                evidence: { automaticRecovery: { replay: "verified_safe_replacement" } } });
+            expect(await getExecutionBlocker(db, source.companyId, source.issueId)).toBeNull();
             expect(successors[0]!.contextSnapshot).toMatchObject({
               issueId: source.issueId,
               preservedRecoveryContext: true,
@@ -207,7 +214,7 @@ const support = externalDatabaseUrl
             expect(continuation.objective).toBe(body);
           } else {
             expect(retire).not.toHaveBeenCalled();
-            expect(task!.status).toBe("blocked");
+            expect(task!.status).toBe("todo");
             if (mode === "unknown_action") {
               const [decision] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, source.runId));
               expect(decision!.failureDetail?.replacementDenied).toBe("uncertain_provider_action");
@@ -221,6 +228,7 @@ const support = externalDatabaseUrl
     it.each(["unproven", "changed", "verified"] as const)("requires stopped-session proof through commit (%s)", async (mode) => {
       const source = await seed(2);
       await db.update(nativeRunFinalizations).set({ failureCode: "native_session_cleanup_quarantined" }).where(eq(nativeRunFinalizations.runId, source.runId));
+      // Historical pre-guard projection: old receipts did not record a status.
       const [projected] = await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, source.issueId)).returning();
       await db.insert(issueRecoveryActions).values({ companyId: source.companyId, sourceIssueId: source.issueId,
         kind: "active_run_watchdog", cause: "native_session_cleanup_quarantined", fingerprint: source.runId,
@@ -254,7 +262,16 @@ const support = externalDatabaseUrl
     it.each(["missing_receipt", "other_run", "other_cause", "manual_reblock", "dependency_edit", "queued_comment"] as const)("honors blocking intent before safe replacement (%s)", async (mode) => {
       const source = await seed(2);
       await db.update(nativeRunFinalizations).set({ failureCode: "native_session_cleanup_quarantined" }).where(eq(nativeRunFinalizations.runId, source.runId));
-      const projected = await issueService(db).update(source.issueId, { status: "blocked" });
+      if (mode === "manual_reblock") {
+        const [blocker] = await db.insert(issues).values({ companyId: source.companyId,
+          title: "Human dependency", status: "todo" }).returning();
+        await issueService(db).update(source.issueId, { blockedByIssueIds: [blocker!.id] });
+      }
+      // Only the legacy fixture bypasses the guard. A fresh manual Blocked
+      // decision below has a real dependency and still uses the issue service.
+      const projected = mode === "manual_reblock"
+        ? await issueService(db).update(source.issueId, { status: "blocked" })
+        : (await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, source.issueId)).returning())[0];
       const evidence = { runId: source.runId, ...(mode === "missing_receipt" ? {} : {
         nativeFailureBlock: { runId: mode === "other_run" ? randomUUID() : source.runId, statusVersion: projected!.statusVersion },
       }) };
@@ -289,6 +306,83 @@ const support = externalDatabaseUrl
         expect(afterHold!.outcome).toBe("blocked");
       }
     });
+    it.each(["stale_version", "later_status", "missing_receipt", "wrong_status", "legacy_status", "changed_owner"] as const)(
+      "retains a todo recovery hold with invalid provenance (%s)", async mode => {
+        const source = await seed(2);
+        await db.update(nativeRunFinalizations).set({ failureCode: "native_session_cleanup_quarantined" })
+          .where(eq(nativeRunFinalizations.runId, source.runId));
+        const projected = await issueService(db).update(source.issueId, { status: "todo" });
+        const receipt = { runId: source.runId, statusVersion: projected!.statusVersion,
+          ...(mode === "legacy_status" ? {} : { status: mode === "wrong_status" ? "blocked" : "todo" }) };
+        const [hold] = await db.insert(issueRecoveryActions).values({
+          companyId: source.companyId, sourceIssueId: source.issueId,
+          kind: "active_run_watchdog", cause: "native_session_cleanup_quarantined", fingerprint: source.runId,
+          ownerType: "board", returnOwnerAgentId: source.agentId, status: "resolved", outcome: "blocked",
+          evidence: { runId: source.runId, automaticRecovery: { replay: "blocked" },
+            ...(mode === "missing_receipt" ? {} : { nativeFailureBlock: receipt }) },
+          nextAction: "Preserve the source until its exact recovery projection is verified.",
+        }).returning();
+        if (mode === "stale_version" || mode === "later_status") {
+          await issueService(db).update(source.issueId, { status: "in_progress", actorUserId: "operator" });
+          if (mode === "stale_version") await issueService(db).update(source.issueId, { status: "todo", actorUserId: "operator" });
+        }
+        if (mode === "changed_owner") await issueService(db).update(source.issueId, { assigneeAgentId: null, actorUserId: "operator" });
+        const [beforeTask] = await db.select().from(issues).where(eq(issues.id, source.issueId));
+        const [beforeCoordinator] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, source.runId));
+        const [beforeRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, source.runId));
+        if (mode === "stale_version") expect(beforeTask!.statusVersion).toBeGreaterThan(receipt.statusVersion);
+        const retire = vi.fn(() => true);
+        const options = { verifyStoppedSession: async () => ({ evidence: {}, retire }) };
+        for (let sweep = 0; sweep < 2; sweep++) {
+          expect(await reconcileSafeNativeReplacements(db, new Date(), options)).toMatchObject({ scheduled: 0 });
+        }
+        expect(retire).not.toHaveBeenCalled();
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, source.runId))).toEqual([]);
+        expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, source.companyId))).toEqual([]);
+        expect((await db.select().from(issues).where(eq(issues.id, source.issueId)))[0]).toEqual(beforeTask);
+        expect((await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, source.runId)))[0]).toEqual(beforeCoordinator);
+        expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, source.runId)))[0]).toEqual(beforeRun);
+        expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, hold!.id)))[0]).toEqual(hold);
+      },
+    );
+    it.each(["dependency", "pending_card"] as const)(
+      "preserves a genuine %s wait with an exact recovery receipt", async wait => {
+        const source = await seed(2);
+        await db.update(nativeRunFinalizations).set({ failureCode: "native_session_cleanup_quarantined" })
+          .where(eq(nativeRunFinalizations.runId, source.runId));
+        if (wait === "dependency") {
+          const [blocker] = await db.insert(issues).values({ companyId: source.companyId,
+            title: "Human dependency", status: "todo" }).returning();
+          await issueService(db).update(source.issueId, { blockedByIssueIds: [blocker!.id] });
+        } else {
+          await db.insert(issueThreadInteractions).values({ companyId: source.companyId, issueId: source.issueId,
+            kind: "request_confirmation", status: "pending", sourceRunId: source.runId, createdByAgentId: source.agentId,
+            payload: { version: 1, prompt: "Confirm the next step before continuing." } });
+        }
+        const projected = await issueService(db).update(source.issueId, { status: "blocked" });
+        const [hold] = await db.insert(issueRecoveryActions).values({
+          companyId: source.companyId, sourceIssueId: source.issueId,
+          kind: "active_run_watchdog", cause: "native_session_cleanup_quarantined", fingerprint: source.runId,
+          ownerType: "board", returnOwnerAgentId: source.agentId, status: "resolved", outcome: "blocked",
+          evidence: { runId: source.runId, automaticRecovery: { replay: "blocked" },
+            nativeFailureBlock: { runId: source.runId, statusVersion: projected!.statusVersion, status: "blocked" } },
+          nextAction: "Wait for the linked dependency or human decision.",
+        }).returning();
+        const [beforeTask] = await db.select().from(issues).where(eq(issues.id, source.issueId));
+        const beforeInteractions = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, source.issueId));
+        const beforeReadiness = await issueService(db).getDependencyReadiness(source.issueId);
+        const retire = vi.fn(() => true);
+        expect(await reconcileSafeNativeReplacements(db, new Date(), {
+          verifyStoppedSession: async () => ({ evidence: {}, retire }),
+        })).toMatchObject({ scheduled: 0 });
+        expect(retire).not.toHaveBeenCalled();
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, source.runId))).toEqual([]);
+        expect((await db.select().from(issues).where(eq(issues.id, source.issueId)))[0]).toEqual(beforeTask);
+        expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, hold!.id)))[0]).toEqual(hold);
+        expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, source.issueId))).toEqual(beforeInteractions);
+        expect(await issueService(db).getDependencyReadiness(source.issueId)).toEqual(beforeReadiness);
+      },
+    );
     it.each(["in_progress", "blocked"])("records compression provenance only for its own status transition (%s)", async (status) => {
       const source = await seed();
       await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, source.runId));
