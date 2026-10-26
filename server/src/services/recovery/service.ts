@@ -114,6 +114,7 @@ import {
 import {
   TERMINAL_HEARTBEAT_RUN_STATUSES,
   issueService,
+  hasIssueBlockedWait,
   executeIssuePostCommitActions,
   type IssuePostCommitAction,
 } from "../issues.js";
@@ -2778,128 +2779,6 @@ export function recoveryService(
     });
   }
 
-  function buildRecoveryIssueInPlaceEscalationComment(input: {
-    issue: typeof issues.$inferSelect;
-    previousStatus: StrandedPreviousStatus;
-    latestRun: LatestIssueRun;
-    prefix: string;
-  }) {
-    const runLink = input.latestRun
-      ? runUiLink(
-          { id: input.latestRun.id, agentId: input.latestRun.agentId },
-          input.prefix,
-        )
-      : "none";
-    const retryReason =
-      readNonEmptyString(
-        parseObject(input.latestRun?.contextSnapshot)?.retryReason,
-      ) ?? "none";
-    const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
-
-    return [
-      "Paperclip stopped automatic stranded-work recovery for this recovery issue.",
-      "",
-      `- Recovery issue: ${issueUiLink({ identifier: input.issue.identifier, id: input.issue.id }, input.prefix)}`,
-      `- Previous status: \`${input.previousStatus}\``,
-      `- Latest run: ${runLink}`,
-      `- Latest run status: \`${input.latestRun?.status ?? "unknown"}\``,
-      `- Retry reason: \`${retryReason}\``,
-      failureSummary
-        ? `- Failure: ${failureSummary.trim()}`
-        : "- Failure: none recorded",
-      "- Guard: recovery issues do not create nested `stranded_issue_recovery` issues.",
-      "",
-      "Next action: the current recovery owner should inspect the failed run evidence, restore a live execution path or record the manual resolution, then move this recovery issue out of `blocked`.",
-    ].join("\n");
-  }
-
-  async function escalateStrandedRecoveryIssueInPlace(input: {
-    issue: typeof issues.$inferSelect;
-    previousStatus: StrandedPreviousStatus;
-    latestRun: LatestIssueRun;
-  }) {
-    return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
-      const issuesSvc = issueService(db);
-      const updated = await issuesSvc.update(input.issue.id, {
-        status: "blocked", companyGuard: input.issue.companyId,
-      }, db, publications, postCommitActions);
-      if (!updated) return null;
-
-      const prefix = await getCompanyIssuePrefix(input.issue.companyId);
-      await issuesSvc.addComment(
-        input.issue.id,
-        buildRecoveryIssueInPlaceEscalationComment({
-          issue: input.issue,
-          previousStatus: input.previousStatus,
-          latestRun: input.latestRun,
-          prefix,
-        }),
-        {},
-        {
-          authorType: "system",
-          presentation: compactRecoveryPresentation(
-            "Recovery: recovery attempt failed — remains blocked",
-          ),
-          metadata: {
-            version: 1,
-            sourceRunId: input.latestRun?.id ?? null,
-            sections: [
-              {
-                title: "Recovery",
-                rows: [
-                  {
-                    type: "key_value",
-                    label: "Cause",
-                    value: "recovery_issue_failed",
-                  },
-                  {
-                    type: "key_value",
-                    label: "Previous status",
-                    value: input.previousStatus,
-                  },
-                  ...(input.latestRun
-                    ? [
-                        {
-                          type: "run_link" as const,
-                          label: "Latest run",
-                          runId: input.latestRun.id,
-                          title: input.latestRun.status,
-                        },
-                      ]
-                    : []),
-                ],
-              },
-            ],
-          },
-        },
-      );
-
-      await logActivity(db, {
-        companyId: input.issue.companyId,
-        actorType: "system",
-        actorId: "system",
-        agentId: null,
-        runId: null,
-        action: "issue.updated",
-        entityType: "issue",
-        entityId: input.issue.id,
-        details: {
-          identifier: input.issue.identifier,
-          status: "blocked",
-          previousStatus: input.previousStatus,
-          source: "recovery.reconcile_stranded_recovery_issue",
-          latestRunId: input.latestRun?.id ?? null,
-          latestRunStatus: input.latestRun?.status ?? null,
-          latestRunErrorCode: input.latestRun?.errorCode ?? null,
-          originKind: input.issue.originKind,
-          originId: input.issue.originId,
-        },
-      }, publications);
-
-      return updated;
-    }, false, input.latestRun?.id);
-  }
-
   async function existingBlockerIssueIds(companyId: string, issueId: string) {
     return db
       .select({ blockerIssueId: issueRelations.issueId })
@@ -4057,14 +3936,6 @@ export function recoveryService(
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
   }) {
-    if (isStrandedIssueRecoveryIssue(input.issue)) {
-      return escalateStrandedRecoveryIssueInPlace({
-        issue: input.issue,
-        previousStatus: input.previousStatus,
-        latestRun: input.latestRun,
-      });
-    }
-
     return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
       const issuesSvc = issueService(db);
       const recoveryCause = resolveStrandedRecoveryCause(
@@ -4095,8 +3966,14 @@ export function recoveryService(
       const blockerIds = (await existingUnresolvedBlockerIssues(
         input.issue.companyId, input.issue.id, db,
       )).map(row => row.id);
+      // The existing recovery action holds dispatch independently of status.
+      // A recovery decision is not a question or linked deliverable. Preserve
+      // genuine wait/review gates, otherwise leave the original task queued.
+      const status = await hasIssueBlockedWait(db, input.issue) ? "blocked"
+        : input.issue.status === "in_review" && parseIssueExecutionState(input.issue.executionState)?.status === "pending"
+          ? "in_review" : "todo";
       const updated = await issuesSvc.update(input.issue.id, {
-        status: "blocked", companyGuard: input.issue.companyId,
+        status, companyGuard: input.issue.companyId,
       }, db, publications, postCommitActions);
       if (!updated) return null;
       if (isProviderQuotaWait) return updated;
@@ -4253,7 +4130,7 @@ export function recoveryService(
         entityId: input.issue.id,
         details: {
           identifier: input.issue.identifier,
-          status: "blocked",
+          status: updated.status,
           previousStatus: input.previousStatus,
           source:
             input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
