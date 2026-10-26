@@ -8165,7 +8165,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           ),
       ]);
     expect(sourceAfter).toMatchObject({
-      status: "blocked",
+      status: "todo",
       assigneeAgentId: agentId,
     });
     expect(action).toMatchObject({
@@ -8194,6 +8194,18 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(snapshot).toEqual({ kind: "disposition_repair_escalated", actionId: action!.id, assigneeAgentId: agentId, attemptCount: 5, maxAttempts: 5, reason: "unchanged_source_state_exhausted" });
     expect(substituteWakes).toHaveLength(0);
     expect(sourceAttemptSix).toHaveLength(0);
+    // A real Board recovery card owns the next choice. A later owner pause or
+    // budget hold must not re-escalate it or create another automatic turn.
+    for (const gate of ["pause", "budget"]) {
+      if (gate === "pause") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      else await db.update(companies).set({ status: "paused", pauseReason: "budget" }).where(eq(companies.id, companyId));
+      const repeated = await heartbeatService(db).reconcileStrandedAssignedIssues();
+      expect(repeated.escalated).toBe(0);
+      expect(repeated.dispositionRepairRequeued).toBe(0);
+      expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "todo", assigneeAgentId: agentId });
+      expect(await selectRecoveryActionForIssue(companyId, issueId)).toMatchObject({ id: action!.id, ownerType: "board", status: "active" });
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    }
   });
 
   it("routes a non-invokable source owner to recovery without reassigning the source", async () => {

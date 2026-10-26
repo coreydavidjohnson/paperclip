@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import request from "supertest";
 import { expect, it } from "vitest";
-import { activityLog, approvals, issueApprovals, issueComments, issueRelations, issueThreadInteractions, issues } from "@paperclipai/db";
+import { activityLog, approvals, issueApprovals, issueComments, issueRecoveryActions, issueRelations, issueThreadInteractions, issues } from "@paperclipai/db";
 import { issueService } from "../services/issues.js";
 import { issueRoutes } from "../routes/issues.js";
 import { describeEmbeddedPostgres, resetCompanyIssueFixtures, routeApp, seedCompanyWithBoardAccess, useEmbeddedPostgres } from "./helpers/route-test-harness.js";
@@ -126,6 +126,15 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
     }
   });
 
+  it("does not treat a real Board recovery decision as a blocked prerequisite", async () => {
+    const { companyId, issue, svc } = await fixture();
+    await ctx.db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issue.id,
+      kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target",
+      ownerType: "board", fingerprint: "exhausted-repair", nextAction: "Inspect failed repair evidence",
+      wakePolicy: { type: "board_escalation" } });
+    await expect(svc.update(issue.id, { status: "blocked" }))
+      .rejects.toMatchObject({ status: 422, details: { code: "blocked_wait_required" } });
+  });
   it("preserves pending approval cards", async () => {
     const { companyId, issue, svc } = await fixture();
     const [approval] = await ctx.db.insert(approvals).values({ companyId, type: "test", status: "pending", payload: {} }).returning();

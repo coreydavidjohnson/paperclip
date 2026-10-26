@@ -265,6 +265,18 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.runs()).toHaveLength(2);
     expect((await f.actions())[0]).toMatchObject({ ownerType: "agent", attemptCount: 1 });
   });
+  it.each(["ask_user_questions", "request_confirmation"] as const)("PER-626 ignores historical questions but preserves %s authority", async kind => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+      kind, status: "pending", payload: { version: 1, prompt: "Old input" },
+      createdAt: new Date(Date.now() - 10_000) });
+    await db.insert(issueComments).values({ companyId: f.companyId, issueId: f.issueId,
+      authorType: "user", authorUserId: "fixture-owner", body: "Continue. The old question no longer applies." });
+    await f.sweep();
+    expect(await f.runs()).toHaveLength(kind === "ask_user_questions" ? 2 : 1);
+    expect(await f.actions()).toHaveLength(kind === "ask_user_questions" ? 1 : 0);
+  });
   it.each(["descriptor", "dependency", "question", "approval"])("PER-404 preserves a blocked %s gate", async gate => {
     const f = await fixture();
     await db.update(issues).set({ status: "blocked", ...(gate === "descriptor" ? {
