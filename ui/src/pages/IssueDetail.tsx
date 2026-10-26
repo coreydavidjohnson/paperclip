@@ -7903,7 +7903,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   const taskChatShellRecoveryAction =
     issue.status === "todo" && currentRecoveryAction &&
     (isExhaustedBoardStatusRepairSource(issue, currentRecoveryAction) ||
-      isBoardTodoHandbackSource(issue, currentRecoveryAction))
+      isBoardTodoHandbackCandidate(issue, currentRecoveryAction))
       ? currentRecoveryAction
       : null;
   const unsupportedBoardTodoHandback =
@@ -7974,7 +7974,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           action={taskChatShellRecoveryAction}
           agentMap={agentMap}
           scheduledRetry={issue.scheduledRetry ?? null}
-          onResolve={handleResolveRecoveryAction}
+          onResolve={unsupportedBoardTodoHandback ? undefined : handleResolveRecoveryAction}
           canFalsePositive={canResolveBoardRecoveryAction}
         />
       ) : null}
@@ -8408,11 +8408,11 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                   successfulRunHandoff={issue.successfulRunHandoff ?? null}
                   scheduledRetry={issue.scheduledRetry ?? null}
                   recoveryAction={
-                    issue.activeRecoveryAction?.cause === "native_workspace_finalization_owner_unverified" || unsupportedBoardTodoHandback
+                    issue.activeRecoveryAction?.cause === "native_workspace_finalization_owner_unverified"
                       ? null
                       : issue.activeRecoveryAction ?? null
                   }
-                  onResolveRecoveryAction={handleResolveRecoveryAction}
+                  onResolveRecoveryAction={unsupportedBoardTodoHandback ? undefined : handleResolveRecoveryAction}
                   onReissueIsolatedRecoveryAction={
                     handleReissueIsolatedRecoveryAction
                   }

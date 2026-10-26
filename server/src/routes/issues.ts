@@ -10219,8 +10219,17 @@ export function issueRoutes(
 
         recoveryAction ??= await resolveWithDisposition(issue.status);
 
-        if (statusRepair) {
-          const receipt = { request: statusRepair, actorType: actor.actorType, actorId: actor.actorId,
+        // These existing Board restorations already passed the ordinary
+        // authority and hand-back gates. A truthful todo projection must not
+        // lose continuation merely because its status did not change.
+        const sameStatusTodoHandback = !statusRepair && safeHandBack && !sourceStatusChanged &&
+          actor.actorType === "user" && activeRecoveryAction.ownerType === "board" &&
+          ["missing_disposition", "workspace_validation"].includes(activeRecoveryAction.kind) &&
+          !chatRetry && !executionReconciliation;
+        if (statusRepair || sameStatusTodoHandback) {
+          const receipt = { request: statusRepair ?? null, actorType: actor.actorType, actorId: actor.actorId,
+            ...(sameStatusTodoHandback ? { sameStatusTodoHandback: true } : {}),
+            continuationNote: resolutionNote ?? "Continue the existing task normally. Preserve completed work.",
             sourceUpdatedAt: issue.updatedAt.toISOString(), sourceStatusVersion: issue.statusVersion, delivery: "pending" };
           await tx.update(issueRecoveryActions).set({ evidence: { ...recoveryAction.evidence, guardedStatusRepair: receipt } })
             .where(eq(issueRecoveryActions.id, recoveryAction.id));
@@ -10248,7 +10257,7 @@ export function issueRoutes(
           },
         }, postCommitActivityPublications);
 
-        return { issue, recoveryAction, chatRetry };
+        return { issue, recoveryAction, chatRetry, sameStatusTodoHandback };
       });
       for (const publication of postCommitActivityPublications)
         publishActivity(publication);
@@ -10290,7 +10299,7 @@ export function issueRoutes(
 
 
 
-      if (statusRepair) {
+      if (statusRepair || ("sameStatusTodoHandback" in result && result.sameStatusTodoHandback)) {
         await deliverGuardedStatusRepairs(db, enqueueRecoveryActionWakeup, result.recoveryAction.id);
       } else if (result.chatRetry) {
         // The intent is committed with recovery resolution. A lost immediate

@@ -27,6 +27,7 @@ import {
   nativeRunFinalizations,
   workAssessments,
   statusDecisions,
+  statusDecisionEffects,
   issueInboxArchives,
   issueRecoveryActions,
   issueRelations,
@@ -225,7 +226,13 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     await db.delete(costEvents);
     await db.delete(agentTaskSessions);
     await db.delete(heartbeatRunEvents);
+    await db.delete(nativeRunFinalizations);
+    await db.delete(statusDecisionEffects);
+    await db.delete(statusDecisions);
+    await db.delete(workAssessments);
+    await db.delete(nativeRunResults);
     await db.delete(heartbeatRuns);
+    await db.delete(completionContracts);
     await db.delete(agentWakeupRequests);
     await db.delete(environments);
     await db.delete(issueInboxArchives);

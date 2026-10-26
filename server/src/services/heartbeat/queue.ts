@@ -3177,15 +3177,18 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(issueRecoveryActions.sourceIssueId, issue.id),
             )).for("update") : [];
             const receipt = parseObject(action?.evidence.guardedStatusRepair);
+            const sameStatusTodoHandback = receipt.sameStatusTodoHandback === true &&
+              !!action && ["missing_disposition", "workspace_validation"].includes(action.kind);
             if (!action || action.status !== "resolved" || action.outcome !== "handed_back" ||
-                action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
+                (action.kind !== "deliberate_wait_without_target" && !sameStatusTodoHandback) || action.ownerType !== "board" ||
                 action.returnOwnerAgentId !== agentId || receipt.actorType !== "user" ||
                 opts.requestedByActorType !== "user" || opts.requestedByActorId !== receipt.actorId ||
                 source !== "automation" || triggerDetail !== "system" || reason !== "issue_commented" ||
                 opts.idempotencyKey !== `guarded-status-repair:${action.id}` ||
                 enrichedContextSnapshot.source !== "issue.comment" || enrichedContextSnapshot.forceFreshSession ||
                 enrichedContextSnapshot.recoveryActionId || enrichedContextSnapshot.recovery || opts.failedRunId ||
-                parseObject(enrichedContextSnapshot.paperclipAgentMessage).text !== action.resolutionNote) return { kind: "skipped" as const };
+                parseObject(enrichedContextSnapshot.paperclipAgentMessage).text !==
+                  (typeof receipt.continuationNote === "string" ? receipt.continuationNote : action.resolutionNote)) return { kind: "skipped" as const };
             const [prior] = await tx.select({ runId: agentWakeupRequests.runId }).from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
               eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
@@ -3201,9 +3204,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             const [current] = await tx.select().from(issues).where(eq(issues.id, issue.id));
             // An already committed wake above is adoption, not a new turn. Only
             // a new admission needs the current native source projection.
-            const supportedProjection = parseObject(receipt.request).mode === "board_todo_handback"
+            const supportedProjection = sameStatusTodoHandback || (parseObject(receipt.request).mode === "board_todo_handback"
               ? await isSupportedBoardTodoHandback(tx as unknown as Db, current, action)
-              : action.evidence.terminalReason === "unchanged_source_state_exhausted";
+              : action.evidence.terminalReason === "unchanged_source_state_exhausted");
             if (!supportedProjection || receipt.delivery !== "pending" || current.status !== "todo" || current.assigneeAgentId !== agentId ||
                 current.assigneeUserId || current.hiddenAt || current.updatedAt.toISOString() !== receipt.sourceUpdatedAt ||
                 current.statusVersion !== receipt.sourceStatusVersion) {

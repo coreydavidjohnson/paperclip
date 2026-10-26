@@ -1,5 +1,6 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import {
+  agentWakeupRequests,
   completionContracts,
   heartbeatRuns,
   issueRecoveryActions,
@@ -8,6 +9,7 @@ import {
   nativeRunResults,
   statusDecisionEffects,
   statusDecisions,
+  workAssessments,
   type Db,
 } from "@paperclipai/db";
 import { isUuidLike, type IssueRecoveryAction } from "@paperclipai/shared";
@@ -166,6 +168,7 @@ export async function isSupportedBoardTodoHandback(
       .select({
         resultJson: nativeRunResults.resultJson,
         decisionId: nativeRunFinalizations.decisionId,
+        assessmentId: nativeRunFinalizations.assessmentId,
       })
       .from(nativeRunResults)
       .innerJoin(nativeRunFinalizations, and(
@@ -207,6 +210,14 @@ export async function isSupportedBoardTodoHandback(
       ))
       .limit(1);
     if (!proof || issue.lastStatusDecisionId !== proof.decisionId) return false;
+    if (proof.assessmentId) {
+      const [assessment] = await tx.select({ triggerKind: workAssessments.triggerKind }).from(workAssessments).where(and(
+        eq(workAssessments.id, proof.assessmentId), eq(workAssessments.companyId, issue.companyId),
+        eq(workAssessments.issueId, issue.id), eq(workAssessments.runId, latestRunId),
+        eq(workAssessments.resultId, nativeResultId), eq(workAssessments.contractId, completionContractId),
+      )).limit(1);
+      if (assessment?.triggerKind !== "native_result") return false;
+    }
 
     const envelope = parseObject(proof.resultJson);
     const result = parseObject(envelope.result);
@@ -235,7 +246,7 @@ export async function deliverGuardedStatusRepairs(
 ) {
   const pending = await db.select().from(issueRecoveryActions).where(and(
     eq(issueRecoveryActions.status, "resolved"),
-    eq(issueRecoveryActions.kind, "deliberate_wait_without_target"),
+    inArray(issueRecoveryActions.kind, ["deliberate_wait_without_target", "missing_disposition", "workspace_validation"]),
     actionId ? eq(issueRecoveryActions.id, actionId) : undefined,
     sql`${issueRecoveryActions.evidence}->'guardedStatusRepair'->>'delivery' = 'pending'`,
   )).orderBy(asc(issueRecoveryActions.updatedAt), asc(issueRecoveryActions.id)).limit(25);
@@ -250,7 +261,28 @@ export async function deliverGuardedStatusRepairs(
     ));
     if (!action.returnOwnerAgentId || receipt.actorType !== "user" || typeof receipt.actorId !== "string") continue;
     try {
-      const run = await wake(action.returnOwnerAgentId, {
+      // Converge a committed admission before asking for any new authority.
+      // A newer pause, owner decision, or recovery hold must not cause a
+      // second turn or prevent acknowledgement of the already committed one.
+      const [admitted] = await db.select({ id: heartbeatRuns.id })
+        .from(agentWakeupRequests)
+        .innerJoin(heartbeatRuns, and(
+          eq(heartbeatRuns.id, agentWakeupRequests.runId),
+          eq(heartbeatRuns.wakeupRequestId, agentWakeupRequests.id),
+          eq(heartbeatRuns.companyId, agentWakeupRequests.companyId),
+          eq(heartbeatRuns.agentId, agentWakeupRequests.agentId),
+        ))
+        .where(and(
+          eq(agentWakeupRequests.companyId, action.companyId),
+          eq(agentWakeupRequests.agentId, action.returnOwnerAgentId),
+          eq(agentWakeupRequests.idempotencyKey, `guarded-status-repair:${action.id}`),
+          eq(agentWakeupRequests.requestedByActorType, "user"),
+          eq(agentWakeupRequests.requestedByActorId, receipt.actorId),
+          sql`${agentWakeupRequests.payload}->>'issueId' = ${action.sourceIssueId}`,
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${action.sourceIssueId}`,
+          sql`${heartbeatRuns.contextSnapshot}->>'guardedStatusRepairId' = ${action.id}`,
+        )).limit(1);
+      const run = admitted ?? await wake(action.returnOwnerAgentId, {
         source: "automation", triggerDetail: "system", reason: "issue_commented",
         idempotencyKey: `guarded-status-repair:${action.id}`,
         payload: { issueId: action.sourceIssueId, mutation: "comment" },
@@ -259,7 +291,7 @@ export async function deliverGuardedStatusRepairs(
           issueId: action.sourceIssueId, taskId: action.sourceIssueId,
           guardedStatusRepairId: action.id,
           wakeReason: "issue_commented", source: "issue.comment",
-          paperclipAgentMessage: { text: action.resolutionNote, source: "board" },
+          paperclipAgentMessage: { text: typeof receipt.continuationNote === "string" ? receipt.continuationNote : action.resolutionNote, source: "board" },
         },
       });
       if (run) await db.update(issueRecoveryActions).set({
