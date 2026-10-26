@@ -48,6 +48,7 @@ import {
   requiresExecutionReconciliation,
   type IssueCommentMetadata,
   type IssueCommentPresentation,
+  type IssueRecoveryActionOwnerType,
 } from "@paperclipai/shared";
 import {
   agents,
@@ -3589,7 +3590,7 @@ export function recoveryService(
           companyId: action.companyId,
           sourceIssueId: action.sourceIssueId,
           actionId: action.id,
-          ownerType: action.ownerType,
+          ownerType: action.ownerType as IssueRecoveryActionOwnerType,
           fingerprint: action.fingerprint,
           status: "resolved",
           outcome: "restored",
@@ -3675,7 +3676,7 @@ export function recoveryService(
       if (!lockedAction || !["active", "escalated"].includes(lockedAction.status)
         || lockedAction.status !== action.status || lockedAction.ownerType !== action.ownerType
         || lockedAction.fingerprint !== action.fingerprint
-        || lockedAction.updatedAt.getTime() !== action.updatedAt.getTime()) return null;
+        || lockedAction.updatedAt.getTime() !== new Date(action.updatedAt).getTime()) return null;
       // Establish the hold before publishing its board escalation, in the same
       // source-locked transaction. The common guard must reject later status
       // writes, not the producer that creates this exact hold. No bypass needed.
