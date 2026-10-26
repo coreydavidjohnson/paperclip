@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -30,6 +31,17 @@ const object = (v: unknown): Record<string, unknown> =>
     : {};
 const string = (v: unknown) =>
   typeof v === "string" && v.length > 0 ? v : null;
+/** Compare the persisted JSON snapshot, not property order or undefined keys. */
+function interactionRecordDelta<T extends { id: string }>(previous: unknown, current: T[]) {
+  if (!Array.isArray(previous) || previous.some(row => typeof object(row).id !== "string")) return undefined;
+  const prior = new Map(previous.map(row => [row.id as string, row]));
+  const ids = new Set(current.map(row => row.id));
+  return {
+    updated: current.filter(row => !isDeepStrictEqual(prior.get(row.id), JSON.parse(JSON.stringify(row)))),
+    removedIds: [...prior.keys()].filter(id => !ids.has(id)),
+  };
+}
+
 export function continuationOriginCommentIds(context: unknown): string[] {
   const c = object(context);
   const prior = object(c.executionContinuation);
@@ -283,10 +295,20 @@ export async function buildExecutionContinuation(input: {
   const deliveredMessages = Array.isArray(priorEnvelope.messages)
     ? priorEnvelope.messages.map(object)
     : null;
+  const humanResponses = interactions.flatMap(row => {
+    const response = projectHumanInteractionResponse(row);
+    return response ? [response] : [];
+  });
+  const interactionOutcomes = [...interactions
+    .filter((row) => row.status !== "pending")
+    .map((row) => ({ id: row.id, kind: row.kind, status: row.status, result: row.result })),
+    ...await childReviewOutcomes(db, companyId, issueId, { type: "agent", agentId: input.agentId, companyId, onBehalfOfUserId: issue.responsibleUserId })];
   const resumeDelta =
     deliveredMessages && input.previousContextRunId
       ? {
           baseRunId: input.previousContextRunId,
+          humanResponses: interactionRecordDelta(priorEnvelope.humanResponses, humanResponses),
+          interactionOutcomes: interactionRecordDelta(priorEnvelope.interactionOutcomes, interactionOutcomes),
           messages: messages.filter(
             (message) =>
               originCommentIds.includes(message.id) ||
@@ -441,18 +463,8 @@ export async function buildExecutionContinuation(input: {
     objective: latestRequest?.body ?? issue.description ?? issue.title,
     objectiveSource,
     messages,
-    humanResponses: interactions.flatMap(row => {
-      const response = projectHumanInteractionResponse(row);
-      return response ? [response] : [];
-    }),
-    interactionOutcomes: [...interactions
-      .filter((row) => row.status !== "pending")
-      .map((row) => ({
-        id: row.id,
-        kind: row.kind,
-        status: row.status,
-        result: row.result,
-      })), ...await childReviewOutcomes(db, companyId, issueId, { type: "agent", agentId: input.agentId, companyId, onBehalfOfUserId: issue.responsibleUserId })],
+    humanResponses,
+    interactionOutcomes,
     // Low-trust evidence only: renderPaperclipWakePrompt removes completedWork
     // from requestContext and encodes it in the fenced, non-authoritative
     // continuation-evidence section. It cannot supply objective or authority.

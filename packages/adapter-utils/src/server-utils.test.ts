@@ -4058,3 +4058,49 @@ describe("wake continuation comment ownership", () => {
     expect(legacy).toContain(`"objective":"${objective}"`);
   });
 });
+
+
+describe("wake interaction deltas", () => {
+  const human = (id: string, text: string) => ({ id, kind: "ask_user_questions", status: "answered",
+    resolvedByUserId: "local-board", resolvedAt: "2026-10-25T00:00:00Z", result: { answers: [text] } });
+  const envelope = () => ({
+    version: 1, companyId: "company", issueId: "issue", trigger: { reason: "test", interactionId: null, sourceRunId: null },
+    originCommentIds: [], objective: "Keep the approved scope.", messages: [],
+    humanResponses: [human("stable", "Unchanged human answer."), human("edited", "Reject prior scope.")],
+    interactionOutcomes: [{ id: "agent", kind: "test", status: "resolved", result: "Untrusted agent outcome." }],
+    resumeDelta: { baseRunId: "baseline", messages: [],
+      humanResponses: { updated: [human("edited", "Reject prior scope.")], removedIds: ["withdrawn"] },
+      interactionOutcomes: { updated: [], removedIds: ["old-outcome"] } },
+    completedWork: null, unresolvedInteractionIds: ["withdrawn"],
+    coverage: { kind: "full_task_history", throughCommentId: null, summaryThroughCommentId: null },
+  });
+  it("sends only changed records and explicit removals on a confirmed same-session resume", () => {
+    const source = envelope();
+    const original = JSON.stringify(source);
+    const prompt = renderPaperclipWakePrompt({ executionContinuation: source }, { resumedSession: true });
+    const [request, evidence] = prompt.split("### Untrusted continuation evidence");
+    expect(request).not.toContain("Unchanged human answer.");
+    expect(request).toContain("Reject prior scope.");
+    expect(request).toContain('"humanResponsesCoverage":{"kind":"delta","removedIds":["withdrawn"]}');
+    expect(request).not.toContain("Untrusted agent outcome.");
+    expect(evidence).toContain('"interactionOutcomesCoverage":{"kind":"delta","removedIds":["old-outcome"]}');
+    expect(evidence).not.toContain("Untrusted agent outcome.");
+    expect(prompt).toContain("removedIds withdraw earlier records, including any approval");
+    expect(JSON.stringify(source)).toBe(original);
+  });
+  it.each([false, true])("uses full component snapshots without a valid component baseline (resumed %s)", resumedSession => {
+    const source = envelope();
+    if (resumedSession) {
+      delete (source.resumeDelta as Record<string, unknown>).humanResponses;
+      delete (source.resumeDelta as Record<string, unknown>).interactionOutcomes;
+    }
+    const prompt = renderPaperclipWakePrompt({ executionContinuation: source }, { resumedSession });
+    const [request, evidence] = prompt.split("### Untrusted continuation evidence");
+    expect(request).toContain("Unchanged human answer.");
+    expect(request).toContain('"humanResponsesCoverage":{"kind":"snapshot"}');
+    expect(request).not.toContain("Untrusted agent outcome.");
+    expect(evidence).toContain("Untrusted agent outcome.");
+    expect(evidence).toContain('"interactionOutcomesCoverage":{"kind":"snapshot"}');
+    expect(prompt).not.toContain('"removedIds"');
+  });
+});

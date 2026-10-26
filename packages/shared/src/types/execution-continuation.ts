@@ -46,6 +46,15 @@ export interface ExecutionContinuationEnvelope {
   resumeDelta?: {
     baseRunId: string;
     messages: ExecutionContinuationEnvelope["messages"];
+    /** Omitted component means its prior baseline is unknown: send a snapshot. */
+    humanResponses?: {
+      updated: NonNullable<ExecutionContinuationEnvelope["humanResponses"]>;
+      removedIds: string[];
+    };
+    interactionOutcomes?: {
+      updated: ExecutionContinuationEnvelope["interactionOutcomes"];
+      removedIds: string[];
+    };
   };
   recoveryOutcomes?: Array<{ recoveryActionId: string; decision: unknown }>;
   completedWork: string | null;

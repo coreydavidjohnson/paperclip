@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
+import type { AskUserQuestionsResult } from "@paperclipai/shared";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -358,6 +359,109 @@ const support = await getEmbeddedPostgresTestSupport();
       );
       expect(freshPrompt).toContain("Read my Notion launch notes.");
       expect(freshPrompt).not.toContain('"resumeDelta"');
+    });
+    it("deltas interaction records losslessly while persisting a complete next baseline", async () => {
+      const stableId = randomUUID(), changedId = randomUUID(), withdrawnId = randomUUID();
+      const agentResultId = randomUUID(), baselineRunId = randomUUID();
+      const answer = (text: string): AskUserQuestionsResult => ({ version: 1, answers: [{ questionId: "scope", optionIds: [], otherText: text }] });
+      await db.insert(issueThreadInteractions).values([stableId, changedId, withdrawnId].map((id): typeof issueThreadInteractions.$inferInsert => ({
+        id, companyId, issueId, kind: "ask_user_questions", status: "answered",
+        resolvedByUserId: "local-board", resolvedAt: new Date("2026-09-08T10:03:00Z"),
+        payload: { version: 1, questions: [] }, result: answer(id === stableId ? "Unchanged decision. ".repeat(5000) : "Original decision."),
+      })));
+      const resume = () => buildExecutionContinuation({ db, companyId, issueId, agentId,
+        previousContextRunId: baselineRunId, context: { interactionId }, summary: null, exposeLowTrustRaw: false });
+      try {
+        const delivered = await build();
+        await db.insert(heartbeatRuns).values({ id: baselineRunId, companyId, agentId, status: "succeeded",
+          contextSnapshot: { issueId, executionContinuation: delivered } });
+        await db.update(issueThreadInteractions).set({ result: answer("Reject the earlier scope."),
+          resolvedByUserId: "another-user", resolvedAt: new Date("2026-09-08T10:04:00Z") })
+          .where(eq(issueThreadInteractions.id, changedId));
+        // Reopening an answer withdraws its earlier authority and outcome.
+        await db.update(issueThreadInteractions).set({ status: "pending" })
+          .where(eq(issueThreadInteractions.id, withdrawnId));
+        await db.insert(issueThreadInteractions).values({ id: agentResultId, companyId, issueId,
+          kind: "ask_user_questions", status: "answered", payload: { version: 1, questions: [] },
+          resolvedByAgentId: agentId, resolvedAt: new Date(), result: answer("Agent result is not human permission.") });
+        const current = await resume();
+        expect(current.resumeDelta?.humanResponses).toEqual({
+          updated: [expect.objectContaining({ id: changedId, resolvedByUserId: "another-user",
+            result: { answers: [{ questionId: "scope", optionIds: [], otherText: "Reject the earlier scope." }] } })],
+          removedIds: [withdrawnId],
+        });
+        expect(current.resumeDelta?.interactionOutcomes?.updated.map(row => row.id).sort())
+          .toEqual([changedId, agentResultId].sort());
+        expect(current.resumeDelta?.interactionOutcomes?.removedIds).toEqual([withdrawnId]);
+        expect(current.humanResponses?.map(row => row.id).sort()).toEqual([stableId, changedId].sort());
+        expect(current.interactionOutcomes.some(row => row.id === stableId)).toBe(true);
+        expect(current.unresolvedInteractionIds).toContain(withdrawnId);
+        const wake = { executionContinuation: current };
+        const deltaPrompt = renderPaperclipWakePrompt(wake, { resumedSession: true });
+        const snapshotPrompt = renderPaperclipWakePrompt(wake, { resumedSession: false });
+        expect(deltaPrompt).not.toContain("Unchanged decision.");
+        expect(Buffer.byteLength(snapshotPrompt) - Buffer.byteLength(deltaPrompt)).toBeGreaterThan(180_000);
+
+        // The persisted envelope remains full, even after a delta-rendered wake.
+        await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, executionContinuation: current } })
+          .where(eq(heartbeatRuns.id, baselineRunId));
+        const next = await resume();
+        expect(next.resumeDelta?.humanResponses).toEqual({ updated: [], removedIds: [] });
+        expect(next.resumeDelta?.interactionOutcomes).toEqual({ updated: [], removedIds: [] });
+        expect(next.humanResponses).toEqual(current.humanResponses);
+        // Legacy/unknown component baselines fall back independently to snapshots.
+        const { humanResponses, interactionOutcomes, ...legacy } = delivered;
+        await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, executionContinuation: legacy } })
+          .where(eq(heartbeatRuns.id, baselineRunId));
+        const unknown = await resume();
+        expect(unknown.resumeDelta).toBeDefined();
+        expect(unknown.resumeDelta?.humanResponses).toBeUndefined();
+        expect(unknown.resumeDelta?.interactionOutcomes).toBeUndefined();
+        expect(unknown.humanResponses).toEqual(current.humanResponses);
+      } finally {
+        for (const id of [stableId, changedId, withdrawnId, agentResultId])
+          await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, id));
+        await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, baselineRunId));
+      }
+    });
+    it("carries rejection and resolver changes without retaining withdrawn human authority", async () => {
+      const rejectedId = randomUUID(), taintedId = randomUUID(), resolverId = randomUUID(), baselineId = randomUUID();
+      await db.insert(issueThreadInteractions).values([rejectedId, taintedId, resolverId].map((id): typeof issueThreadInteractions.$inferInsert => ({
+        id, companyId, issueId, kind: "request_confirmation", status: "accepted", payload: { version: 1, prompt: "May this fixture publish?" },
+        resolvedByUserId: "local-board", resolvedAt: new Date("2026-09-08T10:03:00Z"), result: { version: 1, outcome: "accepted" },
+      })));
+      const resume = () => buildExecutionContinuation({ db, companyId, issueId, agentId,
+        previousContextRunId: baselineId, context: { interactionId }, summary: null, exposeLowTrustRaw: false });
+      try {
+        await db.insert(heartbeatRuns).values({ id: baselineId, companyId, agentId, status: "succeeded",
+          contextSnapshot: { issueId, executionContinuation: await build() } });
+        await db.update(issueThreadInteractions).set({ status: "rejected", result: { version: 1, outcome: "rejected", reason: "Do not publish." } })
+          .where(eq(issueThreadInteractions.id, rejectedId));
+        await db.update(issueThreadInteractions).set({ resolvedByAgentId: agentId })
+          .where(eq(issueThreadInteractions.id, taintedId));
+        await db.update(issueThreadInteractions).set({ resolvedByUserId: "another-user" })
+          .where(eq(issueThreadInteractions.id, resolverId));
+        const current = await resume();
+        expect(current.resumeDelta?.humanResponses?.updated).toEqual(expect.arrayContaining([
+          expect.objectContaining({ id: rejectedId, status: "rejected", result: { outcome: "rejected", reason: "Do not publish." } }),
+          expect.objectContaining({ id: resolverId, resolvedByUserId: "another-user" }),
+        ]));
+        expect(current.resumeDelta?.humanResponses?.updated).toHaveLength(2);
+        expect(current.resumeDelta?.humanResponses?.removedIds).toEqual([taintedId]);
+        expect(current.resumeDelta?.interactionOutcomes?.updated.map(row => row.id)).toEqual([rejectedId]);
+        // An invalid legacy record cannot prove a per-component baseline.
+        await db.update(heartbeatRuns).set({ contextSnapshot: { issueId,
+          executionContinuation: { ...current, humanResponses: [null] } } }).where(eq(heartbeatRuns.id, baselineId));
+        expect((await resume()).resumeDelta?.humanResponses).toBeUndefined();
+        // A foreign task's envelope is not a baseline, even with the same run ID.
+        await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: randomUUID(), executionContinuation: current } })
+          .where(eq(heartbeatRuns.id, baselineId));
+        expect((await resume()).resumeDelta).toBeUndefined();
+      } finally {
+        for (const id of [rejectedId, taintedId, resolverId])
+          await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, id));
+        await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, baselineId));
+      }
     });
     it("fails closed when required originating context is missing", async () => {
       await expectMissingContinuationContext(

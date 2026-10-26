@@ -22,6 +22,30 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-209 lossless interaction deltas on confirmed session resume
+
+- Compiler gate: keep native interaction fixtures typed to the persisted insert/result
+  contracts, including literal version and confirmation prompt/result fields.
+  Transpiled runtime tests alone do not validate fixture JSON types.
+
+- Extend the existing native `resumeDelta` with new/changed human responses
+  and interaction outcomes, plus explicit removed IDs. Compare complete persisted
+  JSON records, including resolver attribution, status and result. Reopened or
+  no-longer-human resolutions withdraw earlier human authority; rejections remain
+  visible. Do not trim decision text or treat generated outcomes as permission.
+- Persist the complete snapshot for every next baseline. A missing or malformed
+  component baseline sends that component as a full snapshot. A fresh session
+  sends all components in full. Existing company/agent/task scope, identity,
+  credential and explicit-fresh guards are unchanged.
+- The renderer states snapshot replacement and delta withdrawal semantics, keeps
+  human responses in request context and outcome deltas in untrusted evidence.
+  Native real-database and renderer regressions cover unchanged large records,
+  edits, rejections, resolver-only changes, reopened and mixed-resolver records,
+  missing/malformed baselines, foreign tasks and fresh-session fallback.
+- Retire this carry when upstream supplies the same lossless per-record delta,
+  withdrawal, trust and full-snapshot fallback contract. No OmniGenT/Codex patch,
+  limit increase or genuine provider-recovery acceptance is implied.
+
 ## PER-1009 production carry and recovery conflict corrections
 
 - The rebased readiness route must retain the deployed `c069c7a942` behavior:
