@@ -33,7 +33,11 @@ describe("legacy continuation persisted authority", () => {
       await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
       if (run.wakeupRequestId) await db.update(agentWakeupRequests).set({ status: "completed" }).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
     }
-    return { companyId, agentId, issueId, runId, createRecovery, runs, actions, finish };
+    async function sweep() {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      return createRecovery().reconcileStrandedAssignedIssues({ issueCreatedAtGte: issue.createdAt });
+    }
+    return { companyId, agentId, issueId, runId, createRecovery, runs, actions, finish, sweep };
   }
   it.each([1, 2, 3, 4, 5])("deduplicates concurrent replay with stale prose-derived liveness (%s)", async () => {
     const f = await fixture();
@@ -85,7 +89,7 @@ describe("legacy continuation persisted authority", () => {
     await db.update(heartbeatRuns).set({ livenessState: "advanced", resultJson: { summary: "Continuing", toolCallCount: noise === "tool-calls" ? 1000 : 0 } }).where(eq(heartbeatRuns.id, second.id));
     // Enter through the sweep while the task is still in_progress, so the
     // old comment/attachment progress exemption cannot bypass exhaustion.
-    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.sweep();
     expect(await f.runs()).toHaveLength(3);
     expect((await f.actions()).find(a => a.status === "active")).toMatchObject({ ownerType: "board", attemptCount: 2 });
   });
@@ -249,13 +253,13 @@ describe("legacy continuation persisted authority", () => {
   it("PER-404 returns a bare-blocked task within one sweep without board action", async () => {
     const f = await fixture();
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
-    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.sweep();
     const repair = (await f.runs()).find(r => r.id !== f.runId)!;
     expect(repair).toBeDefined();
     expect(repair.agentId).toBe(f.agentId);
     expect(repair.contextSnapshot).toMatchObject({ issueId: f.issueId, legacyDispositionEpisode: { id: f.runId, attempt: 1, maxAttempts: 2 } });
     expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBeNull();
-    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.sweep();
     expect(await f.runs()).toHaveLength(2);
     expect((await f.actions())[0]).toMatchObject({ ownerType: "agent", attemptCount: 1 });
   });
@@ -273,7 +277,7 @@ describe("legacy continuation persisted authority", () => {
       companyId: f.companyId, issueId: f.issueId, kind: gate === "question" ? "ask_user_questions" : "request_confirmation",
       status: "pending", payload: { version: 1, prompt: "Human input required" },
     });
-    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.sweep();
     expect(await f.runs()).toHaveLength(1);
     expect(await f.actions()).toHaveLength(0);
   });
@@ -281,13 +285,13 @@ describe("legacy continuation persisted authority", () => {
     const f = await fixture();
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
     await db.update(heartbeatRuns).set(source === "native" ? { runtimeMode: "native" } : { status: source }).where(eq(heartbeatRuns.id, f.runId));
-    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.sweep();
     expect(await f.runs()).toHaveLength(1);
     expect(await f.actions()).toHaveLength(0);
   });
   it("the delayed sweep ignores old diagnostic labels and uses the same repair path", async () => {
     const f = await fixture();
-    await f.createRecovery().reconcileStrandedAssignedIssues({ companyId: f.companyId });
+    await f.sweep();
     expect(await f.runs()).toHaveLength(2);
     const repair = (await f.runs()).find(r => r.id !== f.runId)!;
     expect(repair.contextSnapshot).toMatchObject({ legacyDispositionEpisode: { id: f.runId, attempt: 1 } });
