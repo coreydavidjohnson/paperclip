@@ -2738,13 +2738,19 @@ describe("IssueDetail", () => {
     expect(container.textContent).toContain("Try again");
   });
 
-  it("requires a Board note and uses fresh source and action data for the exact PER-968 retry", async () => {
-    const storedAction = createExhaustedBoardRecoveryAction();
+  it("requires a Board note and uses fresh exhausted evidence when cause and wake reason are absent", async () => {
+    const legacyBoardWakePolicy = { type: "board_escalation", preservesSourceAssignee: true };
+    const storedAction = createExhaustedBoardRecoveryAction({
+      cause: "legacy_recovery_cause",
+      wakePolicy: legacyBoardWakePolicy,
+    });
     const sourceIssue = {
       ...createIssue({ status: "todo", assigneeAgentId: "agent-1", activeRecoveryAction: storedAction }),
       statusVersion: 4,
     } as Issue & { statusVersion: number };
     const freshAction = createExhaustedBoardRecoveryAction({
+      cause: "legacy_recovery_cause",
+      wakePolicy: legacyBoardWakePolicy,
       fingerprint: "fresh-action-fingerprint",
       updatedAt: "2026-10-26T12:05:00.000Z",
     });

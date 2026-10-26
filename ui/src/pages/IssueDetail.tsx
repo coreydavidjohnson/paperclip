@@ -270,6 +270,7 @@ import {
   PopoverContent,
 } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
+import { IssueRecoveryActionCard } from "../components/IssueRecoveryActionCard";
 import {
   Sheet,
   SheetContent,
@@ -480,6 +481,36 @@ export function canBoardResolveRecoveryAction(
   return (
     membership.membershipRole !== "viewer" && membership.membershipRole !== null
   );
+}
+
+function isExhaustedBoardRecoveryAction(
+  action: Issue["activeRecoveryAction"] | null | undefined,
+): action is NonNullable<Issue["activeRecoveryAction"]> {
+  return !!action &&
+    action.kind === "deliberate_wait_without_target" &&
+    action.ownerType === "board" &&
+    (action.status === "active" || action.status === "escalated") &&
+    action.wakePolicy?.type === "board_escalation" &&
+    action.evidence.terminalReason === "unchanged_source_state_exhausted";
+}
+
+function isExhaustedBoardStatusRepairSource(
+  issue: Issue | null | undefined,
+  action: Issue["activeRecoveryAction"] | null | undefined = issue?.activeRecoveryAction,
+): boolean {
+  return !!issue &&
+    (issue.status === "blocked" || issue.status === "in_progress" || issue.status === "todo") &&
+    isExhaustedBoardRecoveryAction(action) &&
+    action.sourceIssueId === issue.id &&
+    action.companyId === issue.companyId &&
+    !!issue.assigneeAgentId &&
+    !issue.assigneeUserId &&
+    action.returnOwnerAgentId === issue.assigneeAgentId;
+}
+
+function recoveryStatusRepairTimestamp(value: Date | string): string | null {
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
 }
 
 // `canBoardManageRuntime` and `readRecoveryReconcileWorkspaceId` moved to `@/lib/recovery-reconcile`
@@ -3124,6 +3155,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   >(null);
   const [fileViewerPromptOpen, setFileViewerPromptOpen] = useState(false);
   const [detailTab, setDetailTab] = useState("chat");
+  const [statusRepairActionId, setStatusRepairActionId] = useState<string | null>(null);
+  const [statusRepairNote, setStatusRepairNote] = useState("");
   // Redesign: the center tab strip is hidden, so chat is the only surface —
   // deep links that would switch tabs (e.g. #document- hashes) stay on chat.
   const resolvedDetailTab = taskChatShellEnabled ? "chat" : detailTab;
@@ -4320,12 +4353,8 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     },
   });
   const resolveRecoveryAction = useMutation({
-    mutationFn: (data: {
-      actionId?: string;
-      outcome: ResolveRecoveryActionOutcome;
-      sourceIssueStatus: "todo" | "done" | "in_review" | "blocked";
-      resolutionNote?: string | null;
-    }) => issuesApi.resolveRecoveryAction(issueId!, data),
+    mutationFn: (data: Parameters<typeof issuesApi.resolveRecoveryAction>[1]) =>
+      issuesApi.resolveRecoveryAction(issueId!, data),
     onSuccess: ({ issue: nextIssue }) => {
       const issueRefs = new Set<string>([issueId!, nextIssue.id]);
       if (nextIssue.identifier) issueRefs.add(nextIssue.identifier);
@@ -6706,13 +6735,32 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
   const handleResumeAssignee = useCallback(async () => {
     await resumeAssigneeAgent.mutateAsync();
   }, [resumeAssigneeAgent.mutateAsync]);
-  const activeRecoveryActionId = issue?.activeRecoveryAction?.id;
+  const currentRecoveryAction = issue?.activeRecoveryAction;
+  const activeRecoveryActionId = currentRecoveryAction?.id;
+  const activeRecoveryActionNeedsStatusRepair =
+    !!issue &&
+    isExhaustedBoardRecoveryAction(currentRecoveryAction) &&
+    currentRecoveryAction.sourceIssueId === issue.id &&
+    currentRecoveryAction.companyId === issue.companyId;
   const handleResolveRecoveryAction = useCallback(
     (
       outcome: import("../components/IssueRecoveryActionCard").RecoveryResolveOutcome,
     ) => {
       const actionId = activeRecoveryActionId;
       if (!actionId) return;
+      if (outcome === "todo" && activeRecoveryActionNeedsStatusRepair) {
+        if (boardAccess && !canResolveBoardRecoveryAction) {
+          pushToast({
+            title: "Recovery resolution failed",
+            body: "Only board users can retry this exhausted recovery action.",
+            tone: "error",
+          });
+          return;
+        }
+        setStatusRepairActionId(actionId);
+        setStatusRepairNote("");
+        return;
+      }
       switch (outcome) {
         case "todo":
           void resolveRecoveryAction.mutateAsync({
@@ -6751,8 +6799,92 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
           return;
       }
     },
-    [activeRecoveryActionId, resolveRecoveryAction.mutateAsync],
+    [
+      activeRecoveryActionId,
+      activeRecoveryActionNeedsStatusRepair,
+      boardAccess,
+      canResolveBoardRecoveryAction,
+      pushToast,
+      resolveRecoveryAction.mutateAsync,
+    ],
   );
+  const handleSubmitStatusRepair = useCallback(async () => {
+    if (!issueId || !statusRepairActionId || !statusRepairNote.trim() || statusRepairNote.length > 2000) return;
+    if (boardAccess && !canResolveBoardRecoveryAction) {
+      pushToast({
+        title: "Recovery resolution failed",
+        body: "Only board users can retry this exhausted recovery action.",
+        tone: "error",
+      });
+      return;
+    }
+
+    let request: Parameters<typeof issuesApi.resolveRecoveryAction>[1] | null = null;
+    try {
+      const [freshIssue, recoveryActions] = await Promise.all([
+        issuesApi.get(issueId),
+        issuesApi.recoveryActions(issueId),
+      ]);
+      const freshAction = recoveryActions.active;
+      const sourceStatusVersion = (freshIssue as Issue & { statusVersion?: unknown }).statusVersion;
+      const assigneeAgentId = freshIssue.assigneeAgentId;
+      if (
+        !freshAction ||
+        freshAction.id !== statusRepairActionId ||
+        freshIssue.activeRecoveryAction?.id !== statusRepairActionId ||
+        !isExhaustedBoardStatusRepairSource(freshIssue, freshAction) ||
+        !assigneeAgentId ||
+        typeof sourceStatusVersion !== "number" ||
+        !Number.isSafeInteger(sourceStatusVersion) ||
+        sourceStatusVersion < 0
+      ) {
+        throw new Error("The task or recovery action changed. Refresh before trying again.");
+      }
+      const sourceUpdatedAt = recoveryStatusRepairTimestamp(freshIssue.updatedAt);
+      const actionUpdatedAt = recoveryStatusRepairTimestamp(freshAction.updatedAt);
+      if (!sourceUpdatedAt || !actionUpdatedAt) {
+        throw new Error("The current task and recovery action could not be verified. Refresh before trying again.");
+      }
+      request = {
+        actionId: freshAction.id,
+        outcome: "restored",
+        sourceIssueStatus: "todo",
+        statusRepair: {
+          sourceUpdatedAt,
+          sourceStatus: freshIssue.status,
+          sourceStatusVersion,
+          assigneeAgentId,
+          actionUpdatedAt,
+          actionFingerprint: freshAction.fingerprint,
+        },
+        resolutionNote: statusRepairNote,
+      };
+    } catch (error) {
+      pushToast({
+        title: "Recovery resolution failed",
+        body: error instanceof Error ? error.message : "Unable to refresh the recovery action.",
+        tone: "error",
+      });
+      return;
+    }
+
+    if (!request) return;
+    try {
+      await resolveRecoveryAction.mutateAsync(request);
+      setStatusRepairActionId(null);
+      setStatusRepairNote("");
+    } catch {
+      // The existing mutation reports stale refusals; never replay a rejected or uncertain write.
+    }
+  }, [
+    boardAccess,
+    canResolveBoardRecoveryAction,
+    issueId,
+    pushToast,
+    resolveRecoveryAction.mutateAsync,
+    statusRepairActionId,
+    statusRepairNote,
+  ]);
   const handleTryAgainNoLiveExecutionPath = useCallback(() => {
     handleResolveRecoveryAction("todo");
   }, [handleResolveRecoveryAction]);
@@ -7698,12 +7830,77 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
     </>
   );
 
+  const taskChatShellRecoveryAction =
+    issue.status === "todo" && currentRecoveryAction &&
+    isExhaustedBoardStatusRepairSource(issue, currentRecoveryAction)
+      ? currentRecoveryAction
+      : null;
+  const recoveryStatusRepairForm =
+    statusRepairActionId && currentRecoveryAction?.id === statusRepairActionId &&
+    isExhaustedBoardRecoveryAction(currentRecoveryAction) &&
+    currentRecoveryAction.sourceIssueId === issue.id &&
+    currentRecoveryAction.companyId === issue.companyId ? (
+      <form
+        className="space-y-2 rounded-md border border-border p-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void handleSubmitStatusRepair();
+        }}
+      >
+        <p className="text-sm text-muted-foreground">
+          If the task is still current, Try again returns the task to todo and
+          sends your note to the original owner. Cancel closes this form without
+          sending the note.
+        </p>
+        <label htmlFor="recovery-status-repair-note" className="text-sm font-medium">
+          Message to the original owner
+        </label>
+        <Textarea
+          id="recovery-status-repair-note"
+          aria-label="Message to the original owner"
+          value={statusRepairNote}
+          onChange={(event) => setStatusRepairNote(event.target.value)}
+          maxLength={2000}
+          rows={3}
+          required
+        />
+        <div className="flex justify-end gap-2">
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              setStatusRepairActionId(null);
+              setStatusRepairNote("");
+            }}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            data-testid="recovery-status-repair-submit"
+            disabled={!statusRepairNote.trim() || resolveRecoveryAction.isPending}
+          >
+            {resolveRecoveryAction.isPending ? "Trying again…" : "Try again"}
+          </Button>
+        </div>
+      </form>
+    ) : null;
   const taskChatThreadHeader = taskChatShellEnabled ? (
     <>
       {ancestorsNav}
       {createdFromNote}
       {issueHeaderBlock}
       {pluginOutletsBlock}
+      {taskChatShellRecoveryAction ? (
+        <IssueRecoveryActionCard
+          action={taskChatShellRecoveryAction}
+          agentMap={agentMap}
+          scheduledRetry={issue.scheduledRetry ?? null}
+          onResolve={handleResolveRecoveryAction}
+          canFalsePositive={canResolveBoardRecoveryAction}
+        />
+      ) : null}
+      {recoveryStatusRepairForm}
     </>
   ) : undefined;
 
@@ -8077,6 +8274,7 @@ export function TaskDetailSurface({ conversation, tasksTab }: { tasksTab?: TaskS
                         : null,
                   onRetry: (actionId) => retryDispositionRecovery.mutateAsync(actionId).then(() => undefined),
                 }}>
+                {!taskChatShellEnabled ? recoveryStatusRepairForm : null}
                 <IssueDetailChatTab
                   queryIssueId={issueId ?? issue.id}
                   onOpenSkill={handleOpenSkill}
