@@ -12,7 +12,8 @@ one-shot compatibility. The server remains authoritative and can refuse a
 locally selected variant before effects. There is no fallback after a safe
 attempt, including after task status changes.
 
-Before network I/O, retain the exact body, uploaded receipt IDs and request key
+Bind ordinary identifier routes to the verified loaded canonical task, not a
+stale navigation seed. Before network I/O, retain the exact body, uploaded receipt IDs and request key
 in tab storage under company, user, task and request identity. Refuse before I/O
 if storage cannot preserve the snapshot. Do not copy next-draft text into the
 saved request. Scope changes and malformed records cannot select another

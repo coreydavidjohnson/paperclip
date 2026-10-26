@@ -57,10 +57,25 @@ Completion now flows from the confirmed POST receipt through the existing draft
 settlement logic instead of waiting for a second successful GET. No assertion,
 Stop boundary or unknown-outcome fence was removed.
 
+The signed-in page integration control also caught an identifier/canonical-ID
+mismatch. Ordinary task links use identifiers, so literal route-ID equality
+selected legacy transport. Use the existing verified loaded-task fence and
+its canonical ID for both safe submission and recovery scope. A stale header
+seed must not enable a new comment write. The original failing page control
+and corrected complete suite remain preserved.
+
+Two real loopback HTTP controls now destroy the TCP socket before route entry
+and after the database commit but before the JSON receipt. Native fetch reports
+a transport failure, not a synthetic server error. Exact same-key replay stores
+one comment, operation receipt and audit. The committed case retains the same
+comment ID even after the task becomes terminal, without changing the running
+run. These tests use real PostgreSQL and the real route with a fixture actor.
+They do not prove browser authentication, automatic client retries, process
+restart or deployed isolation.
+
 ## Delivery boundary
 
-This is a feature-branch candidate, not a live repair. Real HTTP fault injection,
-full browser/composer acceptance, new image/publication, independent review,
+This is a feature-branch candidate, not a live repair. Full browser/composer HTTP fault acceptance, new image/publication, independent review,
 normal production gates, restart acceptance, p95 and live monitoring remain
 required. The earlier intermittent pending-question preflight failure remains
 unexplained; later green runs do not establish its root cause.
