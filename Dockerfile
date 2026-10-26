@@ -260,6 +260,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/run-context-keys-db.test.ts \
     src/services/conversation-continuation.test.ts \
     src/services/native-runtime/native-safe-replacement.test.ts \
+    src/services/recovery/successful-run-handoff.test.ts \
     src/services/native-runtime/native-session-resume.test.ts \
   && chown -R root:root /app
 

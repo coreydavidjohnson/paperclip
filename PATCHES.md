@@ -438,5 +438,13 @@ heartbeat.ts.
 - Session-continuity image coverage includes the native-session-resume suite
   and its unchanged credential-free provider fixture. The fixture must survive
   Docker context slimming; a missing fixture is not a product-test verdict.
+- Validate dependency state after ordered same-company row locks, so a blocker
+  completed during contention cannot become a new stranded wait. Preserve
+  revision_requested approval gates and pending execution stages in both
+  finalization and executor failure paths. PostgreSQL and producer regressions,
+  diagnostic receipts and limits are recorded in
+  docs/incidents/2026-10-26-blocked-wait-races.md.
+- Native corrective-handoff instructions require real linked waits or pending
+  cards, not a descriptor-only alternative; the regression runs in the image gate.
 - Retire when a released upstream service enforces equivalent first-class waits
   across supported writes and includes/navigates blocker links in board lists.
