@@ -9455,7 +9455,7 @@ async function executePaperclipNativeSessionWithinScope(
               id: input.execution.binding.issueId,
               companyId: input.execution.binding.companyId,
             })
-            ? "todo"
+            ? record(failureTask.executionState).status === "pending" ? "in_review" : "todo"
             : recoveryProjection.issueStatus;
           const projected = await issueService(tx as unknown as Db).update(
             input.execution.binding.issueId,
