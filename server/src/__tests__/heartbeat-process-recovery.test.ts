@@ -8198,7 +8198,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     // budget hold must not re-escalate it or create another automatic turn.
     for (const gate of ["pause", "budget"]) {
       if (gate === "pause") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
-      else await db.update(companies).set({ status: "paused", pauseReason: "budget" }).where(eq(companies.id, companyId));
+      else {
+        await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId));
+        await db.update(companies).set({ status: "paused", pauseReason: "budget" }).where(eq(companies.id, companyId));
+      }
       const repeated = await heartbeatService(db).reconcileStrandedAssignedIssues();
       expect(repeated.escalated).toBe(0);
       expect(repeated.dispositionRepairRequeued).toBe(0);

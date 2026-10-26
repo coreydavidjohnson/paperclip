@@ -3677,11 +3677,11 @@ export function recoveryService(
         || lockedAction.status !== action.status || lockedAction.ownerType !== action.ownerType
         || lockedAction.fingerprint !== action.fingerprint
         || lockedAction.updatedAt.getTime() !== new Date(action.updatedAt).getTime()) return null;
-      // Establish the hold before publishing its board escalation, in the same
-      // source-locked transaction. The common guard must reject later status
-      // writes, not the producer that creates this exact hold. No bypass needed.
+      // A recovery decision is not a linked prerequisite or pending question.
+      // Keep the source queued, then publish its existing Board-owned hold in
+      // this same source-locked transaction. Never invent a blocked wait.
       const updated = await issuesSvc.update(input.issue.id, {
-        status: "blocked", companyGuard: input.issue.companyId,
+        status: "todo", companyGuard: input.issue.companyId,
       }, db, publications, postCommitActions);
       if (!updated) return null;
       const now = new Date();
@@ -3778,7 +3778,7 @@ export function recoveryService(
         entityId: input.issue.id,
         details: {
           identifier: input.issue.identifier,
-          status: "blocked",
+          status: "todo",
           previousStatus: input.issue.status,
           sourceStateFingerprint: input.fingerprint,
           attemptCount: input.attemptCount,
@@ -4550,6 +4550,19 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      // A board-owned recovery action is already the durable, human-owned
+      // continuation path. Generic stranded-work recovery must not race that
+      // authority by launching another provider turn (most importantly after
+      // bounded native-session recovery has reached terminal exhaustion).
+      const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
+        issue.companyId,
+        issue.id,
+      );
+      if (activeRecoveryAction?.ownerType === "board") {
+        result.skipped += 1;
+        continue;
+      }
+
       // An unsupported blocked disposition uses only the successful legacy
       // owner's bounded repair. Failed/native sources must never fall through
       // into generic stranded-work replay merely because blocked is included.
@@ -4737,19 +4750,6 @@ export function recoveryService(
       }
 
       if (await hasPendingWakeInteraction(issue.companyId, issue.id)) {
-        result.skipped += 1;
-        continue;
-      }
-
-      // A board-owned recovery action is already the durable, human-owned
-      // continuation path. Generic stranded-work recovery must not race that
-      // authority by launching another provider turn (most importantly after
-      // bounded native-session recovery has reached terminal exhaustion).
-      const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
-        issue.companyId,
-        issue.id,
-      );
-      if (activeRecoveryAction?.ownerType === "board") {
         result.skipped += 1;
         continue;
       }
