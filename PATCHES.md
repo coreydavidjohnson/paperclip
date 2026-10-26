@@ -435,5 +435,8 @@ heartbeat.ts.
   provenance regressions to the production image gate. Diagnostic passes do not
   establish image qualification or live delivery. The agreed board sweep,
   owner-wake and observation acceptance remain separate release evidence.
+- Session-continuity image coverage includes the native-session-resume suite
+  and its unchanged credential-free provider fixture. The fixture must survive
+  Docker context slimming; a missing fixture is not a product-test verdict.
 - Retire when a released upstream service enforces equivalent first-class waits
   across supported writes and includes/navigates blocker links in board lists.

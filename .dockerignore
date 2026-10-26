@@ -78,3 +78,6 @@ packages/paperclip-runner/runner/crates/runner-core/tests/**
 !packages/paperclip-runner/test-support
 packages/paperclip-runner/test-support/**
 !packages/paperclip-runner/test-support/local-integrity-boundary-golden.ts
+
+# Native session-resume image regressions execute this credential-free provider.
+!packages/paperclip-runner/test/fixtures/fake-final-burst-codex-app-server.mjs
