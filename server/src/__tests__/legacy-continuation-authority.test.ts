@@ -340,6 +340,24 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.createRecovery().reconcileLegacyContinuation(second.id)).toBe("escalated");
     expect(await f.runs()).toHaveLength(3);
   });
+  it("routing-child: fixture chronology survives a backwards clock without bypassing newer work", async () => {
+    const f = await routingHandbackFixture();
+    // Simulate the captured wall-clock inversion without changing the host clock.
+    const repairCreatedAt = new Date(Date.now() - 10_000);
+    await f.createRecovery(async run => {
+      await db.update(heartbeatRuns).set({ createdAt: repairCreatedAt }).where(eq(heartbeatRuns.id, run.id));
+    }).reconcileLegacyContinuation(f.runId);
+    const first = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(await f.createRecovery().legacyRepairDispatchBlock(first.id)).toBeNull();
+    const source = (await f.runs()).find(r => r.id === f.runId)!;
+    expect(source.createdAt.getTime()).toBeLessThan(first.createdAt.getTime());
+    // Chronology belongs to the fixture; production still refuses other newer work.
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId,
+      status: "succeeded", runtimeMode: "legacy", contextSnapshot: { issueId: f.issueId },
+      createdAt: new Date(repairCreatedAt.getTime() + 1),
+    });
+    expect(await f.createRecovery().legacyRepairDispatchBlock(first.id)).toBe("existing_execution");
+  });
   it.each(["clear", "approval", "dependency"])("routing-child: stale edge starts parent with %s gate", async gate => {
     const f = await fixture();
     const childId = randomUUID();
