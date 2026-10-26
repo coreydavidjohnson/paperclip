@@ -2968,6 +2968,19 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
     expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
   });
 
+  it.each(["workspace", "provider"] as const)("keeps exhausted %s finalization in todo under its Board hold without a fabricated question", async (failureScope) => {
+    const template = corpus.fixtures.find(candidate => candidate.mode === "native")!;
+    const seeded = await seedFixture({ ...template, id: `exhausted-finalization-${failureScope}`, given: { ...template.given, priorIssueStatus: "in_progress" } });
+    await recordNativeFinalizationFailure({ db, runId: seeded.runId,
+      error: new Error("native_fixture_finalization_failure"), failureScope, permanent: true, projectRunStatus: true });
+    expect(await issueService(db).getById(seeded.issueId)).toMatchObject({ status: "todo", assigneeAgentId: agentId });
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId)))
+      .toEqual([expect.objectContaining({ ownerType: "board", returnOwnerAgentId: agentId, wakePolicy: null })]);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, seeded.issueId))).toHaveLength(0);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
+  });
+
   it("fails the transaction closed for an unknown status effect", async () => {
     const fixture = corpus.fixtures.find((candidate) => candidate.mode === "native");
     if (!fixture) throw new Error("native corpus fixture missing");
