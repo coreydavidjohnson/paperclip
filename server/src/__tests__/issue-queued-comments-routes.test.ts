@@ -10,6 +10,7 @@ import {
   agentWakeupRequests,
   agents,
   activityLog,
+  authUsers,
   companies,
   companyMemberships,
   companySkills,
@@ -78,6 +79,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     // Each case owns the entire disposable database. Clear the full company
     // graph, including attribution rows and constraints added by migrations.
     await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
+    await db.delete(authUsers).where(eq(authUsers.id, "queue-owner"));
   });
 
   afterAll(async () => {
@@ -363,6 +365,11 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
 
   async function nativeHandoffClient() {
     const seeded = await seedQueue();
+    // Real JWT auth requires an existing user as well as the company membership.
+    await db.insert(authUsers).values({
+      id: "queue-owner", name: "Queue owner", email: "queue-owner@example.test",
+      createdAt: new Date(), updatedAt: new Date(),
+    });
     // This is an outgoing native task turn, not the legacy human-handoff
     // exception. Do not let unrelated saved input obscure the stop/commit fence.
     await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
@@ -413,8 +420,9 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.runId));
     // Check cancellation before the HTTP assertion so a RED distinguishes
     // request admission failure from a failure after a confirmed stop.
-    expect(cancel).toHaveBeenCalledTimes(1);
-    expect(run).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned",
+    const responseDiagnostic = `HTTP ${response.status}: ${JSON.stringify(response.body)}`;
+    expect(cancel, responseDiagnostic).toHaveBeenCalledTimes(1);
+    expect(run, responseDiagnostic).toMatchObject({ status: "cancelled", errorCode: "issue_reassigned",
       activeIdentityContextId: seeded.identity.id, responsibleUserId: "queue-owner",
       resultJson: { reassignmentStopConfirmed: true, issueMutationStopId: expect.any(String) },
     });
@@ -464,7 +472,8 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
         assigneeAdapterOverrides: { useProjectWorkspace: false },
       });
     expect(response.status, JSON.stringify(response.body)).toBe(403);
-    if (mode !== "changed_owner") expect(response.body.code).toBe("agent_run_cancelled");
+    if (mode === "changed_owner") expect(response.body.details?.code).toBe("issue_write_assignee_run_lock");
+    else expect(response.body.code).toBe("agent_run_cancelled");
     expect((await db.select().from(issues).where(eq(issues.id, seeded.issueId)))[0]).toEqual(before);
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, seeded.issueId))).toHaveLength(2);
     expect(cancel).not.toHaveBeenCalled();
