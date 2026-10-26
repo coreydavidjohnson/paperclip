@@ -642,7 +642,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
 
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
     expect(updatedIssue).toMatchObject({
-      status: "blocked",
+      status: "todo",
     });
     const recoveryIssues = await db
       .select()
@@ -651,6 +651,28 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(recoveryIssues).toHaveLength(0);
     expect(updatedIssue?.assigneeAgentId).toBe(coderId);
     expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(["dependency", "confirmation"] as const)("preserves a real %s while holding recovery", async (gate) => {
+    const { companyId, coderId, sourceIssue, prefix } = await seedCompany();
+    if (gate === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Required deliverable",
+        status: "todo", issueNumber: 2, identifier: `${prefix}-2` }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker!.id, relatedIssueId: sourceIssue.id, type: "blocks" });
+    } else {
+      await db.insert(issueThreadInteractions).values({ companyId, issueId: sourceIssue.id,
+        kind: "request_confirmation", status: "pending", createdByAgentId: coderId,
+        payload: { version: 1, prompt: "Approve the separate deployment." } });
+    }
+    const wake = vi.fn(async () => null);
+    await recoveryService(db, { enqueueWakeup: wake }).escalateStrandedAssignedIssue({
+      issue: sourceIssue, previousStatus: "in_progress", latestRun: null,
+    });
+    expect((await db.select().from(issues).where(eq(issues.id, sourceIssue.id)))[0]).toMatchObject({
+      status: "blocked", assigneeAgentId: coderId,
+    });
+    expect(await db.select().from(issueRecoveryActions)).toEqual([expect.objectContaining({ ownerType: "board" })]);
+    expect(wake).not.toHaveBeenCalled();
   });
 
   // Model the production payload: `requestedRef` keeps the operator spelling,
@@ -1398,7 +1420,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(result).toMatchObject({ escalated: 1, reviewParticipantRequeued: 0 });
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
     expect(updatedIssue).toMatchObject({
-      status: "blocked",
+      status: "in_review",
       assigneeAgentId: coderId,
     });
     const [updatedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
@@ -1467,7 +1489,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
 
     expect(result).toMatchObject({ escalated: 1, skipped: 0 });
     const [updatedIssue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
-    expect(updatedIssue?.status).toBe("blocked");
+    expect(updatedIssue?.status).toBe("todo");
     const [updatedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     expect(updatedRun?.errorCode).toBe("configuration_incomplete");
     const [action] = await db.select().from(issueRecoveryActions);
@@ -1672,7 +1694,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(enqueueWakeup).not.toHaveBeenCalled();
   });
 
-  it("keeps the source issue blocked when source-scoped wakeup is claimed synchronously", async () => {
+  it("holds the source todo without dispatching a source-scoped wake", async () => {
     const { companyId, managerId, coderId, sourceIssue } = await seedCompany();
     await db.update(agents).set({ status: "paused" }).where(eq(agents.id, managerId));
     const enqueueWakeup = vi.fn(async () => {
@@ -1701,7 +1723,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
 
     const [afterFirst] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
-    expect(afterFirst?.status).toBe("blocked");
+    expect(afterFirst?.status).toBe("todo");
     expect(afterFirst?.assigneeAgentId).toBe(coderId);
 
     const secondLatestRun = {
@@ -1731,7 +1753,7 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       attemptCount: 2,
     });
     const [afterSecond] = await db.select().from(issues).where(eq(issues.id, sourceIssue.id));
-    expect(afterSecond?.status).toBe("blocked");
+    expect(afterSecond?.status).toBe("todo");
 
     const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, sourceIssue.id));
     expect(comments).toHaveLength(1);
@@ -1777,13 +1799,13 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
 
     const actionRows = await db.select().from(issueRecoveryActions);
-    expect(actionRows).toHaveLength(0);
+    expect(actionRows).toEqual([expect.objectContaining({ sourceIssueId: recoveryIssueId, ownerType: "board", status: "active" })]);
     const recoveryIssues = await db
       .select()
       .from(issues)
       .where(and(eq(issues.companyId, companyId), eq(issues.originKind, "stranded_issue_recovery")));
     expect(recoveryIssues).toHaveLength(1);
-    expect(recoveryIssues[0]?.status).toBe("blocked");
+    expect(recoveryIssues[0]?.status).toBe("todo");
   });
 
   it("exposes active recovery actions on the issue read API", async () => {
