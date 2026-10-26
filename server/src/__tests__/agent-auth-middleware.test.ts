@@ -206,6 +206,25 @@ describe("agent auth middleware", () => {
     expect(read.body.readable).toBe(true);
   });
 
+  it.each(["agent_jwt", "agent_key"])("revokes %s writes while native Stop dispatch is pending", async source => {
+    const agentId = randomUUID(), companyId = randomUUID(), runId = randomUUID();
+    const key = "pcp_native_stop_fixture";
+    const { db } = createDbState({ agent: { id: agentId, companyId },
+      agentKey: source === "agent_key" ? { id: randomUUID(), agentId, companyId, keyHash: hashToken(key), responsibleUserId: "fixture-user" } : undefined,
+      run: { id: runId, companyId, agentId, status: "running", resultJson: { nativeCancellation: {
+        schema: "paperclip.native-cancellation.v1", intentId: `native-cancellation:${randomUUID()}`,
+        intentAuditId: randomUUID(), companyId, runId, scope: "run", dispatchState: "pending", dispatched: false,
+      } } },
+    });
+    const token = source === "agent_key" ? key : createLocalAgentJwt(agentId, companyId, "grok_local", runId, "fixture-user");
+    const client = createApp(db), endpoint = `/companies/${companyId}/issues/${randomUUID()}`;
+    const write = await request(client).patch(endpoint).set("Authorization", `Bearer ${token}`).set("X-Paperclip-Run-Id", runId).send({ status: "done" });
+    expect(write.status).toBe(403);
+    expect(write.body.code).toBe("agent_run_cancelled");
+    const read = await request(client).get(endpoint).set("Authorization", `Bearer ${token}`).set("X-Paperclip-Run-Id", runId);
+    expect(read.status).toBe(200);
+  });
+
   it("keeps header-less local requests as the implicit board actor with their run id", async () => {
     const runId = randomUUID();
     const { db } = createDbState({ agent: { id: randomUUID(), companyId: randomUUID() } });

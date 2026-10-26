@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { and, eq } from "drizzle-orm";
 import { agents, companies, createDb, heartbeatRuns, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS } from "@paperclipai/db";
-import { agentRunWritesRevoked } from "../agent-run-cancellation.js";
+import { agentRunWritesRevoked, assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
 import { loadAgentRunAuthentication } from "../middleware/agent-run-authentication.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -84,6 +84,48 @@ const support = await getEmbeddedPostgresTestSupport();
     await db.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } })
       .where(eq(heartbeatRuns.id, runId));
     expect(agentRunWritesRevoked((await loadAgentRunAuthentication(db, input))[0])).toBe(true);
+  });
+
+  function nativeIntent(dispatchState: string) {
+    return { schema: "paperclip.native-cancellation.v1", intentId: `native-cancellation:${randomUUID()}`,
+      intentAuditId: randomUUID(), companyId, runId, scope: "run", dispatchState, dispatched: false };
+  }
+
+  it.each(["pending", "acknowledged"])("revokes native Stop writes before status settlement: %s", async dispatchState => {
+    await db.update(heartbeatRuns).set({ status: "running", resultJson: { nativeCancellation: nativeIntent(dispatchState) } })
+      .where(eq(heartbeatRuns.id, runId));
+    const [projected] = await loadAgentRunAuthentication(db, input);
+    expect(agentRunWritesRevoked(projected)).toBe(true);
+    await expect(db.transaction(tx => assertAgentRunWriteAllowed(tx as unknown as typeof db, companyId, { agentId, runId })))
+      .rejects.toMatchObject({ status: 403, details: { code: "agent_run_cancelled" } });
+  });
+
+  it("ignores malformed or foreign native Stop receipts", async () => {
+    const valid = nativeIntent("pending");
+    for (const nativeCancellation of [null, true, [], {}, { ...valid, schema: "unknown" },
+      { ...valid, companyId: randomUUID() }, { ...valid, runId: randomUUID() },
+      { ...valid, intentId: "" }, { ...valid, intentAuditId: "" },
+      { ...valid, dispatchState: "unknown" }, { ...valid, dispatched: "false" }]) {
+      await db.update(heartbeatRuns).set({ status: "running", resultJson: { nativeCancellation } })
+        .where(eq(heartbeatRuns.id, runId));
+      const [projected] = await loadAgentRunAuthentication(db, input);
+      expect(agentRunWritesRevoked(projected), JSON.stringify(nativeCancellation)).toBe(false);
+      await expect(db.transaction(tx => assertAgentRunWriteAllowed(tx as unknown as typeof db, companyId, { agentId, runId })))
+        .resolves.toMatchObject({ status: "running" });
+    }
+  });
+
+  it("keeps only the admitted handoff's exact request-local Stop exception", async () => {
+    const stopId = randomUUID();
+    await db.update(heartbeatRuns).set({ status: "cancelled", resultJson: {
+      nativeCancellation: nativeIntent("acknowledged"), issueMutationStopId: stopId,
+    } }).where(eq(heartbeatRuns.id, runId));
+    await expect(db.transaction(tx => assertAgentRunWriteAllowed(tx as unknown as typeof db, companyId, { agentId, runId, stopId })))
+      .resolves.toMatchObject({ status: "cancelled" });
+    for (const wrongId of [undefined, randomUUID()]) {
+      await expect(db.transaction(tx => assertAgentRunWriteAllowed(tx as unknown as typeof db, companyId, { agentId, runId, stopId: wrongId })))
+        .rejects.toMatchObject({ status: 403 });
+    }
   });
 
   it("does not return another company, agent, or run", async () => {
