@@ -1,7 +1,7 @@
 import { eq } from "drizzle-orm";
 import request from "supertest";
 import { expect, it } from "vitest";
-import { activityLog, approvals, issueApprovals, issueRelations, issueThreadInteractions, issues } from "@paperclipai/db";
+import { activityLog, approvals, issueApprovals, issueComments, issueRelations, issueThreadInteractions, issues } from "@paperclipai/db";
 import { issueService } from "../services/issues.js";
 import { issueRoutes } from "../routes/issues.js";
 import { describeEmbeddedPostgres, resetCompanyIssueFixtures, routeApp, seedCompanyWithBoardAccess, useEmbeddedPostgres } from "./helpers/route-test-harness.js";
@@ -108,6 +108,22 @@ describeEmbeddedPostgres("blocked needs a first-class wait (PER-626)", () => {
     const other = await svc.create(companyId, { title: "Other task" });
     await ctx.db.insert(issueThreadInteractions).values({ companyId, issueId: other.id, kind: "ask_user_questions", payload: { questions: [] } as never });
     await expect(svc.update(issue.id, { status: "blocked" })).rejects.toMatchObject({ status: 422 });
+  });
+
+  it.each(["ask_user_questions", "request_confirmation"])("uses current question semantics without releasing %s gates", async (kind) => {
+    const { companyId, issue, svc, userId } = await fixture();
+    await ctx.db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: kind as "ask_user_questions" | "request_confirmation", payload: { questions: [] } as never,
+      createdAt: new Date(Date.now() - 10_000) });
+    await ctx.db.insert(issueComments).values({ companyId, issueId: issue.id,
+      body: "Continue the other work. The old question no longer applies.",
+      authorType: "user", authorUserId: userId });
+    if (kind === "ask_user_questions") {
+      await expect(svc.update(issue.id, { status: "blocked" }))
+        .rejects.toMatchObject({ status: 422, details: { code: "blocked_wait_required" } });
+    } else {
+      await expect(svc.update(issue.id, { status: "blocked" })).resolves.toMatchObject({ status: "blocked" });
+    }
   });
 
   it("preserves pending approval cards", async () => {
