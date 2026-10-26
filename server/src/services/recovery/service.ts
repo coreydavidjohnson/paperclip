@@ -4785,7 +4785,7 @@ export function recoveryService(
         isStrandedIssueRecoveryIssue(issue) &&
         isUnsuccessfulTerminalIssueRun(latestRun)
       ) {
-        const updated = await escalateStrandedRecoveryIssueInPlace({
+        const updated = await escalateStrandedAssignedIssue({
           issue,
           previousStatus: issue.status as StrandedPreviousStatus,
           latestRun,
