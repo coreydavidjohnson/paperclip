@@ -484,3 +484,25 @@ heartbeat.ts.
   locked-receipt/joined-task isolation are separate controls.
 - Remove when upstream supplies bounded persisted rotation for every selected
   path with equivalent concurrency and unchanged admission protections.
+
+
+## PER-316 explicit replay-safe comment admission
+
+- Why: a missing receipt cannot establish that an earlier POST never executed,
+  and legacy comment/control variants are not globally replay-safe. An optional
+  request field can be silently ignored by an older server.
+- Contract: the separate `/issues/:id/comments/replay-safe` POST requires a
+  keyed authenticated board user and the existing atomic operation path. Under
+  the issue fence it returns the saved fingerprinted operation or rejects an
+  unsupported variant before content/control effects. Content-only legacy
+  receipts cannot qualify an unknown control operation. Legacy compatibility,
+  Stop, approval, owner, input and original-target guards remain unchanged.
+- Client: an explicit, unused qualification method snapshots the operation,
+  keeps one key, bounds three attempts with abort deadlines and never falls
+  back to the legacy route. Existing production composers stay one-shot.
+- Controls: complete queued-comment route suite and UI API suite remain in the
+  mandatory Dockerfile gate. See the replay-safe admission incident for fault
+  injection and activation limits. No production or latency claim.
+- Upstream checked at `1fbbef45a8d399771add7a27a04b12f3a20e264c`; it has no
+  equivalent initial-operation contract. Remove this carry when upstream
+  supplies equivalent atomic admission and bounded client recovery.

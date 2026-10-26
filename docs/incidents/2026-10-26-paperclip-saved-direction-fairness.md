@@ -79,3 +79,11 @@ on failure, without adding retries, sleeps or changing the assertion. The
 full image gate must still run with this evidence in place. A focused selector
 is not a full-suite result, and its intentionally unselected tests are reported
 as such.
+
+
+The corrected exact `57e983114b94` preflight passed all 2,348 tests in all 72
+Dockerfile server-gate files, with zero skips, in 605.91 seconds. The original
+failed run remains preserved. The pending-question case passed in this complete
+run, but its original intermittent failure still has no established cause.
+Keep its outbox diagnostic and do not describe a green repeat as a root-cause
+repair. This pinned-runtime preflight is not an image build or live acceptance.

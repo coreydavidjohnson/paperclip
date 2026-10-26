@@ -112,6 +112,7 @@ Review: `baseline`.
 API: `present` — representative operation IDs:
 
 - `POST /api/issues/{id}/comments`.
+- `POST /api/issues/{id}/comments/replay-safe` (board-only qualification route).
 - `POST /api/companies/{companyId}/issues/{issueId}/attachments`.
 
 Agent access: `available` — Native report_progress/comment_on_task/register_deliverable;
@@ -130,7 +131,13 @@ remaining operations before qualifying the whole capability.
 
 Gaps: Other-task comments and active-task progress have separate scopes. Generic
 `call_api` forwards explicit reopen/resume/interrupt fields to the existing route
-checks; it cannot impersonate a user.
+checks; it cannot impersonate a user. The replay-safe qualification endpoint
+is `restricted` to authenticated board users with a request key. Agent identity
+is refused; a user-interaction answer does not grant board identity. Its
+[route regressions](../../server/src/__tests__/issue-queued-comments-routes.test.ts)
+cover this denial and atomic replay controls in an isolated database, not live
+agent access or default UI activation. The ordinary discussion entry points and
+product recipe are unchanged.
 
 ## `completion`
 

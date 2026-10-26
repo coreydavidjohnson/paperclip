@@ -18401,10 +18401,7 @@ export function issueRoutes(
     });
   }
 
-  router.post(
-    ["/issues/:id/comments", "/issues/:id/comments/replay-safe"],
-    validate(addIssueCommentSchema),
-    async (req, res) => {
+  const addIssueCommentHandler = async (req: Request, res: Response) => {
       const id = req.params.id as string;
       const issue = await getAccessibleResource(
         req,
@@ -19770,8 +19767,11 @@ export function issueRoutes(
 
       await queueTaskWatchdogEvaluation(currentIssue, actor.runId);
       res.status(201).json(comment);
-    },
-  );
+  };
+  // Register separate string templates so existing private metrics retain
+  // route attribution for both normal and replay-safe comment requests.
+  router.post("/issues/:id/comments", validate(addIssueCommentSchema), addIssueCommentHandler);
+  router.post("/issues/:id/comments/replay-safe", validate(addIssueCommentSchema), addIssueCommentHandler);
 
   router.post(
     "/issues/:id/feedback-votes",
