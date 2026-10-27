@@ -1613,7 +1613,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     if (!isRetryableInteractionContinuationInfrastructureFailure(run)) {
       const context = parseObject(run.contextSnapshot);
       const issueId = readNonEmptyString(context.issueId);
-      await escalatePlanApprovalResumeFailureNeedsAttention({
+      const interactionId = await escalatePlanApprovalResumeFailureNeedsAttention({
         run,
         issueId,
         attempt: Math.min(
@@ -1628,7 +1628,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
           "failed to escalate non-retryable plan-approval resume failure",
         );
       });
-      return null;
+      return interactionId ? { outcome: "needs_attention" as const } : null;
     }
 
     return scheduleBoundedRetryForRun(run, agent, {

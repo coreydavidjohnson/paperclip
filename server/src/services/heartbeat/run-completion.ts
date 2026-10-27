@@ -896,6 +896,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           `[paperclip] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
+      let interactionContinuationNeedsAttention = false;
       if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
         const policy = parseMaxTurnContinuationPolicy(agent);
         if (policy.enabled && policy.maxAttempts > 0) {
@@ -927,10 +928,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         outcome === "failed" &&
         !(await legacyExecutionNeedsReconciliationWithEvidence(db, livenessRun))
       ) {
-        await scheduleInteractionContinuationInfrastructureRetryIfEligible(
+        const interactionContinuationDecision = await scheduleInteractionContinuationInfrastructureRetryIfEligible(
           livenessRun,
           agent,
         );
+        interactionContinuationNeedsAttention =
+          interactionContinuationDecision?.outcome === "needs_attention";
       }
       const issueCommentPolicyResult = await finalizeIssueCommentPolicy(
         livenessRun,
@@ -940,6 +943,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       const conversationSettled = await settleConversationTurn(db, livenessRun);
       await releaseIssueExecutionAndPromote(livenessRun, {
         suppressImmediateRecovery: conversationSettled ||
+          interactionContinuationNeedsAttention ||
           readNonEmptyString(
             parseObject(livenessRun.contextSnapshot).goalControlRequestId,
           ) !== null ||
@@ -1236,7 +1240,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       ) {
         await finalizeIssueCommentPolicy(livenessRun, agent);
       }
-      await scheduleInteractionContinuationInfrastructureRetryIfEligible(
+      const interactionContinuationDecision = await scheduleInteractionContinuationInfrastructureRetryIfEligible(
         livenessRun,
         agent,
       );
@@ -1245,7 +1249,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // exhaustion. Once its durable coordinator has classified a
         // terminal failure, generic issue recovery must not create a
         // replacement retryOfRunId chain for the same provider work.
-        suppressImmediateRecovery: nativeTerminalFailureCode !== null,
+        suppressImmediateRecovery:
+          nativeTerminalFailureCode !== null ||
+          interactionContinuationDecision?.outcome === "needs_attention",
       });
       await handleIssueReviewPathDisposition(livenessRun);
 
@@ -1465,6 +1471,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           );
         });
       }
+      let interactionContinuationNeedsAttention = false;
       const failedAgent =
         setupFailureAgent ??
         (await getAgent(run.agentId).catch(() => null));
@@ -1484,7 +1491,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // No provider work began. Retry temporary host scan failures with
         // the existing durable failure budget, before releasing execution.
         // Generic recovery must not grant a second budget on exhaustion.
-        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+        const interactionContinuationDecision = await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
           ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
           : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
         ).catch((retryError) => {
@@ -1492,10 +1499,14 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             { err: retryError, runId: livenessRun.id },
             "failed to schedule interaction continuation retry after setup failure",
           );
+          return null;
         });
+        interactionContinuationNeedsAttention =
+          interactionContinuationDecision?.outcome === "needs_attention";
       }
       await releaseIssueExecutionAndPromote(livenessRun, {
         suppressImmediateRecovery:
+          interactionContinuationNeedsAttention ||
           readNonEmptyString(
             parseObject(livenessRun.contextSnapshot).goalControlRequestId,
           ) !== null ||

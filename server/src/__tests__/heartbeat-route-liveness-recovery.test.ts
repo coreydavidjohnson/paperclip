@@ -170,11 +170,15 @@ describe("route liveness recovery", () => {
    if (state === "active") await vi.waitFor(() => expect(observe).toHaveBeenCalledOnce());
    else expect(observe).not.toHaveBeenCalled();
    if (state !== "hold") {
-    const lifted = await request(app).patch(`/api/issues/${task.id}`).send({ blockedByIssueIds: [] });
-    expect(lifted.status, JSON.stringify(lifted.body)).toBe(200);
+    await db.update(issues).set({ status: "done", completedAt: new Date() }).where(eq(issues.id, blocker.id));
    }
    const commentClientRequestId = crypto.randomUUID();
-   const resume = () => request(app).patch(`/api/issues/${task.id}`).send({ status: "todo", resume: true, comment: "Verify prior effects and keep this direction.", commentClientRequestId });
+   const resume = () => request(app).patch(`/api/issues/${task.id}`).send({
+    status: "todo",
+    resume: true,
+    comment: "Verify prior effects and keep this direction.",
+    commentClientRequestId,
+   });
    const resumed = await resume();
    expect(resumed.status, JSON.stringify(resumed.body)).toBe(state === "hold" ? 409 : 200);
    if (state === "hold") {

@@ -26,7 +26,7 @@ export type StrandedRecoveryEscalationNotice = {
 
 export const DEFAULT_STRANDED_RECOVERY_NOTICE_BODY =
   "Paperclip could not restore a live execution path for this issue automatically. " +
-  "Moving it to `blocked` so it is visible for intervention.";
+  "An operator decision is required before automatic recovery can continue.";
 
 const DEFAULT_STRANDED_RECOVERY_NOTICE_TITLE = "Automatic recovery blocked";
 
