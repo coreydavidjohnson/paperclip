@@ -498,6 +498,22 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
+    // Match JWT admission: an already revoked run cannot start a new write.
+    // A request admitted before its own Stop keeps its request-local authority.
+    if (runIdHeader && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      const [identityRun] = await loadAgentRunAuthentication(db, {
+        runId: runIdHeader,
+        companyId: key.companyId,
+        agentId: key.agentId,
+      });
+      if (agentRunWritesRevoked(identityRun)) {
+        const conversation = identityRun?.contextSnapshot?.conversationMode === true;
+        _res.status(403).json({ error: conversation ? "This conversation turn was cancelled" : "This run was cancelled",
+          code: conversation ? "conversation_turn_cancelled" : "agent_run_cancelled" });
+        return;
+      }
+    }
+
     req.actor = {
       type: "agent",
       agentId: key.agentId,

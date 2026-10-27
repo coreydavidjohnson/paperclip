@@ -33,7 +33,7 @@ import {
   NativeStatusRaceError,
 } from "./status-decision-committer.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
-import { issueService } from "../issues.js";
+import { hasIssueBlockedWait, issueService } from "../issues.js";
 import { emitAgentTaskRun } from "../agent-task-run-telemetry.js";
 import { reportRunFailure } from "../run-failure-report.js";
 import { resumeNativeWorkspaceFinalization } from "./native-workspace-finalizer.js";
@@ -522,11 +522,16 @@ export async function claimNativeSessionResumptions(input: {
         // both "running" and "failed") must not send a second Sentry event.
         terminalRunToEmit =
           updatedRun && updatedRun.status !== row.run.status ? updatedRun : null;
-        await issueService(tx as unknown as Db).update(
-          row.coordinator.issueId,
-          { status: "blocked" },
-          tx,
-        );
+        const recoveryStatus = await hasIssueBlockedWait(tx as unknown as Db, issue)
+          ? "blocked"
+          : record(issue.executionState).status === "pending" ? "in_review" : "todo";
+        if (issue.status !== recoveryStatus) {
+          await issueService(tx as unknown as Db).update(
+            row.coordinator.issueId,
+            { status: recoveryStatus },
+            tx,
+          );
+        }
         await issueRecoveryActionService(tx as unknown as Db).upsertSourceScoped({
           companyId: row.run.companyId,
           sourceIssueId: row.coordinator.issueId,

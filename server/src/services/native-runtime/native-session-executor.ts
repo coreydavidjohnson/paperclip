@@ -170,7 +170,7 @@ import { commitNativeStatusDecision } from "./status-decision-committer.js";
 import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
 import { documentService } from "../documents.js";
 import { issueThreadInteractionService } from "../issue-thread-interactions.js";
-import { issueService } from "../issues.js";
+import { hasIssueBlockedWait, issueService } from "../issues.js";
 import {
   NATIVE_STATUS_ARBITER_POLICY_VERSION,
   type NativeAuthoritativeIssueStatus,
@@ -9448,14 +9448,27 @@ async function executePaperclipNativeSessionWithinScope(
             failureTask.executionRunId === input.execution.binding.runId) &&
           (!failureTask.checkoutRunId ||
             failureTask.checkoutRunId === input.execution.binding.runId);
-        let failureBlockStatusVersion: number | undefined;
+        let nativeFailureBlock: { runId: string; statusVersion: number; status: "todo" | "blocked" } | undefined;
         if (stillOwnsTask && recoveryProjection.issueStatus) {
+          const recoveryStatus = recoveryProjection.issueStatus === "blocked"
+            && !await hasIssueBlockedWait(tx as unknown as Db, {
+              id: input.execution.binding.issueId,
+              companyId: input.execution.binding.companyId,
+            })
+            ? record(failureTask.executionState).status === "pending" ? "in_review" : "todo"
+            : recoveryProjection.issueStatus;
           const projected = await issueService(tx as unknown as Db).update(
             input.execution.binding.issueId,
-            { status: recoveryProjection.issueStatus },
+            { status: recoveryStatus },
             tx,
           );
-          if (projected?.status === "blocked") failureBlockStatusVersion = projected.statusVersion;
+          if (projected && (projected.status === "todo" || projected.status === "blocked")) {
+            nativeFailureBlock = {
+              runId: input.execution.binding.runId,
+              statusVersion: projected.statusVersion,
+              status: projected.status,
+            };
+          }
         }
         if (
           !ownershipUnverified &&
@@ -9483,10 +9496,7 @@ async function executePaperclipNativeSessionWithinScope(
             .digest("hex"),
           evidence: {
             runId: input.execution.binding.runId,
-            ...(failureBlockStatusVersion !== undefined ? { nativeFailureBlock: {
-              runId: input.execution.binding.runId,
-              statusVersion: failureBlockStatusVersion,
-            } } : {}),
+            ...(nativeFailureBlock ? { nativeFailureBlock } : {}),
             coordinatorAttempt: attempt,
             sourceFailureCode,
             ...(remoteRunnerRecovery ? { remoteRunnerRecovery } : {}),

@@ -1,4 +1,5 @@
-import { assertRecoveryStatusWriteAllowed } from "../guarded-status-repair.js";
+import { assertRecoveryStatusWriteAllowed, isSupportedBoardTodoHandback } from "../guarded-status-repair.js";
+import { activeIssueInteractionCondition } from "../issue-question-context.js";
 import { admitReconciledUserContinuation } from "../execution-recovery-resolution.js";
 import { startClaimedLegacyControllerLease } from "../legacy-controller-lease.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
@@ -147,7 +148,12 @@ import {
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
   WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
 } from "../execution-workspace-policy.js";
-import { readContinuationAttempt } from "../recovery/index.js";
+import {
+  buildStrandedRecoveryEscalationNotice,
+  noticeMetadataReferencesRecoveryAction,
+  readContinuationAttempt,
+} from "../recovery/index.js";
+import { issueRecoveryActionService } from "../issue-recovery-actions.js";
 import { allowsIssueInteractionWake } from "../../modules/run-dispatch/index.js";
 import { withAgentStartLock } from "../agent-start-lock.js";
 import { admitAgentRun } from "../run-admission.js";
@@ -165,7 +171,7 @@ import type { createHeartbeatRunState } from "./run-state.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
 import type { HeartbeatRetryDependencies } from "./retries.js";
 import type { HeartbeatRecoveryDependencies, createHeartbeatRecovery } from "./recovery.js";
-import type { issueService } from "../issues.js";
+import { hasIssueBlockedWait, type issueService } from "../issues.js";
 import type { issueTreeControlService } from "../issue-tree-control.js";
 import type { budgetService } from "../budgets.js";
 import type { instanceSettingsService } from "../instance-settings.js";
@@ -3081,6 +3087,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               conversationState: issues.conversationState,
               status: issues.status,
               statusVersion: issues.statusVersion,
+              executionState: issues.executionState,
               projectId: issues.projectId,
               projectWorkspaceId: issues.projectWorkspaceId,
               executionWorkspaceId: issues.executionWorkspaceId,
@@ -3180,17 +3187,19 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(issueRecoveryActions.sourceIssueId, issue.id),
             )).for("update") : [];
             const receipt = parseObject(action?.evidence.guardedStatusRepair);
+            const sameStatusTodoHandback = receipt.sameStatusTodoHandback === true &&
+              !!action && ["missing_disposition", "workspace_validation"].includes(action.kind);
             if (!action || action.status !== "resolved" || action.outcome !== "handed_back" ||
-                action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
-                action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+                (action.kind !== "deliberate_wait_without_target" && !sameStatusTodoHandback) || action.ownerType !== "board" ||
                 action.returnOwnerAgentId !== agentId || receipt.actorType !== "user" ||
                 opts.requestedByActorType !== "user" || opts.requestedByActorId !== receipt.actorId ||
                 source !== "automation" || triggerDetail !== "system" || reason !== "issue_commented" ||
                 opts.idempotencyKey !== `guarded-status-repair:${action.id}` ||
                 enrichedContextSnapshot.source !== "issue.comment" || enrichedContextSnapshot.forceFreshSession ||
                 enrichedContextSnapshot.recoveryActionId || enrichedContextSnapshot.recovery || opts.failedRunId ||
-                parseObject(enrichedContextSnapshot.paperclipAgentMessage).text !== action.resolutionNote) return { kind: "skipped" as const };
-            const [prior] = await tx.select({ runId: agentWakeupRequests.runId }).from(agentWakeupRequests).where(and(
+                parseObject(enrichedContextSnapshot.paperclipAgentMessage).text !==
+                  (typeof receipt.continuationNote === "string" ? receipt.continuationNote : action.resolutionNote)) return { kind: "skipped" as const };
+            const [prior] = await tx.select({ id: agentWakeupRequests.id, runId: agentWakeupRequests.runId }).from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
               eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
               eq(agentWakeupRequests.requestedByActorType, "user"), eq(agentWakeupRequests.requestedByActorId, String(receipt.actorId)),
@@ -3199,11 +3208,23 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             )).limit(1);
             if (prior) {
               const [run] = await tx.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, prior.runId!),
-                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId)));
+                eq(heartbeatRuns.wakeupRequestId, prior.id),
+                eq(heartbeatRuns.companyId, issue.companyId), eq(heartbeatRuns.agentId, agentId),
+                sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`,
+                sql`${heartbeatRuns.contextSnapshot}->>'guardedStatusRepairId' = ${action.id}`,
+                sql`${heartbeatRuns.contextSnapshot}->>'source' = 'issue.comment'`,
+              ));
+              // A conflicting durable binding is uncertainty, not permission
+              // to acknowledge it or create a replacement admission.
               return run ? { kind: "replayed" as const, run } : { kind: "deferred" as const };
             }
             const [current] = await tx.select().from(issues).where(eq(issues.id, issue.id));
-            if (receipt.delivery !== "pending" || current.status !== "todo" || current.assigneeAgentId !== agentId ||
+            // An already committed wake above is adoption, not a new turn. Only
+            // a new admission needs the current native source projection.
+            const supportedProjection = sameStatusTodoHandback || (parseObject(receipt.request).mode === "board_todo_handback"
+              ? await isSupportedBoardTodoHandback(tx as unknown as Db, current, action)
+              : action.evidence.terminalReason === "unchanged_source_state_exhausted");
+            if (!supportedProjection || receipt.delivery !== "pending" || current.status !== "todo" || current.assigneeAgentId !== agentId ||
                 current.assigneeUserId || current.hiddenAt || current.updatedAt.toISOString() !== receipt.sourceUpdatedAt ||
                 current.statusVersion !== receipt.sourceStatusVersion) {
               await tx.update(issueRecoveryActions).set({ evidence: sql`jsonb_set(${issueRecoveryActions.evidence},
@@ -3222,7 +3243,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             )).limit(1);
             const [card] = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
               eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
-              eq(issueThreadInteractions.status, "pending"),
+              eq(issueThreadInteractions.status, "pending"), activeIssueInteractionCondition(),
             )).limit(1);
             const [approval] = await tx.select({ id: approvals.id }).from(issueApprovals)
               .innerJoin(approvals, and(eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId)))
@@ -3259,7 +3280,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               opts.requestedByActorId !== "execution-recovery" ||
               opts.idempotencyKey !== `execution-reconciliation:${actionId}` ||
               enrichedContextSnapshot.source !== "execution.reconciled" ||
-              enrichedContextSnapshot.forceFreshSession !== true ||
+              enrichedContextSnapshot.forceFreshSession ||
               payload?.issueId !== issue.id ||
               payload?.recoveryActionId !== actionId ||
               issue.assigneeAgentId !== agentId ||
@@ -3988,10 +4009,96 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 `- Reason: ${WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE}`,
                 `- Next action: ${WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION}`,
               ].join("\n");
+              const recoveryCause = WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE;
+              const recoveryAction = await issueRecoveryActionService(
+                tx as unknown as Db,
+              ).upsertSourceScoped({
+                companyId: issue.companyId,
+                sourceIssueId: issue.id,
+                kind: "workspace_validation",
+                ownerType: "board",
+                previousOwnerAgentId: issue.assigneeAgentId,
+                returnOwnerAgentId: issue.assigneeAgentId,
+                cause: recoveryCause,
+                fingerprint: [
+                  "workspace_preflight:v1",
+                  recoveryCause,
+                  resolvedMode,
+                  resolvedStrategy,
+                ].join(":"),
+                evidence: {
+                  code: recoveryCause,
+                  reason: WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
+                  remediation: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+                  requestedReason: reason,
+                  source,
+                  triggerDetail,
+                  resolvedMode,
+                  resolvedStrategy,
+                  hasResolvablePriorSessionWorkspace,
+                  routingPolicy: "board_escalation_no_takeover_v1",
+                },
+                nextAction: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+                wakePolicy: {
+                  type: "board_escalation",
+                  reason: recoveryCause,
+                  preservesSourceAssignee: true,
+                },
+                attemptCount: 1,
+                maxAttempts: null,
+                lastAttemptAt: now,
+                supersedeOnIdentityChange: true,
+                preserveExistingOwner: true,
+              });
+              const notice = buildStrandedRecoveryEscalationNotice({
+                seed: {
+                  title: "Workspace settings need attention",
+                  tone: "danger",
+                  body: blockedComment,
+                  nextAction: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+                },
+                recoveryCause,
+                recoveryActionId: recoveryAction.id,
+                recoveryOwner: null,
+                sourceRun: null,
+              });
+              const [existingComment] = await tx
+                .select({ id: issueComments.id, metadata: issueComments.metadata })
+                .from(issueComments)
+                .where(and(
+                  eq(issueComments.companyId, issue.companyId),
+                  eq(issueComments.issueId, issue.id),
+                  eq(issueComments.body, blockedComment),
+                  or(isNull(issueComments.authorType), eq(issueComments.authorType, "system")),
+                  isNull(issueComments.deletedAt),
+                ))
+                .limit(1);
+              if (existingComment) {
+                if (!noticeMetadataReferencesRecoveryAction(existingComment.metadata, recoveryAction.id)) {
+                  await tx.update(issueComments).set({
+                    metadata: notice.metadata,
+                    presentation: notice.presentation,
+                  }).where(eq(issueComments.id, existingComment.id));
+                }
+              } else {
+                await tx.insert(issueComments).values({
+                  companyId: issue.companyId,
+                  issueId: issue.id,
+                  authorType: "system",
+                  body: notice.body,
+                  presentation: notice.presentation,
+                  metadata: notice.metadata,
+                  createdAt: now,
+                  updatedAt: now,
+                });
+              }
+              const hasRealWait = await hasIssueBlockedWait(tx as unknown as Db, issue);
+              const recoveryStatus = hasRealWait ? "blocked"
+                : parseObject(issue.executionState).status === "pending" ? "in_review" : "todo";
               await tx
                 .update(issues)
                 .set({
-                  status: "blocked",
+                  status: recoveryStatus,
                   checkoutRunId: null,
                   executionRunId: null,
                   executionAgentNameKey: null,
@@ -3999,13 +4106,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   updatedAt: now,
                 })
                 .where(eq(issues.id, issue.id));
-              await tx.insert(issueComments).values({
-                companyId: issue.companyId,
-                issueId: issue.id,
-                body: blockedComment,
-                createdAt: now,
-                updatedAt: now,
-              });
               await tx.insert(agentWakeupRequests).values({
                 ...durableReceiptFields,
                 companyId: agent.companyId,

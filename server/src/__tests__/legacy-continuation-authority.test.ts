@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { agents, agentWakeupRequests, activityLog, companies, createDb, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
+import { agents, agentWakeupRequests, activityLog, companies, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, issueRelations, issueComments, issueRecoveryActions, issueThreadInteractions, issues } from "@paperclipai/db";
 import { createChildIssueSchema } from "@paperclipai/shared";
 import { issueService } from "../services/issues.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -11,7 +11,7 @@ import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.j
 describe("legacy continuation persisted authority", () => {
   let temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   let db: ReturnType<typeof createDb>;
-  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, 20_000);
+  beforeAll(async () => { temporary = await startEmbeddedPostgresTestDatabase("legacy-authority-"); db = createDb(temporary.connectionString); }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
   afterAll(async () => { await db?.$client.end({ timeout: 0 }); await temporary?.cleanup(); });
   async function fixture(context: Record<string, unknown> = {}, continuationAttempt = 0) {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
@@ -35,7 +35,11 @@ describe("legacy continuation persisted authority", () => {
       await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
       if (run.wakeupRequestId) await db.update(agentWakeupRequests).set({ status: "completed" }).where(eq(agentWakeupRequests.id, run.wakeupRequestId));
     }
-    return { companyId, agentId, issueId, runId, createRecovery, runs, actions, finish };
+    async function sweep() {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      return createRecovery().reconcileStrandedAssignedIssues({ issueCreatedAtGte: issue.createdAt });
+    }
+    return { companyId, agentId, issueId, runId, createRecovery, runs, actions, finish, sweep };
   }
   it.each([1, 2, 3, 4, 5])("deduplicates concurrent replay with stale prose-derived liveness (%s)", async () => {
     const f = await fixture();
@@ -87,7 +91,7 @@ describe("legacy continuation persisted authority", () => {
     await db.update(heartbeatRuns).set({ livenessState: "advanced", resultJson: { summary: "Continuing", toolCallCount: noise === "tool-calls" ? 1000 : 0 } }).where(eq(heartbeatRuns.id, second.id));
     // Enter through the sweep while the task is still in_progress, so the
     // old comment/attachment progress exemption cannot bypass exhaustion.
-    await f.createRecovery().reconcileStrandedAssignedIssues();
+    await f.sweep();
     expect(await f.runs()).toHaveLength(3);
     expect((await f.actions()).find(a => a.status === "active")).toMatchObject({ ownerType: "board", attemptCount: 2 });
   });
@@ -181,7 +185,9 @@ describe("legacy continuation persisted authority", () => {
   });
   it.each(["done", "cancelled", "blocked", "in_review"])("honors durable %s instead of the final summary", async status => {
     const f = await fixture();
-    await db.update(issues).set({ status }).where(eq(issues.id, f.issueId));
+    await db.update(issues).set({ status, ...(status === "blocked" ? {
+      unblockDescriptor: { owner: "board" as const, action: "Provide required credentials" },
+    } : {}) }).where(eq(issues.id, f.issueId));
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
     expect(await f.runs()).toHaveLength(1);
   });
@@ -248,9 +254,60 @@ describe("legacy continuation persisted authority", () => {
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
     expect(await f.runs()).toHaveLength(1);
   });
+  it("PER-404 returns a bare-blocked task within one sweep without board action", async () => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await f.sweep();
+    const repair = (await f.runs()).find(r => r.id !== f.runId)!;
+    expect(repair).toBeDefined();
+    expect(repair.agentId).toBe(f.agentId);
+    expect(repair.contextSnapshot).toMatchObject({ issueId: f.issueId, legacyDispositionEpisode: { id: f.runId, attempt: 1, maxAttempts: 2 } });
+    expect(await f.createRecovery().legacyRepairDispatchBlock(repair.id)).toBeNull();
+    await f.sweep();
+    expect(await f.runs()).toHaveLength(2);
+    expect((await f.actions())[0]).toMatchObject({ ownerType: "agent", attemptCount: 1 });
+  });
+  it.each(["ask_user_questions", "request_confirmation"] as const)("PER-626 ignores historical questions but preserves %s authority", async kind => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId,
+      kind, status: "pending", payload: { version: 1, prompt: "Old input" },
+      createdAt: new Date(Date.now() - 10_000) });
+    await db.insert(issueComments).values({ companyId: f.companyId, issueId: f.issueId,
+      authorType: "user", authorUserId: "fixture-owner", body: "Continue. The old question no longer applies." });
+    await f.sweep();
+    expect(await f.runs()).toHaveLength(kind === "ask_user_questions" ? 2 : 1);
+    expect(await f.actions()).toHaveLength(kind === "ask_user_questions" ? 1 : 0);
+  });
+  it.each(["descriptor", "dependency", "question", "approval"])("PER-404 preserves a blocked %s gate", async gate => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked", ...(gate === "descriptor" ? {
+      unblockDescriptor: { owner: "board" as const, action: "Provide credentials" },
+    } : {}) }).where(eq(issues.id, f.issueId));
+    if (gate === "dependency") {
+      const blockerId = randomUUID();
+      await db.insert(issues).values({ id: blockerId, companyId: f.companyId, title: "Real dependency", status: "todo" });
+      await db.insert(issueRelations).values({ companyId: f.companyId, issueId: blockerId, relatedIssueId: f.issueId, type: "blocks" });
+    }
+    if (gate === "question" || gate === "approval") await db.insert(issueThreadInteractions).values({
+      companyId: f.companyId, issueId: f.issueId, kind: gate === "question" ? "ask_user_questions" : "request_confirmation",
+      status: "pending", payload: { version: 1, prompt: "Human input required" },
+    });
+    await f.sweep();
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
+  it.each(["failed", "interrupted", "native"])("PER-404 never replays a blocked %s source", async source => {
+    const f = await fixture();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.update(heartbeatRuns).set(source === "native" ? { runtimeMode: "native" } : { status: source }).where(eq(heartbeatRuns.id, f.runId));
+    await f.sweep();
+    expect(await f.runs()).toHaveLength(1);
+    expect(await f.actions()).toHaveLength(0);
+  });
   it("the delayed sweep ignores old diagnostic labels and uses the same repair path", async () => {
     const f = await fixture();
-    await f.createRecovery().reconcileStrandedAssignedIssues({ companyId: f.companyId });
+    await f.sweep();
     expect(await f.runs()).toHaveLength(2);
     const repair = (await f.runs()).find(r => r.id !== f.runId)!;
     expect(repair.contextSnapshot).toMatchObject({ legacyDispositionEpisode: { id: f.runId, attempt: 1 } });
@@ -277,7 +334,9 @@ describe("legacy continuation persisted authority", () => {
     await db.insert(issues).values({ companyId: f.companyId, parentId: f.issueId,
       title: "Historical routing", status: history === "done" ? "done" : "todo",
       hiddenAt: history === "hidden" ? new Date() : null, originKind: "routing_child" });
-    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, f.issueId));
+    await db.update(issues).set({ status: "blocked", unblockDescriptor: {
+      owner: "board" as const, action: "Wait for an independent credential decision",
+    } }).where(eq(issues.id, f.issueId));
     expect(await f.createRecovery().reconcileLegacyContinuation(f.runId)).toBe("skipped");
     expect(await f.runs()).toHaveLength(1);
     expect(await f.actions()).toHaveLength(0);

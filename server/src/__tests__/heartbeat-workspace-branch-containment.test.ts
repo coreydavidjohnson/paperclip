@@ -28,6 +28,7 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issueComments,
+  issueThreadInteractions,
   issueDocuments,
   issuePlanDecompositions,
   issueRecoveryActions,
@@ -660,7 +661,7 @@ async function expectContainedWorkspaceBranchFailure(input: {
   });
   const issueById = new Map(issueRows.map((issue) => [issue.id, issue]));
   expect(issueById.get(input.sourceIssueId)).toMatchObject({
-    status: "blocked",
+    status: "todo",
     executionRunId: null,
     checkoutRunId: null,
   });
@@ -1069,7 +1070,12 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       const [issue] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
       expect(issue).toMatchObject({ executionWorkspaceId: seeded.executionWorkspaceId,
         projectWorkspaceId: kind === "explicit_conflict" ? seeded.newWorkspaceId : null });
-      if (kind === "explicit_conflict" || kind === "unproven") expect(issue.status).toBe("blocked");
+      if (kind === "explicit_conflict" || kind === "unproven") {
+        expect(issue.status).toBe("todo");
+        expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId)))
+          .toEqual([expect.objectContaining({ ownerType: "board", returnOwnerAgentId: seeded.agentId,
+            kind: "workspace_validation", status: "active" })]);
+      }
       expect(await readFile(path.join(seeded.worktree, "retained.txt"), "utf8")).toBe("unexported original task edits\n");
       expect(await readFile(path.join(seeded.replacement, "replacement.txt"), "utf8")).toBe("replacement source must stay untouched\n");
     },
@@ -1099,7 +1105,7 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     expect(adapterExecute).not.toHaveBeenCalled();
     expect(mockCaptureRunFailure).not.toHaveBeenCalled();
     const [issue] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
-    expect(issue).toMatchObject({ status: "blocked", executionRunId: null, executionWorkspaceId: seeded.executionWorkspaceId });
+    expect(issue).toMatchObject({ status: "todo", assigneeAgentId: seeded.agentId, executionRunId: null, executionWorkspaceId: seeded.executionWorkspaceId });
     const comments = await db.select({ body: issueComments.body }).from(issueComments).where(eq(issueComments.issueId, seeded.issueId));
     expect(comments.map(comment => comment.body).join("\n")).toContain("shared project checkout that also holds another task's workspace");
     const actions = await db.select({ nextAction: issueRecoveryActions.nextAction }).from(issueRecoveryActions)
@@ -1108,12 +1114,27 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     expect(await readFile(path.join(seeded.worktree, "retained.txt"), "utf8")).toBe("unexported original task edits\n");
   });
 
-  it("blocks projectless isolated git-worktree issues before dispatch", async () => {
+  it.each([
+    [false, "todo"],
+    [true, "in_review"],
+  ] as const)("holds projectless isolated work behind an idempotent board action before dispatch (pending stage: %s)", async (pendingStage, expectedStatus) => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const issueId = randomUUID();
     const issuePrefix = `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`;
     const issueIdentifier = `${issuePrefix}-1`;
+    const executionState = pendingStage ? {
+      status: "pending",
+      currentStageId: randomUUID(),
+      currentStageIndex: 0,
+      currentStageType: "review",
+      currentParticipant: { type: "agent", agentId, userId: null },
+      returnAssignee: { type: "agent", agentId, userId: null },
+      reviewRequest: null,
+      completedStageIds: [],
+      lastDecisionId: null,
+      lastDecisionOutcome: null,
+    } : null;
 
     await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
     await db.insert(companies).values({
@@ -1145,7 +1166,8 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       id: issueId,
       companyId,
       title: "Projectless isolated worktree",
-      status: "todo",
+      status: pendingStage ? "in_review" : "todo",
+      executionState,
       workMode: "standard",
       priority: "medium",
       assigneeAgentId: agentId,
@@ -1170,12 +1192,25 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
     expect(run).toBeNull();
     expect(adapterExecute).not.toHaveBeenCalled();
 
+    const repeatedRun = await heartbeat.wakeup(agentId, {
+      source: "assignment",
+      triggerDetail: "system",
+      reason: "issue_assigned",
+      idempotencyKey: "workspace-preflight-still-invalid",
+      payload: { issueId },
+      contextSnapshot: { issueId, wakeReason: "issue_assigned" },
+    });
+    expect(repeatedRun).toBeNull();
+    expect(adapterExecute).not.toHaveBeenCalled();
+
     const runRows = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
     expect(runRows).toEqual([]);
 
-    const blockedIssue = await db
+    const heldIssue = await db
       .select({
         status: issues.status,
+        assigneeAgentId: issues.assigneeAgentId,
+        executionState: issues.executionState,
         checkoutRunId: issues.checkoutRunId,
         executionRunId: issues.executionRunId,
         executionAgentNameKey: issues.executionAgentNameKey,
@@ -1183,38 +1218,74 @@ describeEmbeddedPostgres("heartbeat workspace branch containment", () => {
       .from(issues)
       .where(eq(issues.id, issueId))
       .then((rows) => rows[0] ?? null);
-    expect(blockedIssue).toEqual({
-      status: "blocked",
+    expect(heldIssue).toEqual({
+      status: expectedStatus,
+      assigneeAgentId: agentId,
+      executionState,
       checkoutRunId: null,
       executionRunId: null,
       executionAgentNameKey: null,
     });
 
-    const wakeup = await db
+    const actions = await db
+      .select()
+      .from(issueRecoveryActions)
+      .where(and(
+        eq(issueRecoveryActions.companyId, companyId),
+        eq(issueRecoveryActions.sourceIssueId, issueId),
+      ));
+    expect(actions).toHaveLength(1);
+    const action = actions[0]!;
+    expect(action).toMatchObject({
+      sourceIssueId: issueId,
+      kind: "workspace_validation",
+      status: "active",
+      ownerType: "board",
+      ownerAgentId: null,
+      ownerUserId: null,
+      previousOwnerAgentId: agentId,
+      returnOwnerAgentId: agentId,
+      cause: WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
+      nextAction: expect.stringContaining(WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION),
+      wakePolicy: expect.objectContaining({
+        type: "board_escalation",
+        preservesSourceAssignee: true,
+      }),
+    });
+
+    const wakeups = await db
       .select({
         status: agentWakeupRequests.status,
         reason: agentWakeupRequests.reason,
         payload: agentWakeupRequests.payload,
       })
       .from(agentWakeupRequests)
-      .where(eq(agentWakeupRequests.agentId, agentId))
-      .then((rows) => rows[0] ?? null);
-    expect(wakeup).toMatchObject({
-      status: "skipped",
-      reason: WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
-    });
-    expect(asRecord(asRecord(wakeup?.payload).heartbeatSkip)).toEqual({
-      code: WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
-      reason: WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
-      remediation: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
-    });
+      .where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakeups).toHaveLength(2);
+    for (const wakeup of wakeups) {
+      expect(wakeup).toMatchObject({
+        status: "skipped",
+        reason: WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
+      });
+      expect(asRecord(asRecord(wakeup.payload).heartbeatSkip)).toEqual({
+        code: WORKSPACE_WORKTREE_REQUIRES_PROJECT_CODE,
+        reason: WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE,
+        remediation: WORKSPACE_WORKTREE_REQUIRES_PROJECT_REMEDIATION,
+      });
+    }
 
-    const comment = await db
-      .select({ body: issueComments.body })
+    const comments = await db
+      .select({ body: issueComments.body, metadata: issueComments.metadata })
       .from(issueComments)
-      .where(eq(issueComments.issueId, issueId))
-      .then((rows) => rows[0] ?? null);
-    expect(comment?.body).toContain(WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE);
+      .where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]?.body).toContain(WORKSPACE_WORKTREE_REQUIRES_PROJECT_MESSAGE);
+    expect(noticeMetadataReferencesRecoveryAction(comments[0]?.metadata, action.id)).toBe(true);
+    expect(await db.select().from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.companyId, companyId),
+      eq(issueThreadInteractions.issueId, issueId),
+      eq(issueThreadInteractions.status, "pending"),
+    ))).toEqual([]);
 
     const activity = await db
       .select({

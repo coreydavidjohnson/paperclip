@@ -482,7 +482,22 @@ describe("native status authority", () => {
     );
   });
 
-  it("blocks only for a task-wide blocker with a named owner and action", () => {
+  it.each(["task_wide", "current_track"] as const)("keeps an unlinked %s native result under a real recovery hold instead of blocked", (scope) => {
+    const decision = arbitrate({ assessment: assessment({ reportedDisposition: "blocked",
+      blocker: { boardOwned: false, scope, unblockAction: "Repair the exact prerequisite" } }) });
+    expect(decision).toMatchObject({ statusAction: "todo", toStatus: "todo",
+      unblockDescriptor: { owner: "board", action: "Repair the exact prerequisite" } });
+    expect(decision.effects).toEqual([{ kind: "bind_blocker", owner: "board",
+      action: "Repair the exact prerequisite", recoveryHold: true }]);
+  });
+
+  it.each(["providerModelRejected", "providerOverloaded"] as const)("keeps %s exhaustion under a no-replay recovery hold without a fabricated wait", (flag) => {
+    const decision = arbitrate({ terminalState: "failed", [flag]: true, failureRetryCount: 100 });
+    expect(decision).toMatchObject({ statusAction: "todo", toStatus: "todo" });
+    expect(decision.effects).toEqual([expect.objectContaining({ kind: "bind_blocker", owner: "board", recoveryHold: true })]);
+  });
+
+  it("holds unlinked task-wide prose for recovery without inventing a card", () => {
     expect(
       arbitrate({
         assessment: assessment({
@@ -496,15 +511,10 @@ describe("native status authority", () => {
       }),
     ).toEqual(
       expect.objectContaining({
-        toStatus: "blocked",
+        toStatus: "todo",
         unblockDescriptor: { owner: "board", action: "Approve access" },
         effects: [
-          { kind: "bind_blocker", owner: "board", action: "Approve access" },
-          {
-            kind: "notify_owner",
-            agentId: "agent",
-            reason: "task_wide_blocker_bound",
-          },
+          { kind: "bind_blocker", owner: "board", action: "Approve access", recoveryHold: true },
         ],
       }),
     );
@@ -530,9 +540,9 @@ describe("native status authority", () => {
       }),
     ).toEqual(
       expect.objectContaining({
-        statusAction: "blocked",
-        toStatus: "blocked",
-        policyVersion: "phase6-v11",
+        statusAction: "todo",
+        toStatus: "todo",
+        policyVersion: "phase6-v12",
         reasonCode: "current_track_blocker_waiting",
         unblockDescriptor: {
           owner: "board",
@@ -542,6 +552,7 @@ describe("native status authority", () => {
         effects: [
           {
             kind: "bind_blocker",
+            recoveryHold: true,
             owner: "board",
             action:
               "Grant access to the current Board comment attachment, then explicitly retry.",

@@ -1,3 +1,4 @@
+import { isSupportedBoardTodoHandback } from "../services/guarded-status-repair.js";
 import { dismissAutomaticCompletionReviews } from "../services/native-runtime/automatic-completion-reviews.js";
 import * as childCompletionDelivery from "../services/native-runtime/native-child-completion-delivery.js";
 import { nativeCompletionFeedback } from "../services/native-runtime/native-completion-feedback.js";
@@ -12,6 +13,7 @@ import {
   companies,
   completionContracts,
   createDb,
+  EMBEDDED_POSTGRES_TEST_TIMEOUT_MS,
   heartbeatRuns,
   issueThreadInteractions,
   issueRecoveryActions,
@@ -409,7 +411,7 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
         status: "idle",
       },
     ]);
-  }, 30_000);
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterAll(async () => temporary?.cleanup());
 
@@ -2937,6 +2939,71 @@ describe("P6-31 Section 18.13 executable status-authority corpus", () => {
       expect(effects.map(effect => effect.effectKind)).toEqual(["release_checkout"]);
       expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId))).filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
     }
+  });
+
+  it.each(["task_wide", "current_track"] as const)("commits an unlinked %s native blocker as one held todo without replay", async (scope) => {
+    const template = corpus.fixtures.find(candidate => candidate.mode === "native")!;
+    const seeded = await seedFixture({ ...template, id: `unlinked-native-${scope}`, given: { ...template.given, priorIssueStatus: "in_progress" } });
+    const assessment = { reportedDisposition: "blocked", objectiveClaimSatisfied: false,
+      objectiveSatisfied: false, allCriteriaSatisfied: false, verificationPassed: false,
+      hasFailedVerification: false, hasBlockingRemainingWork: true, summary: "Need the exact prerequisite",
+      contractRevisionMatches: true, criterionAssessments: [], verificationAssessments: [],
+      verificationCaveats: [], acceptedEvidenceRefs: [], missingRequirements: [], rejectedEvidence: [],
+      unverifiableEvidence: [], attentionRequests: [], ignoredAttentionRequests: [], continuation: null,
+      blocker: { boardOwned: false, scope, unblockAction: "Repair the exact prerequisite" } } satisfies NativeEvidenceAssessment;
+    const decision = resolveNativeFinalizerStatus({ assessment, terminalState: "succeeded", workspaceFinalizeStatus: "succeeded",
+      agentId, priorIssueStatus: "in_progress" });
+    const commit = (failpoint?: NativeStatusCommitFailpoint) => commitNativeStatusDecision({ db, companyId,
+      issueId: seeded.issueId, runId: seeded.runId, assessmentId: seeded.assessmentId,
+      priorStatus: "in_progress", priorStatusVersion: 0, priorDecisionId: null, decision, failpoint });
+    await expect(commit("status_projection")).rejects.toThrow();
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId))).toHaveLength(0);
+    expect((await issueService(db).getById(seeded.issueId))!.status).toBe("in_progress");
+    await commit();
+    expect((await commit()).replayed).toBe(true);
+    expect(await issueService(db).getById(seeded.issueId)).toMatchObject({ status: "todo", assigneeAgentId: agentId, statusVersion: 1 });
+    const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId));
+    expect(actions).toEqual([expect.objectContaining({ status: "active", ownerType: "board", returnOwnerAgentId: agentId,
+      kind: "deliberate_wait_without_target", nextAction: "Repair the exact prerequisite" })]);
+    const [current] = await db.select().from(issues).where(eq(issues.id, seeded.issueId));
+    expect(await isSupportedBoardTodoHandback(db, current!, actions[0]!)).toBe(true);
+    expect(await isSupportedBoardTodoHandback(db, current!, { ...actions[0]!, evidence: {} })).toBe(false);
+
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, seeded.issueId))).toHaveLength(0);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
+  });
+
+  it.each(["workspace", "provider"] as const)("keeps exhausted %s finalization in todo under its Board hold without a fabricated question", async (failureScope) => {
+    const template = corpus.fixtures.find(candidate => candidate.mode === "native")!;
+    const seeded = await seedFixture({ ...template, id: `exhausted-finalization-${failureScope}`, given: { ...template.given, priorIssueStatus: "in_progress" } });
+    await recordNativeFinalizationFailure({ db, runId: seeded.runId,
+      error: new Error("native_fixture_finalization_failure"), failureScope, permanent: true, projectRunStatus: true });
+    expect(await issueService(db).getById(seeded.issueId)).toMatchObject({ status: "todo", assigneeAgentId: agentId });
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, seeded.issueId)))
+      .toEqual([expect.objectContaining({ ownerType: "board", returnOwnerAgentId: agentId, wakePolicy: null })]);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, seeded.issueId))).toHaveLength(0);
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
+  });
+
+  it.each(["dependency", "confirmation", "stage"] as const)("preserves the actual %s gate when native finalization exhausts", async (gate) => {
+    const template = corpus.fixtures.find(candidate => candidate.mode === "native")!;
+    const seeded = await seedFixture({ ...template, id: `gated-finalization-${gate}`, given: { ...template.given, priorIssueStatus: "in_progress" } });
+    if (gate === "dependency") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Exact prerequisite", status: "todo" }).returning();
+      await issueService(db).update(seeded.issueId, { blockedByIssueIds: [blocker!.id] });
+    } else if (gate === "confirmation") {
+      await db.insert(issueThreadInteractions).values({ companyId, issueId: seeded.issueId, kind: "request_confirmation", status: "pending",
+        payload: { version: 1, prompt: "Authorize the protected action", target: { type: "custom", key: "protected_action" } } });
+    } else {
+      await db.update(issues).set({ executionState: { status: "pending" } }).where(eq(issues.id, seeded.issueId));
+    }
+    await recordNativeFinalizationFailure({ db, runId: seeded.runId, error: new Error("native_fixture_finalization_failure"),
+      failureScope: "workspace", permanent: true, projectRunStatus: true });
+    expect(await issueService(db).getById(seeded.issueId)).toMatchObject({ status: gate === "stage" ? "in_review" : "blocked", assigneeAgentId: agentId });
+    const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, agentId));
+    expect(wakes.filter(wake => wake.payload?.issueId === seeded.issueId)).toHaveLength(0);
   });
 
   it("fails the transaction closed for an unknown status effect", async () => {

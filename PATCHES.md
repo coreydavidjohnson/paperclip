@@ -520,3 +520,61 @@ heartbeat.ts.
 - Upstream checked at `1fbbef45a8d399771add7a27a04b12f3a20e264c`; it has no
   equivalent initial-operation contract. Remove this carry when upstream
   supplies equivalent atomic admission and bounded client recovery.
+
+## PER-626: first-class blocked waits and visible dependency links
+
+- Observed upstream at `043f2514e67c50320433a0013fb228a75a51325c` still allows
+  descriptor-only entering-Blocked writes and only projects blocker relations
+  when requested. This is observed behavior, not a claim about upstream intent.
+  The private task explicitly requires stricter waits and board-visible links.
+- The shared issue service rejects create, entering/repeated Blocked and final
+  blocker removal unless the proposed issue has a real unresolved same-company
+  dependency or pending linked question/approval card. Validate before writes,
+  within the status/relation transaction. A prose descriptor is not a wake path.
+  Preserve native cancelled-blocker and pending-workspace-finalization semantics.
+  Leaving Blocked remains possible for recovery of legacy invalid rows.
+  Refuse hard deletion if its cascading relations would remove a blocked
+  dependent's last valid wait; serialize source/dependent locks before effects.
+  A remaining real link or pending card permits deletion.
+- Native full/compact lists include the existing batched blocker projection by
+  default; explicit `includeBlockedBy=false` remains supported. Both row layouts
+  show real navigable blocker identifiers as sibling links, not nested anchors.
+- Tests: `blocked-wait-invariant.test.ts`, `issues-service.test.ts`, and
+  `IssueRow.test.tsx`. The MCP projection and regressions live in homelab.
+- Recovery producers retain real source-scoped actions and original ownership.
+  Without an actual question/dependency, a Board-held task projects `todo`, not
+  a fabricated Blocked wait; a pending execution stage remains `in_review`.
+  Exhaustion is fenced from another automatic turn. Unknown execution outcomes
+  retain their no-replay evidence even when the source status changes truthfully.
+- Native result arbitration binds prose-only blockers and exhausted provider
+  failures to real Board recovery actions without creating cards or replaying.
+  The shared status service still refuses unsupported direct Blocked writes.
+  Exact source/action provenance governs any verified safe replacement.
+- PER-968's transactional repair is retained in the running base. Board retry
+  must use its exact source/action snapshots and preserve normal saved-session
+  continuation. Compatibility here is not an exemption from that contract.
+- Added native producer, finalization, workspace-preflight, review-path and
+  provenance regressions to the production image gate. Diagnostic passes do not
+  establish image qualification or live delivery. The agreed board sweep,
+  owner-wake and observation acceptance remain separate release evidence.
+- Session-continuity image coverage includes the native-session-resume suite
+  and its unchanged credential-free provider fixture. The fixture must survive
+  Docker context slimming; a missing fixture is not a product-test verdict.
+- Validate dependency state after ordered same-company row locks, so a blocker
+  completed during contention cannot become a new stranded wait. Preserve
+  revision_requested approval gates and pending execution stages in both
+  finalization and executor failure paths. PostgreSQL and producer regressions,
+  diagnostic receipts and limits are recorded in
+  docs/incidents/2026-10-26-blocked-wait-races.md.
+- Native corrective-handoff instructions require real linked waits or pending
+  cards, not a descriptor-only alternative; the regression runs in the image gate.
+- Audited, bound native Stop intent revokes new agent writes before executor
+  acknowledgement, in the shared authentication and transactional authority
+  boundary. Preserve exact request-local admitted handoff authority, reject
+  malformed/foreign receipt authority and avoid unbounded auth payload reads.
+- Deletion uses nonblocking source/dependent/remaining-blocker locks and a
+  rollback-safe 409 for contention, avoiding the reproduced update/delete lock
+  inversion without globally serializing work. Queue recovery also preserves
+  pending review stages and genuine wait priority.
+- Retire when a released upstream service enforces equivalent first-class waits
+  across supported writes and includes/navigates blocker links in board lists.

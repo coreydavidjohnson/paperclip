@@ -7,16 +7,16 @@ type Source = Projection & {
 };
 type Action = { companyId: string; sourceIssueId: string; kind: string;
   cause: string; status: string; outcome: string | null; evidence: Record<string, unknown> };
-type Proof = { runId: string; statusVersion: number; updatedAt: string };
+type Proof = { runId: string; status: string; statusVersion: number; updatedAt: string };
 
 export function managedCompressionBlockForTransition(
   task: { status: string }, projected: Projection,
   run: { id: string; runtimeMode: string | null; errorCode: string | null },
 ): Proof | null {
   if (!["todo", "in_progress", "in_review"].includes(task.status) ||
-      projected.status !== "blocked" || run.runtimeMode !== "legacy" ||
+      !["todo", "blocked"].includes(projected.status) || run.runtimeMode !== "legacy" ||
       run.errorCode !== "omnigent_context_compression_failed") return null;
-  return { runId: run.id, statusVersion: projected.statusVersion,
+  return { runId: run.id, status: projected.status, statusVersion: projected.statusVersion,
     updatedAt: projected.updatedAt.toISOString() };
 }
 
@@ -31,7 +31,7 @@ export function managedCompressionBlockUnchanged(task: Source, action: Action, r
     evidence.originalFailureCode === "omnigent_context_compression_failed" &&
     automatic?.policy === "preserve_without_replay_v1" && automatic.replay === "blocked" &&
     evidence.executionReconciliation == null && evidence.continuationDelivery == null &&
-    task.status === "blocked" && !task.unblockDescriptor && !task.executionRunId && !task.checkoutRunId &&
+    task.status === (proof?.status ?? "blocked") && !task.unblockDescriptor && !task.executionRunId && !task.checkoutRunId &&
     typeof runId === "string" && runId.length > 0 && evidence.runId === runId && proof?.runId === runId &&
     Number.isSafeInteger(proof.statusVersion) && proof.statusVersion === task.statusVersion &&
     typeof proof.updatedAt === "string" && Number.isFinite(Date.parse(proof.updatedAt)) &&

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { hasIssueBlockedWait } from "./issues.js";
 import { managedCompressionBlockForTransition } from "./managed-compression-block.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { createHash, randomUUID } from "node:crypto";
@@ -470,7 +471,8 @@ export async function deliverReconciledExecutions(
           recoveryActionId: action.id,
           previousRunId: decision.runId,
           retryOfRunId: decision.runId,
-          forceFreshSession: true,
+          // Normal session selection preserves a usable lineage and already
+          // resets sessions when their current configuration is incompatible.
           wakeReason: "issue_recovery_action_restored",
           source: "execution.reconciled",
         },
@@ -696,10 +698,16 @@ export async function settleUnrecoverableExecutions(
         let nativeFailureBlock = action.evidence.nativeFailureBlock;
         let nativeBootstrapFailureBlock = action.evidence.nativeBootstrapFailureBlock;
         if (current) {
+          // The settled no-replay action remains the execution hold. It is
+          // not a linked deliverable or pending question, so do not invent a
+          // blocked wait. Real dependency, approval and review gates survive.
+          const status = await hasIssueBlockedWait(tx, task) ? "blocked"
+            : task.status === "in_review" && parseIssueExecutionState(task.executionState)?.status === "pending"
+              ? "in_review" : "todo";
           const [projected] = await tx
             .update(issues)
             .set({
-              status: "blocked",
+              status,
               executionRunId: null,
               checkoutRunId: null,
               updatedAt: now,

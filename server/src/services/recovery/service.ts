@@ -114,6 +114,7 @@ import {
 import {
   TERMINAL_HEARTBEAT_RUN_STATUSES,
   issueService,
+  hasIssueBlockedWait,
   executeIssuePostCommitActions,
   type IssuePostCommitAction,
 } from "../issues.js";
@@ -1759,10 +1760,24 @@ export function recoveryService(
       if (paths.hasActiveExecutionPath || paths.hasDurableWaitingPath)
         return false;
 
+      // A typed blocker with prose alone is not a pending question. Preserve
+      // the exact request under a real Board recovery hold, without a new turn.
+      await issueRecoveryActionService(tx as unknown as Db).upsertSourceScoped({
+        companyId: current.companyId, sourceIssueId: current.id,
+        kind: "deliberate_wait_without_target", ownerType: "board",
+        previousOwnerAgentId: current.assigneeAgentId, returnOwnerAgentId: current.assigneeAgentId,
+        cause: "deliberate_wait_without_target",
+        fingerprint: `native-blocked:${current.companyId}:${current.id}:${proof.resultId}`,
+        preserveExistingOwner: true,
+        evidence: { latestRunId: source.id, nativeResultId: proof.resultId,
+          completionContractId: proof.contractId, routingPolicy: STRANDED_BOARD_ESCALATION_POLICY },
+        nextAction: proof.action,
+        wakePolicy: { type: "board_escalation", preservesSourceAssignee: true },
+      });
       const updated = await issuesSvc.update(
         current.id,
         {
-          status: "blocked",
+          status: "todo",
           unblockDescriptor: { owner: "board", action: proof.action },
         },
         tx,
@@ -1793,7 +1808,7 @@ export function recoveryService(
           entityId: current.id,
           details: {
             source: "recovery.native_blocked_wait",
-            status: "blocked",
+            status: updated.status,
             previousStatus: "in_progress",
             latestRunId: source.id,
             nativeResultId: proof.resultId,
@@ -2778,128 +2793,6 @@ export function recoveryService(
     });
   }
 
-  function buildRecoveryIssueInPlaceEscalationComment(input: {
-    issue: typeof issues.$inferSelect;
-    previousStatus: StrandedPreviousStatus;
-    latestRun: LatestIssueRun;
-    prefix: string;
-  }) {
-    const runLink = input.latestRun
-      ? runUiLink(
-          { id: input.latestRun.id, agentId: input.latestRun.agentId },
-          input.prefix,
-        )
-      : "none";
-    const retryReason =
-      readNonEmptyString(
-        parseObject(input.latestRun?.contextSnapshot)?.retryReason,
-      ) ?? "none";
-    const failureSummary = summarizeRunFailureForIssueComment(input.latestRun);
-
-    return [
-      "Paperclip stopped automatic stranded-work recovery for this recovery issue.",
-      "",
-      `- Recovery issue: ${issueUiLink({ identifier: input.issue.identifier, id: input.issue.id }, input.prefix)}`,
-      `- Previous status: \`${input.previousStatus}\``,
-      `- Latest run: ${runLink}`,
-      `- Latest run status: \`${input.latestRun?.status ?? "unknown"}\``,
-      `- Retry reason: \`${retryReason}\``,
-      failureSummary
-        ? `- Failure: ${failureSummary.trim()}`
-        : "- Failure: none recorded",
-      "- Guard: recovery issues do not create nested `stranded_issue_recovery` issues.",
-      "",
-      "Next action: the current recovery owner should inspect the failed run evidence, restore a live execution path or record the manual resolution, then move this recovery issue out of `blocked`.",
-    ].join("\n");
-  }
-
-  async function escalateStrandedRecoveryIssueInPlace(input: {
-    issue: typeof issues.$inferSelect;
-    previousStatus: StrandedPreviousStatus;
-    latestRun: LatestIssueRun;
-  }) {
-    return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
-      const issuesSvc = issueService(db);
-      const updated = await issuesSvc.update(input.issue.id, {
-        status: "blocked", companyGuard: input.issue.companyId,
-      }, db, publications, postCommitActions);
-      if (!updated) return null;
-
-      const prefix = await getCompanyIssuePrefix(input.issue.companyId);
-      await issuesSvc.addComment(
-        input.issue.id,
-        buildRecoveryIssueInPlaceEscalationComment({
-          issue: input.issue,
-          previousStatus: input.previousStatus,
-          latestRun: input.latestRun,
-          prefix,
-        }),
-        {},
-        {
-          authorType: "system",
-          presentation: compactRecoveryPresentation(
-            "Recovery: recovery attempt failed — remains blocked",
-          ),
-          metadata: {
-            version: 1,
-            sourceRunId: input.latestRun?.id ?? null,
-            sections: [
-              {
-                title: "Recovery",
-                rows: [
-                  {
-                    type: "key_value",
-                    label: "Cause",
-                    value: "recovery_issue_failed",
-                  },
-                  {
-                    type: "key_value",
-                    label: "Previous status",
-                    value: input.previousStatus,
-                  },
-                  ...(input.latestRun
-                    ? [
-                        {
-                          type: "run_link" as const,
-                          label: "Latest run",
-                          runId: input.latestRun.id,
-                          title: input.latestRun.status,
-                        },
-                      ]
-                    : []),
-                ],
-              },
-            ],
-          },
-        },
-      );
-
-      await logActivity(db, {
-        companyId: input.issue.companyId,
-        actorType: "system",
-        actorId: "system",
-        agentId: null,
-        runId: null,
-        action: "issue.updated",
-        entityType: "issue",
-        entityId: input.issue.id,
-        details: {
-          identifier: input.issue.identifier,
-          status: "blocked",
-          previousStatus: input.previousStatus,
-          source: "recovery.reconcile_stranded_recovery_issue",
-          latestRunId: input.latestRun?.id ?? null,
-          latestRunStatus: input.latestRun?.status ?? null,
-          latestRunErrorCode: input.latestRun?.errorCode ?? null,
-          originKind: input.issue.originKind,
-          originId: input.issue.originId,
-        },
-      }, publications);
-
-      return updated;
-    }, false, input.latestRun?.id);
-  }
-
   async function existingBlockerIssueIds(companyId: string, issueId: string) {
     return db
       .select({ blockerIssueId: issueRelations.issueId })
@@ -3677,11 +3570,11 @@ export function recoveryService(
         || lockedAction.status !== action.status || lockedAction.ownerType !== action.ownerType
         || lockedAction.fingerprint !== action.fingerprint
         || lockedAction.updatedAt.getTime() !== new Date(action.updatedAt).getTime()) return null;
-      // Establish the hold before publishing its board escalation, in the same
-      // source-locked transaction. The common guard must reject later status
-      // writes, not the producer that creates this exact hold. No bypass needed.
+      // A recovery decision is not a linked prerequisite or pending question.
+      // Keep the source queued, then publish its existing Board-owned hold in
+      // this same source-locked transaction. Never invent a blocked wait.
       const updated = await issuesSvc.update(input.issue.id, {
-        status: "blocked", companyGuard: input.issue.companyId,
+        status: "todo", companyGuard: input.issue.companyId,
       }, db, publications, postCommitActions);
       if (!updated) return null;
       const now = new Date();
@@ -3778,7 +3671,7 @@ export function recoveryService(
         entityId: input.issue.id,
         details: {
           identifier: input.issue.identifier,
-          status: "blocked",
+          status: "todo",
           previousStatus: input.issue.status,
           sourceStateFingerprint: input.fingerprint,
           attemptCount: input.attemptCount,
@@ -3843,21 +3736,22 @@ export function recoveryService(
       parseObject(context.paperclipWorkspace).mode === "shared_workspace" ? healthyOpenChildIssues(issue, true) : Promise.resolve([]),
     ]);
     const ownsRepair = active?.kind === "deliberate_wait_without_target" && active.ownerType === "agent";
-    // A typed routing hand-back is not a durable prerequisite. Preserve all
-    // other blocked dispositions and every independently persisted wait gate.
+    // A typed routing hand-back is not a durable prerequisite. Preserve every
+    // independently persisted wait gate; blocked alone is not waiting evidence.
     const routingHandback = await currentRoutingHandback(issue, episode.id);
     return decideLegacyContinuation({
       run, issue: routingHandback ? {...issue, status: "in_progress"} : issue, agent, episode,
       gates: {
         stopped: stop.kind !== "clear" || isOperatorCancelledRun(run, run.agentId),
         paused: pause, budgetBlocked: budget,
-        pendingWait: state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
+        pendingWait: Boolean(issue.unblockDescriptor) || state.hasDurableWaitingPath || durableWait || parseIssueExecutionState(issue.executionState)?.status === "pending" || Boolean(issue.monitorNextCheckAt),
         activeExecution: state.hasActiveExecutionPath || latest?.id !== (dispatchRunId ?? run.id),
         ownedLifecycle: run.issueCommentStatus === "retry_queued" || run.issueCommentStatus === "retry_exhausted" ||
           Boolean(readNonEmptyString(context.goalControlRequestId)) || context.resumeSessionGoalHeartbeat === true ||
           isPluginManagedIssueLifecycle(issue) || routine.length > 0 || workspaceChildren.length > 0 ||
           Boolean(goal[0]?.status && goal[0].status !== "complete") || Boolean(active && !ownsRepair),
-        conversation: Boolean(issue.conversationAgentId) || isWaitingConversation(issue),
+        conversation: Boolean(issue.conversationAgentId) || isWaitingConversation(issue) ||
+          (issue.status === "blocked" && issue.originKind === "chat_channel"),
         agentInvokable: Boolean(agent && await isAgentInvokable(agent) && isHeartbeatWakeOnDemandEnabled(agent)),
       },
     });
@@ -3878,6 +3772,9 @@ export function recoveryService(
     if (!source || source.agentId !== run.agentId || legacyDispositionEpisode(source).id !== episode.id) return "invalid_repair_source";
     const [issue] = await db.select().from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId))).limit(1);
     if (!issue) return "missing_issue";
+    // A routing hand-back admission is bound to the exact disposition whose
+    // stale edge was removed, even though bare-blocked repair is now eligible.
+    if (context.routingParentHandback === true && !await currentRoutingHandback(issue, episode.id)) return "recorded_disposition";
     const state = await collectDispositionRepairSourceState(db, { issue, excludeRunId: run.id, excludeWakeupRequestId: run.wakeupRequestId ?? undefined });
     // This slot has already been reserved. Check admission for that slot rather
     // than allocating or charging another repair attempt during dispatch.
@@ -4053,14 +3950,6 @@ export function recoveryService(
     recoveryCause?: StrandedRecoveryCause;
     successfulRunHandoffEvidence?: SuccessfulRunHandoffRecoveryEvidence | null;
   }) {
-    if (isStrandedIssueRecoveryIssue(input.issue)) {
-      return escalateStrandedRecoveryIssueInPlace({
-        issue: input.issue,
-        previousStatus: input.previousStatus,
-        latestRun: input.latestRun,
-      });
-    }
-
     return mutateUnchangedRecoverySource(input.issue, async (db, _current, publications, postCommitActions) => {
       const issuesSvc = issueService(db);
       const recoveryCause = resolveStrandedRecoveryCause(
@@ -4091,8 +3980,14 @@ export function recoveryService(
       const blockerIds = (await existingUnresolvedBlockerIssues(
         input.issue.companyId, input.issue.id, db,
       )).map(row => row.id);
+      // The existing recovery action holds dispatch independently of status.
+      // A recovery decision is not a question or linked deliverable. Preserve
+      // genuine wait/review gates, otherwise leave the original task queued.
+      const status = await hasIssueBlockedWait(db, input.issue) ? "blocked"
+        : input.issue.status === "in_review" && parseIssueExecutionState(input.issue.executionState)?.status === "pending"
+          ? "in_review" : "todo";
       const updated = await issuesSvc.update(input.issue.id, {
-        status: "blocked", companyGuard: input.issue.companyId,
+        status, companyGuard: input.issue.companyId,
       }, db, publications, postCommitActions);
       if (!updated) return null;
       if (isProviderQuotaWait) return updated;
@@ -4249,7 +4144,7 @@ export function recoveryService(
         entityId: input.issue.id,
         details: {
           identifier: input.issue.identifier,
-          status: "blocked",
+          status: updated.status,
           previousStatus: input.previousStatus,
           source:
             input.recoveryCause === SUCCESSFUL_RUN_MISSING_STATE_REASON
@@ -4487,7 +4382,7 @@ export function recoveryService(
       .where(
         and(
           isNull(issues.assigneeUserId),
-          inArray(issues.status, ["todo", "in_progress", "in_review"]),
+          inArray(issues.status, ["todo", "in_progress", "in_review", "blocked"]),
           or(
             sql`${issues.assigneeAgentId} is not null`,
             eq(issues.status, "in_review"),
@@ -4546,6 +4441,36 @@ export function recoveryService(
     }
 
     for (const issue of candidates) {
+      // A board-owned recovery action is already the durable, human-owned
+      // continuation path. Generic stranded-work recovery must not race that
+      // authority by launching another provider turn (most importantly after
+      // bounded native-session recovery has reached terminal exhaustion).
+      const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
+        issue.companyId,
+        issue.id,
+      );
+      if (activeRecoveryAction?.ownerType === "board") {
+        result.skipped += 1;
+        continue;
+      }
+
+      // An unsupported blocked disposition uses only the successful legacy
+      // owner's bounded repair. Failed/native sources must never fall through
+      // into generic stranded-work replay merely because blocked is included.
+      if (issue.status === "blocked") {
+        const source = await getLatestIssueRun(issue.companyId, issue.id);
+        const outcome = source?.status === "succeeded"
+          ? await reconcileLegacyContinuation(source.id) : "skipped";
+        if (outcome === "queued") {
+          result.continuationRequeued += 1;
+          result.dispositionRepairRequeued += 1;
+          result.issueIds.push(issue.id);
+        } else if (outcome === "escalated") {
+          result.escalated += 1;
+          result.issueIds.push(issue.id);
+        } else result.skipped += 1;
+        continue;
+      }
       if (issue.originKind === "chat_channel") {
         await settleSlackConversation(db, issue.companyId, issue.id);
         const [current] = await db.select({ externalConversationState: externalConversationStateSql() })
@@ -4720,19 +4645,6 @@ export function recoveryService(
         continue;
       }
 
-      // A board-owned recovery action is already the durable, human-owned
-      // continuation path. Generic stranded-work recovery must not race that
-      // authority by launching another provider turn (most importantly after
-      // bounded native-session recovery has reached terminal exhaustion).
-      const activeRecoveryAction = await recoveryActionsSvc.getActiveForIssue(
-        issue.companyId,
-        issue.id,
-      );
-      if (activeRecoveryAction?.ownerType === "board") {
-        result.skipped += 1;
-        continue;
-      }
-
       if (
         await isAutomaticRecoverySuppressedByPauseHold(
           db,
@@ -4887,7 +4799,7 @@ export function recoveryService(
         isStrandedIssueRecoveryIssue(issue) &&
         isUnsuccessfulTerminalIssueRun(latestRun)
       ) {
-        const updated = await escalateStrandedRecoveryIssueInPlace({
+        const updated = await escalateStrandedAssignedIssue({
           issue,
           previousStatus: issue.status as StrandedPreviousStatus,
           latestRun,
@@ -6446,7 +6358,7 @@ export function recoveryService(
 
   return {
     buildRunOutputSilence,
-    escalateStrandedRecoveryIssueInPlace,
+    escalateStrandedRecoveryIssueInPlace: escalateStrandedAssignedIssue,
     escalateStrandedAssignedIssue,
     recordWatchdogDecision,
     scanSilentActiveRuns,

@@ -19,6 +19,7 @@ import {
   heartbeatRuns,
   issueComments,
   issueRelations,
+  issueThreadInteractions,
   issueRecoveryActions,
   issueTreeHoldMembers,
   issueTreeHolds,
@@ -457,13 +458,33 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       expect(attention.get(issueId)).toMatchObject({ state: "covered", paths: expect.arrayContaining([expect.objectContaining({ kind: "monitor" })]) });
       return;
     }
-    expect(issue).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
+    expect(issue).toMatchObject({
+      status: "todo",
+      assigneeAgentId: agentId,
+      assigneeUserId: null,
+      responsibleUserId: "responsible-user",
+    });
     const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId));
     expect(actions).toHaveLength(1);
     expect(actions[0]).toMatchObject({
+      status: "active",
+      kind: "missing_disposition",
       ownerType: "board", ownerAgentId: null, ownerUserId: null,
-      returnOwnerAgentId: agentId, cause: "issue_review_path_lost", attemptCount: 1, maxAttempts: 1,
+      previousOwnerAgentId: agentId,
+      returnOwnerAgentId: agentId,
+      cause: "issue_review_path_lost",
+      attemptCount: 1,
+      maxAttempts: 1,
+      wakePolicy: expect.objectContaining({
+        type: "board_escalation",
+        preservesSourceAssignee: true,
+      }),
     });
+    expect(await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+      eq(issueThreadInteractions.companyId, companyId),
+      eq(issueThreadInteractions.issueId, issueId),
+      eq(issueThreadInteractions.status, "pending"),
+    ))).toEqual([]);
     expect(notices).toHaveLength(1);
     expect(notices[0]).toMatchObject({ authorType: "system", presentation: expect.objectContaining({ title: "No follow-up scheduled" }) });
 
@@ -631,7 +652,10 @@ describeEmbeddedPostgres("heartbeat resolved dependency wake reconciliation", ()
       expect(second.escalated).toBe(0);
       expect(await db.select().from(agentWakeupRequests)).toHaveLength(1);
       expect(mockAdapterExecute).not.toHaveBeenCalled();
-      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "todo", assigneeAgentId: agentId });
+      expect((await db.select().from(issueRecoveryActions))[0]).toMatchObject({
+        ownerType: "board", returnOwnerAgentId: agentId, status: "active",
+      });
     } finally {
       await singleConnectionDb.$client.end({ timeout: 1 });
     }

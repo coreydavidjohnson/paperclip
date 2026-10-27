@@ -33,6 +33,37 @@ must still own the task. A stopped/finished source, different action, changed
 snapshot, pending card/approval, unresolved dependency, unavailable owner or
 active execution refuses the entire repair without partial status/action edits.
 
+## Proven native todo hand-back
+
+A native run can report an unlinked blocker without supplying a real prerequisite
+or pending card. The strict wait invariant leaves that task `todo` under its
+actual Board recovery action, not under a fabricated question or dependency.
+
+For this source only, the Board can add `"mode": "board_todo_handback"` inside
+`statusRepair` and use the same exact snapshot fields and short continuation
+note. The source must already be `todo`, with the original owner unchanged.
+The server validates the recorded native decision/effect or accepted finalized
+result and completion contract against this exact action. An unproven generic
+Board hold does not qualify. Omitting `mode` retains the exhausted-repair
+contract above; do not manufacture exhausted terminal evidence.
+
+Both modes keep the same approval, question, dependency, pause, budget and
+execution gates, even when the source remains `todo`. They use the same durable
+normal continuation below. Neither mode authorizes replay of unknown effects.
+
+## Ordinary same-status hand-back
+
+The existing Board restoration for `missing_disposition` and
+`workspace_validation` can also leave a task `todo` before and after resolution.
+After the ordinary safety and original-owner checks pass, the server records
+normal continuation on that action even though no status changed. This uses
+no new public mode or client-supplied exemption. Execution reconciliation and
+chat retry keep their existing continuation owners instead.
+
+A saved ordinary question superseded by a later genuine human comment is not
+a current wait. Unsuperseded questions, confirmations and approval gates remain
+protected. The question history is not answered, deleted or rewritten.
+
 ## Status writes and replay
 
 Ordinary status writes through the common service refuse this exact escalation
@@ -59,7 +90,10 @@ Ordinary admission chooses the saved task session and enforces current access,
 budget, pause, dependencies, reviews and execution ownership. The repair does
 not grant execution authority. A changed source invalidates undelivered intent.
 A committed wake is adopted after a lost acknowledgement, even if its run has
-already finished. It must never produce a second provider turn.
+already finished or a newer hold now prevents admission. Adoption checks the
+exact actor, issue, action and bidirectional wake/run binding; a conflicting
+binding remains pending. It acknowledges admission, not successful execution,
+and must never produce a second provider turn.
 
 Tests use isolated disposable Postgres, not production recovery fixtures.
 The current Agent Tools recovery wrapper has not yet exposed statusRepair;

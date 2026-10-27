@@ -576,6 +576,7 @@ export const retryWorkspaceExportSchema = z.object({
 export const resolveIssueRecoveryActionSchema = z
   .object({
     statusRepair: z.object({
+      mode: z.literal("board_todo_handback").optional(),
       sourceUpdatedAt: z.iso.datetime(),
       sourceStatus: z.enum(ISSUE_STATUSES),
       sourceStatusVersion: z.number().int().nonnegative(),

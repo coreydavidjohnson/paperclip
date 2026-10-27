@@ -1,4 +1,4 @@
-import { deliverGuardedStatusRepairs } from "../services/guarded-status-repair.js";
+import { deliverGuardedStatusRepairs, isSupportedBoardTodoHandback } from "../services/guarded-status-repair.js";
 import { isDeepStrictEqual } from "node:util";
 import { operatorInterruptCancelOptions } from "../services/operator-interrupt.js";
 import { hasLiveLegacyController } from "../services/legacy-controller-lease.js";
@@ -8324,6 +8324,11 @@ export function issueRoutes(
     const includeLiveDescendantSummary = parseOptionalBooleanQuery(
       req.query.includeLiveDescendantSummary,
     );
+    const includeBlockedBy = parseOptionalBooleanQuery(req.query.includeBlockedBy);
+    if (includeBlockedBy === null) {
+      res.status(400).json({ error: "includeBlockedBy must be true or false when provided" });
+      return;
+    }
     const includeReviewAttention = parseOptionalBooleanQuery(req.query.includeReviewAttention);
     const includeUnblockDescriptor = parseOptionalBooleanQuery(req.query.includeUnblockDescriptor);
     if (includeReviewAttention === null || includeUnblockDescriptor === null) {
@@ -8490,9 +8495,7 @@ export function issueRoutes(
       includePluginOperations:
         req.query.includePluginOperations === "true" ||
         req.query.includePluginOperations === "1",
-      includeBlockedBy:
-        req.query.includeBlockedBy === "true" ||
-        req.query.includeBlockedBy === "1",
+      includeBlockedBy: includeBlockedBy ?? true,
       includeBlockedInboxAttention:
         req.query.includeBlockedInboxAttention === "true" ||
         req.query.includeBlockedInboxAttention === "1",
@@ -9647,8 +9650,11 @@ export function issueRoutes(
         if (statusRepair) {
           const action = workspaceRepairAction;
           const stale = () => conflict("The task or recovery action changed. Refresh before repairing its status.", { code: "recovery_status_repair_stale" });
+          const supportedProjection = action && (statusRepair.mode === "board_todo_handback"
+            ? await isSupportedBoardTodoHandback(tx as unknown as Db, lockedIssue, action)
+            : action.evidence.terminalReason === "unchanged_source_state_exhausted");
           if (!action || action.id !== actionId || action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
-              action.wakePolicy?.type !== "board_escalation" || action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
+              action.wakePolicy?.type !== "board_escalation" || !supportedProjection ||
               action.returnOwnerAgentId !== statusRepair.assigneeAgentId || lockedIssue.assigneeAgentId !== statusRepair.assigneeAgentId ||
               lockedIssue.assigneeUserId || !["blocked", "in_progress", "todo"].includes(statusRepair.sourceStatus)) throw stale();
           const receipt = parseObject(action.evidence.guardedStatusRepair);
@@ -10091,22 +10097,17 @@ export function issueRoutes(
           }
         }
 
+        const safeHandBack =
+          outcome === "restored" && sourceIssueStatus === "todo" &&
+          activeRecoveryAction.returnOwnerAgentId != null &&
+          lockedIssue.assigneeAgentId === activeRecoveryAction.returnOwnerAgentId;
+        // A same-status hand-back settles a real execution gate too. It must
+        // not evade approvals, pause/Stop or the recorded owner's authority.
+        if (safeHandBack && !statusRepair) {
+          await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: activeRecoveryAction });
+        }
         if (sourceStatusChanged) {
-          const safeHandBack =
-            outcome === "restored" &&
-            sourceIssueStatus === "todo" &&
-            activeRecoveryAction.returnOwnerAgentId != null &&
-            lockedIssue.assigneeAgentId ===
-              activeRecoveryAction.returnOwnerAgentId;
-          if (safeHandBack) {
-            await assertSafeRecoveryHandBackGates({
-              req,
-              issue: lockedIssue,
-              recoveryAction: activeRecoveryAction,
-            });
-          } else {
-            await requireRecoverySourceMutationAuthority(req, lockedIssue);
-          }
+          if (!safeHandBack) await requireRecoverySourceMutationAuthority(req, lockedIssue);
 
           if (
             lockedIssue.status === "in_review" &&
@@ -10208,8 +10209,17 @@ export function issueRoutes(
 
         recoveryAction ??= await resolveWithDisposition(issue.status);
 
-        if (statusRepair) {
-          const receipt = { request: statusRepair, actorType: actor.actorType, actorId: actor.actorId,
+        // These existing Board restorations already passed the ordinary
+        // authority and hand-back gates. A truthful todo projection must not
+        // lose continuation merely because its status did not change.
+        const sameStatusTodoHandback = !statusRepair && safeHandBack && !sourceStatusChanged &&
+          actor.actorType === "user" && activeRecoveryAction.ownerType === "board" &&
+          ["missing_disposition", "workspace_validation"].includes(activeRecoveryAction.kind) &&
+          !chatRetry && !executionReconciliation;
+        if (statusRepair || sameStatusTodoHandback) {
+          const receipt = { request: statusRepair ?? null, actorType: actor.actorType, actorId: actor.actorId,
+            ...(sameStatusTodoHandback ? { sameStatusTodoHandback: true } : {}),
+            continuationNote: resolutionNote ?? "Continue the existing task normally. Preserve completed work.",
             sourceUpdatedAt: issue.updatedAt.toISOString(), sourceStatusVersion: issue.statusVersion, delivery: "pending" };
           await tx.update(issueRecoveryActions).set({ evidence: { ...recoveryAction.evidence, guardedStatusRepair: receipt } })
             .where(eq(issueRecoveryActions.id, recoveryAction.id));
@@ -10237,7 +10247,7 @@ export function issueRoutes(
           },
         }, postCommitActivityPublications);
 
-        return { issue, recoveryAction, chatRetry };
+        return { issue, recoveryAction, chatRetry, sameStatusTodoHandback };
       });
       for (const publication of postCommitActivityPublications)
         publishActivity(publication);
@@ -10279,7 +10289,7 @@ export function issueRoutes(
 
 
 
-      if (statusRepair) {
+      if (statusRepair || ("sameStatusTodoHandback" in result && result.sameStatusTodoHandback)) {
         await deliverGuardedStatusRepairs(db, enqueueRecoveryActionWakeup, result.recoveryAction.id);
       } else if (result.chatRetry) {
         // The intent is committed with recovery resolution. A lost immediate
@@ -14268,69 +14278,9 @@ export function issueRoutes(
             );
         }
       }
-      const enteringBlocked =
-        existing.status !== "blocked" && updateFields.status === "blocked";
-      if (enteringBlocked) {
-        const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
-          ? [...new Set(req.body.blockedByIssueIds as string[])]
-          : null;
-        const hasUnresolvedBlocker = requestedBlockerIds
-          ? requestedBlockerIds.length > 0 &&
-            (await db
-              .select({ id: issueRows.id })
-              .from(issueRows)
-              .where(
-                and(
-                  eq(issueRows.companyId, existing.companyId),
-                  inArray(issueRows.id, requestedBlockerIds),
-                  notInArray(issueRows.status, ["done", "cancelled"]),
-                ),
-              )
-              .limit(1)
-              .then((rows) => rows.length > 0))
-          : (await svc.getDependencyReadiness(existing.id))
-              .unresolvedBlockerCount > 0;
-        const [pendingInteraction, pendingApproval] = await Promise.all([
-          db
-            .select({ id: issueThreadInteractions.id })
-            .from(issueThreadInteractions)
-            .where(
-              and(
-                eq(issueThreadInteractions.companyId, existing.companyId),
-                eq(issueThreadInteractions.issueId, existing.id),
-                eq(issueThreadInteractions.status, "pending"),
-                activeIssueInteractionCondition(),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-          db
-            .select({ id: approvals.id })
-            .from(issueApprovals)
-            .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
-            .where(
-              and(
-                eq(issueApprovals.companyId, existing.companyId),
-                eq(issueApprovals.issueId, existing.id),
-                eq(approvals.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-        ]);
-        if (
-          !hasUnresolvedBlocker &&
-          !pendingInteraction &&
-          !pendingApproval &&
-          !descriptor
-        ) {
-          res.status(422).json({
-            error:
-              "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
-          });
-          return;
-        }
-      }
+      const enteringBlocked = existing.status !== "blocked" && updateFields.status === "blocked";
+      // Shared service validation also covers create, repeated Blocked writes,
+      // and removing the final blocker, under the mutation transaction lock.
       if (
         reviewRequest !== undefined &&
         transition.patch.executionState === undefined

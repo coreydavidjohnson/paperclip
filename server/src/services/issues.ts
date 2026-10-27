@@ -1,3 +1,4 @@
+import { activeIssueInteractionCondition } from "./issue-question-context.js";
 import { assertRecoveryStatusWriteAllowed } from "./guarded-status-repair.js";
 import { issueRunIdsCondition } from "./run-history-query.js";
 import { authorizeHomeLabChild } from "./home-lab-delegation.js";
@@ -2745,6 +2746,62 @@ async function listUnresolvedBlockerDetails(
         : ("not_done" as const),
     };
   });
+}
+
+/** A descriptor describes a wait; only a dependency or pending card supplies a wake. */
+export async function hasIssueBlockedWait(
+  dbOrTx: Pick<Db, "select">,
+  issue: { id: string; companyId: string },
+  requestedBlockerIds?: string[],
+): Promise<boolean> {
+  const blockerIds = requestedBlockerIds ?? await dbOrTx
+    .select({ id: issueRelations.issueId }).from(issueRelations)
+    .where(and(eq(issueRelations.companyId, issue.companyId),
+      eq(issueRelations.relatedIssueId, issue.id), eq(issueRelations.type, "blocks")))
+    .then((rows) => rows.map(row => row.id));
+  const ids = [...new Set(blockerIds)].filter(id => id !== issue.id);
+  if (ids.length > 0) {
+    const blockers = await dbOrTx.select({
+      id: issues.id, status: issues.status, executionWorkspaceId: issues.executionWorkspaceId,
+    }).from(issues).where(and(eq(issues.companyId, issue.companyId), inArray(issues.id, ids)));
+    // Preserve native cancelled-blocker and workspace-finalize release semantics.
+    if (blockers.some(row => row.status !== "done")) return true;
+    const pendingFinalize = await listPendingFinalizeBlockerIssueIds(dbOrTx, issue.companyId,
+      blockers.flatMap(row => row.executionWorkspaceId
+        ? [{ blockerIssueId: row.id, executionWorkspaceId: row.executionWorkspaceId }] : []));
+    if (pendingFinalize.size > 0) return true;
+  }
+  const [question] = await dbOrTx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
+    .where(and(eq(issueThreadInteractions.companyId, issue.companyId),
+      eq(issueThreadInteractions.issueId, issue.id), eq(issueThreadInteractions.status, "pending"),
+      activeIssueInteractionCondition())).limit(1);
+  if (question) return true;
+  const [approval] = await dbOrTx.select({ id: approvals.id }).from(issueApprovals)
+    .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+    .where(and(eq(issueApprovals.companyId, issue.companyId), eq(approvals.companyId, issue.companyId),
+      eq(issueApprovals.issueId, issue.id), inArray(approvals.status, ["pending", "revision_requested"]))).limit(1);
+  return Boolean(approval);
+}
+
+async function assertIssueBlockedWait(
+  dbOrTx: Pick<Db, "select">,
+  issue: { id: string; companyId: string },
+  requestedBlockerIds?: string[],
+  noWait = false,
+) {
+  // Validate after acquiring the dependency locks, not against a version that
+  // can finish while relation synchronization waits for that same row.
+  const blockerIds = requestedBlockerIds ?? dbOrTx.select({ id: issueRelations.issueId })
+    .from(issueRelations).where(and(eq(issueRelations.companyId, issue.companyId),
+      eq(issueRelations.relatedIssueId, issue.id), eq(issueRelations.type, "blocks")));
+  await dbOrTx.select({ id: issues.id }).from(issues)
+    .where(and(eq(issues.companyId, issue.companyId), inArray(issues.id, blockerIds)))
+    .orderBy(issues.id).for("update", noWait ? { noWait: true } : {});
+  if (!await hasIssueBlockedWait(dbOrTx, issue, requestedBlockerIds)) {
+    throw unprocessable("Blocked requires an unresolved linked ticket or a pending question/approval card", {
+      code: "blocked_wait_required", issueId: issue.id,
+    });
+  }
 }
 
 async function listUnresolvedBlockerIssueIds(
@@ -8054,7 +8111,7 @@ export function issueService(db: Db) {
       const unreadForUserId = filters?.unreadForUserId?.trim() || undefined;
       const contextUserId =
         unreadForUserId ?? touchedByUserId ?? inboxArchivedByUserId;
-      const includeBlockedBy = filters?.includeBlockedBy === true;
+      const includeBlockedBy = filters?.includeBlockedBy !== false;
       const includeBlockedInboxAttention =
         filters?.includeBlockedInboxAttention === true;
       const includeLiveDescendantSummary =
@@ -10480,6 +10537,10 @@ export function issueService(db: Db) {
             : values.parentId ? `issue:${values.parentId}` : undefined);
         }
         if (values.monitorNextCheckAt) await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
+        if (values.status === "blocked") {
+          values.id ??= randomUUID();
+          await assertIssueBlockedWait(tx, { id: values.id, companyId }, blockedByIssueIds ?? []);
+        }
         const [issue] = await tx.insert(issues).values(values).returning();
         await attachOwnedDraftImages(tx, issue, issue.description, { userId: issueData.createdByUserId, agentId: issueData.createdByAgentId });
         if (issue.visibility === "private" && !inheritedPrivateSubtree && issueData.createdByAgentId) {
@@ -11242,6 +11303,12 @@ export function issueService(db: Db) {
             patch.privacyRootIssueId = receiptExisting.id;
           }
         }
+        // Validate the proposed wait under the status lock, before any write.
+        // Incidental edits to legacy invalid waits remain possible for recovery.
+        if ((issueData.status ?? receiptExisting.status) === "blocked" &&
+            (issueData.status === "blocked" || blockedByIssueIds !== undefined || issueData.unblockDescriptor !== undefined)) {
+          await assertIssueBlockedWait(tx, receiptExisting, blockedByIssueIds);
+        }
         if (actorAgentId && actorRunId) {
           // Recheck under a run lock: a request admitted before Stop must not
           // commit a late Done after cancellation revoked its credentials.
@@ -11707,6 +11774,30 @@ export function issueService(db: Db) {
 
     remove: (id: string) =>
       db.transaction(async (tx) => {
+        // Deletion cascades relation rows. Serialize with blocked decisions so
+        // it cannot silently remove a dependent's final first-class wait.
+        // Lock the source first: new relations need its FK key-share lock.
+        // Update holds dependent -> blocker. Never wait in the opposite order;
+        // a busy deletion rolls back and returns a retryable conflict instead.
+        const [source] = await tx.select({ id: issues.id, companyId: issues.companyId })
+          .from(issues).where(eq(issues.id, id)).for("update", { noWait: true });
+        if (!source) return null;
+        const dependentIds = tx.select({ id: issueRelations.relatedIssueId })
+          .from(issueRelations).where(and(eq(issueRelations.companyId, source.companyId),
+            eq(issueRelations.issueId, id), eq(issueRelations.type, "blocks")));
+        // Lock ALL related issues, not only currently blocked rows: a concurrent
+        // transition from Todo to Blocked must be rechecked after its row lock.
+        const dependents = await tx.select({ id: issues.id, companyId: issues.companyId, status: issues.status })
+          .from(issues).where(and(eq(issues.companyId, source.companyId), inArray(issues.id, dependentIds)))
+          .orderBy(issues.id).for("update", { noWait: true });
+        for (const dependent of dependents) {
+          if (dependent.status !== "blocked") continue;
+          const remainingIds = await tx.select({ id: issueRelations.issueId }).from(issueRelations)
+            .where(and(eq(issueRelations.companyId, source.companyId),
+              eq(issueRelations.relatedIssueId, dependent.id), eq(issueRelations.type, "blocks")))
+            .then(rows => rows.map(row => row.id).filter(blockerId => blockerId !== id));
+          await assertIssueBlockedWait(tx, dependent, remainingIds, true);
+        }
         const attachmentAssetIds = await tx
           .select({ assetId: issueAttachments.assetId })
           .from(issueAttachments)
@@ -11758,6 +11849,11 @@ export function issueService(db: Db) {
         if (!removedIssue) return null;
         const [enriched] = await withIssueLabels(tx, [removedIssue]);
         return enriched;
+      }).catch((error) => {
+        if (error?.code === "55P03" || error?.cause?.code === "55P03") {
+          throw conflict("Issue or linked tickets are being updated. Retry the deletion.", { code: "issue_blocker_busy" });
+        }
+        throw error;
       }),
 
     checkout: async (

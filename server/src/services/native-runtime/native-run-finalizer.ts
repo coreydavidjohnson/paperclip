@@ -45,7 +45,7 @@ import {
   type NativeStatusCommitFailpoint,
 } from "./status-decision-committer.js";
 import { issueRecoveryActionService } from "../issue-recovery-actions.js";
-import { issueService } from "../issues.js";
+import { hasIssueBlockedWait, issueService } from "../issues.js";
 import { publishChatPublicationCommitSignal } from "../chat-publication-reconciliation.js";
 import { nativeSha256 } from "./canonical.js";
 import {
@@ -334,9 +334,7 @@ async function recordRetryableFailure(input: {
     }
     input = { ...input, coordinator: current, run: currentRun };
     const issue = await tx
-      .select({
-        lastStatusDecisionId: issues.lastStatusDecisionId,
-      })
+      .select()
       .from(issues)
       .where(
         and(
@@ -492,17 +490,11 @@ async function recordRetryableFailure(input: {
         },
         tx,
       );
-    } else if (exhausted) {
-      await issueService(tx as unknown as Db).update(
-        input.coordinator.issueId,
-        {
-          status:
-            input.failureScope === "workspace"
-              ? "blocked"
-              : "in_review",
-        },
-        tx,
-      );
+    } else if (exhausted && issue && !["done", "cancelled"].includes(issue.status)) {
+      const status = await hasIssueBlockedWait(tx as unknown as Db, issue)
+        ? "blocked"
+        : record(issue.executionState).status === "pending" ? "in_review" : "todo";
+      await issueService(tx as unknown as Db).update(input.coordinator.issueId, { status }, tx);
     }
     if (!supersededByNewerRun) {
       await issueRecoveryActionService(tx as unknown as Db).upsertSourceScoped({

@@ -1,5 +1,4 @@
 import type { SetIssueTitle } from "@paperclipai/shared";
-import type { ExecutionReconciliation } from "@paperclipai/shared";
 import type {
   AcceptedPlanDecompositionSummary,
   AddIssueComment,
@@ -35,6 +34,7 @@ import type {
   RunnerGoalActionAccepted,
   RunnerGoalActionRequest,
   RunnerGoalProjection,
+  ResolveIssueRecoveryAction,
   PreviewIssueTreeControl,
   ReleaseIssueTreeHold,
   ReleaseIssueTreeHoldResponse,
@@ -185,7 +185,7 @@ function issueListSearchParams(filters?: IssueListFilters) {
     params.set("includeAgentCreatedTasks", String(filters.includeAgentCreatedTasks));
   if (filters?.includeRoutineExecutions)
     params.set("includeRoutineExecutions", "true");
-  if (filters?.includeBlockedBy) params.set("includeBlockedBy", "true");
+  if (filters?.includeBlockedBy !== undefined) params.set("includeBlockedBy", String(filters.includeBlockedBy));
   if (filters?.includeBlockedInboxAttention)
     params.set("includeBlockedInboxAttention", "true");
   if (filters?.includeLiveDescendantSummary)
@@ -329,17 +329,7 @@ export const issuesApi = {
     api.post<{ runId: string; resultId: string; leaseId: string; status: "queued" }>(`/issues/${id}/recovery-actions/retry-workspace-export`, data),
   recoveryActions: (id: string) =>
     api.get<{ active: IssueRecoveryAction | null; actions: IssueRecoveryAction[] }>(`/issues/${id}/recovery-actions`),
-  resolveRecoveryAction: (
-    id: string,
-    data: {
-      executionReconciliation?: ExecutionReconciliation;
-      workspaceBaseRef?: { requestedRef: string; branch: string };
-      actionId?: string;
-      outcome: "restored" | "false_positive" | "blocked" | "cancelled";
-      sourceIssueStatus: Issue["status"];
-      resolutionNote?: string | null;
-    },
-  ) =>
+  resolveRecoveryAction: (id: string, data: ResolveIssueRecoveryAction) =>
     api.post<ResolveRecoveryActionResponse>(
       `/issues/${id}/recovery-actions/resolve`,
       data,

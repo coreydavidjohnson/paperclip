@@ -107,7 +107,7 @@ describe("successful run handoff decision", () => {
     expect(decision.instruction).toContain("Record the correct issue disposition.");
     expect(decision.instruction).toContain("1. Mark it `done` (scope complete) or `cancelled` (intentionally stopped).");
     expect(decision.instruction).toContain("2. Move it to `in_review` with a real reviewer path");
-    expect(decision.instruction).toContain("3. Mark it `blocked` with first-class blockers");
+    expect(decision.instruction).toContain("3. Mark it `blocked` with first-class blockers (`blockedByIssueIds`) or a pending question/approval card.");
     expect(decision.instruction).toContain("4. Either delegate follow-up work");
     expect(decision.instruction).toContain("This is a disposition-only recovery for the persisted source run");
     expect(decision.instruction).toContain("Do not redo implementation");

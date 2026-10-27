@@ -8171,7 +8171,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
           ),
       ]);
     expect(sourceAfter).toMatchObject({
-      status: "blocked",
+      status: "todo",
       assigneeAgentId: agentId,
     });
     expect(action).toMatchObject({
@@ -8200,6 +8200,22 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(snapshot).toEqual({ kind: "disposition_repair_escalated", actionId: action!.id, assigneeAgentId: agentId, attemptCount: 5, maxAttempts: 5, reason: "unchanged_source_state_exhausted" });
     expect(substituteWakes).toHaveLength(0);
     expect(sourceAttemptSix).toHaveLength(0);
+    const wakesBefore = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    // A real Board recovery card owns the next choice. A later owner pause or
+    // budget hold must not re-escalate it or create another automatic turn.
+    for (const gate of ["pause", "budget"]) {
+      if (gate === "pause") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+      else {
+        await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId));
+        await db.update(companies).set({ status: "paused", pauseReason: "budget" }).where(eq(companies.id, companyId));
+      }
+      const repeated = await heartbeatService(db).reconcileStrandedAssignedIssues();
+      expect(repeated.escalated).toBe(0);
+      expect(repeated.dispositionRepairRequeued).toBe(0);
+      expect(await selectRecoveryIssueById(issueId)).toMatchObject({ status: "todo", assigneeAgentId: agentId });
+      expect(await selectRecoveryActionForIssue(companyId, issueId)).toMatchObject({ id: action!.id, ownerType: "board", status: "active" });
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toEqual(wakesBefore);
+    }
   });
 
   it("routes a non-invokable source owner to recovery without reassigning the source", async () => {
@@ -15738,7 +15754,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       await db.select().from(issues).where(eq(issues.id, issueId)),
     ).toEqual([
       expect.objectContaining({
-        status: "blocked",
+        status: "todo",
         assigneeAgentId: agentId,
         unblockDescriptor: { owner: "board", action: unblockAction },
       }),
@@ -15776,6 +15792,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(
       (await heartbeat.reconcileStrandedAssignedIssues()).continuationRequeued,
     ).toBe(0);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId)))
+      .toEqual([expect.objectContaining({ ownerType: "board", returnOwnerAgentId: agentId,
+        cause: "deliberate_wait_without_target", nextAction: expect.stringContaining(unblockAction) })]);
+    expect(await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.issueId, issueId))).toHaveLength(0);
     expect(mockAdapterExecute).not.toHaveBeenCalled();
   });
 

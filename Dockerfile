@@ -176,6 +176,7 @@ RUN pnpm --filter @paperclipai/ui exec vitest run \
     src/context/LiveUpdatesProvider.test.ts \
     src/context/LiveUpdatesProvider.hook.test.tsx \
     src/pages/IssueDetail.test.tsx \
+    src/components/IssueRow.test.tsx \
     src/hooks/useTaskBrowsers.test.ts \
     src/components/WorkspaceFileMarkdownBody.availability.test.tsx
 RUN pnpm --filter @paperclipai/adapter-utils exec vitest run src/server-utils.test.ts
@@ -221,9 +222,21 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/issue-review-attention.test.ts \
     src/__tests__/decision-queues-routes.test.ts \
     src/__tests__/authorization-service.test.ts \
+    src/__tests__/agent-auth-middleware.test.ts \
+    src/__tests__/agent-run-authentication.test.ts \
     src/__tests__/decision-retention-service.test.ts \
     src/__tests__/recovery-run-query-db.test.ts \
     src/__tests__/issue-recovery-actions.test.ts \
+    src/__tests__/blocked-wait-invariant.test.ts \
+    src/__tests__/heartbeat-workspace-branch-containment.test.ts \
+    src/__tests__/heartbeat-issue-liveness-escalation.test.ts \
+    src/__tests__/native-session-resumption.test.ts \
+    src/__tests__/native-status-arbiter-corpus.test.ts \
+    src/services/native-runtime/status-arbiter.test.ts \
+    src/services/native-runtime/native-session-executor.test.ts \
+    src/services/native-runtime/native-provider-failure.integration.test.ts \
+    src/modules/wake-queue/adapters/postgres.test.ts \
+    src/services/managed-compression-block.test.ts \
     src/__tests__/heartbeat-session-preparation.test.ts \
     src/services/explicit-native-continuation.test.ts \
     src/services/execution-continuation.test.ts \
@@ -254,6 +267,8 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/run-context-keys-db.test.ts \
     src/services/conversation-continuation.test.ts \
     src/services/native-runtime/native-safe-replacement.test.ts \
+    src/services/recovery/successful-run-handoff.test.ts \
+    src/services/native-runtime/native-session-resume.test.ts \
   && chown -R root:root /app
 
 # Remote OpenCode and ACPX runs require a controller-owned provider pack to
