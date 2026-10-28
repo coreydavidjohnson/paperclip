@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { withDedicatedDbConnection, type Db } from "@paperclipai/db";
-import { sql } from "drizzle-orm";
 import path from "node:path";
 import fs from "node:fs/promises";
 import { execFile as execFileCallback } from "node:child_process";
@@ -23,13 +22,18 @@ export async function withIsolatedRepositorySourceLock<T>(db: Db, companyId: str
   const key = `isolated_repository_source:${companyId}:${issueId}`;
   const held = sourceLocks.getStore() ?? [];
   if (held.some(lock => lock.db === db && lock.key === key)) return action();
-  return withDedicatedDbConnection(db, connection => connection.transaction(async tx => {
-    if (tryOnly) {
-      const rows = await tx.execute<{ acquired: boolean }>(sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as acquired`);
-      if (!rows[0]?.acquired) throw new IsolatedRepositorySourceBusy();
-    } else await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-    return sourceLocks.run([...held, { db, key }], action);
-  }));
+  return withDedicatedDbConnection(db, async connection => {
+    const session = await connection.$client.reserve();
+    try {
+      if (tryOnly) {
+        const rows = await session<{ acquired: boolean }[]>`select pg_try_advisory_lock(hashtextextended(${key}, 0)) as acquired`;
+        if (!rows[0]?.acquired) throw new IsolatedRepositorySourceBusy();
+      } else await session`select pg_advisory_lock(hashtextextended(${key}, 0))`;
+      return await sourceLocks.run([...held, { db, key }], action);
+    } finally {
+      session.release();
+    }
+  });
 }
 
 

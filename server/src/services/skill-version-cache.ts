@@ -25,14 +25,19 @@ export async function withSkillVersionCacheLock<T>(db: Db, companyId: string, ac
   if (held.some(lock => lock.db === db && lock.companyId === companyId)) return action();
   // Preparation uses the ordinary pool for version/pin writes. Borrowing a pool
   // connection for this lock would deadlock installations with a one-slot pool.
-  return withDedicatedDbConnection(db, connection => connection.transaction(async tx => {
+  return withDedicatedDbConnection(db, async connection => {
+    const session = await connection.$client.reserve();
     const key = `skill_version_cache:${companyId}`;
-    if (tryOnly) {
-      const rows = await tx.execute<{ acquired: boolean }>(sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as acquired`);
-      if (!rows[0]?.acquired) throw new SkillCacheBusy();
-    } else await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-    return locks.run([...held, { db, companyId }], action);
-  }));
+    try {
+      if (tryOnly) {
+        const rows = await session<{ acquired: boolean }[]>`select pg_try_advisory_lock(hashtextextended(${key}, 0)) as acquired`;
+        if (!rows[0]?.acquired) throw new SkillCacheBusy();
+      } else await session`select pg_advisory_lock(hashtextextended(${key}, 0))`;
+      return await locks.run([...held, { db, companyId }], action);
+    } finally {
+      session.release();
+    }
+  });
 }
 
 export function skillVersionCachePaths(companyId: string, skillId: string, versionId: string) {

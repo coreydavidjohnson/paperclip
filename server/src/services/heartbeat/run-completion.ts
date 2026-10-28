@@ -1,3 +1,4 @@
+import { isTransientDbConnectionError } from "../../database-retry.js";
 import type { createCompletionTiming } from "../completion-timing.js";
 import { preserveQueuedSteeringAcknowledgements } from "../legacy-execution-recovery.js";
 import { measureRunPhase } from "../execution-preparation-timing.js";
@@ -1395,7 +1396,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       // the signal's reason when a setup step threw a different error after it.
       ...controllerLeaseLossEvidence(outerErr),
       ...controllerLeaseLossResultJson(signal),
-      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: providerDispatchStarted },
     };
     const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
       error: message,
@@ -1484,7 +1485,10 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         // No provider work began. Retry temporary host scan failures with
         // the existing durable failure budget, before releasing execution.
         // Generic recovery must not grant a second budget on exhaustion.
-        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode)
+        const retryableDatabaseSetupFailure = !providerDispatchStarted
+          && setupFailureErrorCode === "setup_failed"
+          && isTransientDbConnectionError(outerErr);
+        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode) || retryableDatabaseSetupFailure
           ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
           : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
         ).catch((retryError) => {

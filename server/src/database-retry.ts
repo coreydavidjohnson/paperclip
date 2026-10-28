@@ -4,6 +4,8 @@ const transientDbConnectionCodes = new Set([
   "CONNECTION_CLOSED",
   "CONNECTION_ENDED",
   "CONNECTION_DESTROYED",
+  "08006",
+  "25P03",
 ]);
 
 function hasDbConnectionErrorCode(error: unknown, matches: (code: string) => boolean): boolean {
