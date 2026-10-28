@@ -54,3 +54,35 @@ PER-316 must compose the current source with its composer-409 and post-commit
 wake-delivery fixes, obtain final review, and qualify the one combined release.
 Production restart/Stop journeys, replica safety, database-load acceptance and
 six consecutive scheduled sweeps remain live acceptance work on PER-1108.
+
+## Route qualification follow-up: local ownership fixture mismatch
+
+PER-316's composed-source check reproduced four 15-second route timeouts on
+unchanged source `2b8ce80b298d724975fd2942f4a8c782ffbf7b18`, excluding its comment
+delta as the cause. These were both owned-adapter HTTP handoff variants, client
+disconnect between acknowledgement and settlement, and exact-approval interrupt.
+The original failed receipt remains retained, SHA256
+`7f9ee1f81014ff8a425728613abf731da2e250924a6b267a808ca4078204adfb`.
+
+The fixtures contradicted their own ownership setup. The handoff helper registered
+a local adapter execution control while stamping the run with a random foreign
+controller boot. The approval-interrupt test spawned and registered a local
+process but inherited a foreign boot from its shared queue fixture. The new Stop
+fence correctly refused those process-local controls as authority for a foreign
+owner and saved intent for the nonexistent owner instead. No owner could consume
+that intent, so the route waited within its normal 60-second pending window and
+the tests crossed their unchanged 15-second deadline.
+
+Correction `2f89fbeec544884fb9a278a2b384f51b8d1f216b` imports the actual controller
+boot UUID and stamps only these locally owned fixtures with it. It does not
+change shared foreign-owner fixtures, production code, assertions, test names,
+request ordering, Stop proof, settlement gates, deadlines or Vitest settings.
+The existing foreign-controller tests still register stale local process/control
+entries and require zero local interrupt or termination effects; these are the
+negative controls against weakening the ownership fence.
+
+The complete queued-comment route module and all three prior Stop modules are
+run together for this correction, retaining the four original cases and the
+63-check receipt as separate evidence. DB/server types are checked on the same
+source. Final verdicts and disposable-cleanup receipts belong to the published
+PER-1108 handback, not an inferred production acceptance claim.

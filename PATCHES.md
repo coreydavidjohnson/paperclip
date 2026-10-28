@@ -596,3 +596,13 @@ heartbeat.ts.
 - Retire when upstream provides the equivalent owner-intent and original-handle
   Stop contract on the extracted runtime. This entry is source evidence, not
   independent approval or production multi-replica acceptance.
+
+### PER-1108 local Stop route fixture qualification
+
+- Locally registered adapter/process Stop fixtures must use the actual
+  `legacyControllerBootId`. Random foreign boot IDs describe a remote owner and
+  correctly route Stop to durable intent, not to local control maps.
+- Correct only the owned-adapter handoff helper and the locally spawned
+  exact-approval interrupt case. Keep all original assertions and 15-second
+  deadlines, and retain foreign-owner stale-map negative controls. See the
+  cross-controller Stop incident follow-up for the retained four-case failure.
