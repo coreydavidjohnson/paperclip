@@ -1,3 +1,4 @@
+import { legacyControllerBootId } from "../legacy-controller-lease.js";
 import { operatorInterruptCancelOptions } from "../operator-interrupt.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import { DEFERRED_WAKE_CONTEXT_KEY } from "./queue.js";
@@ -970,6 +971,51 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const errorCode = options.errorCode ?? "cancelled";
     const cancellation = requestedRunCancellation(options.resultJson ?? {}, reason);
 
+    // A different server has no authority over this controller's process IDs
+    // or adapter handle. Persist intent; only the original execution owner can
+    // acknowledge provider termination. This grants no replay/takeover right.
+    if (run.runtimeMode === "legacy" && run.status === "running" && run.controllerBootId &&
+        run.controllerBootId !== legacyControllerBootId) {
+      const saveIntent = (tx: Db) => tx.update(heartbeatRuns).set({
+        error: reason, errorCode,
+        resultJson: preserveWorkspaceRestoreRecoveryMetadataSql({
+          ...options.resultJson, cancellation,
+          executionCancellation: { state: "requested", requestedAt: new Date().toISOString() },
+        }, true),
+        updatedAt: new Date(),
+      }).where(and(
+        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+        eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+        eq(heartbeatRuns.controllerBootId, run.controllerBootId!),
+        eq(heartbeatRuns.observerEpoch, run.observerEpoch),
+        sql`coalesce(${heartbeatRuns.resultJson}->'executionCancellation'->>'state', '') not in ('requested', 'acknowledged')`,
+      )).returning({ id: heartbeatRuns.id });
+      if (options.budgetEnforcement) {
+        // A stale policy cannot enqueue Stop on a remote execution either.
+        const saved = await withCurrentBudgetEnforcement(db, options.budgetEnforcement, saveIntent);
+        if (!saved) return getRun(run.id);
+      } else {
+        await saveIntent(db);
+      }
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        const current = await getRun(run.id);
+        if (!current || current.companyId !== run.companyId) throw conflict("Stop target is no longer available.");
+        if (isHeartbeatRunTerminalStatus(current.status)) {
+          if (parseObject(current.resultJson?.executionCancellation).state !== "acknowledged") {
+            throw conflict("Provider termination is not verified; inspect this run before continuing.");
+          }
+          return current;
+        }
+        if (current.controllerBootId !== run.controllerBootId || current.observerEpoch !== run.observerEpoch) {
+          throw conflict("Execution ownership changed before Stop was acknowledged; inspect this run before continuing.");
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+      }
+      throw conflict("Stop intent is saved, but the owning controller has not acknowledged provider termination.",
+        { code: "adapter_stop_pending", runId: run.id });
+    }
+
     const pendingProcessCancellation = processRunCancellationSettlements.get(
       run.id,
     );
@@ -1156,11 +1202,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
 
           const finishedAt = new Date();
           const persistedCancellationResult =
-            run.runtimeMode === "native"
-              ? await getRun(run.id).then((current) =>
-                  parseObject(current?.resultJson),
-                )
-              : {};
+            await getRun(run.id).then(current => parseObject(current?.resultJson));
           return await setRunStatusFromLive(
             run.id,
             "cancelled",
@@ -1192,6 +1234,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                             errorCode, errorMessage: reason,
                           })
                         : {}),
+                      // The owner can commit Stop proof while this call waits.
+                      // Never overwrite it with our earlier requested snapshot.
+                      ...(parseObject(persistedCancellationResult.executionCancellation).state === "acknowledged"
+                        ? { executionCancellation: persistedCancellationResult.executionCancellation } : {}),
                       // The native cancellation helper may have advanced a durable
                       // pending intent to its acknowledged state after `run` was
                       // first read. Never let that stale snapshot overwrite the

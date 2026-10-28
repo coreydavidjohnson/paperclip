@@ -149,7 +149,10 @@ export function hasClaimedLegacyControllerRenewal(runId: string) {
 
 /** Abort the adapter if the controller cannot renew. Bound each check by the
  * lease duration even when the database connection never settles. */
-export function watchLegacyControllerLease(sharedDb: Db, run: Run, controller: AbortController) {
+export function watchLegacyControllerLease(
+  sharedDb: Db, run: Run, controller: AbortController,
+  onCancellationRequested?: () => Promise<unknown>,
+) {
   if (run.runtimeMode === "native" || !run.controllerBootId) {
     return { stop() {}, async assertOwned(_stage?: "dispatching") {} };
   }
@@ -159,6 +162,25 @@ export function watchLegacyControllerLease(sharedDb: Db, run: Run, controller: A
   const db = persistentDedicatedDb(sharedDb, "paperclip-legacy-controller-lease") ?? sharedDb;
   let stopped = false;
   let pending = false;
+  let cancellationPending = false;
+  // Intent lookup/Stop must not occupy the dedicated renewal connection or
+  // extend assertOwned's deadline. One in-flight lookup/Stop per watcher.
+  const checkCancellation = () => {
+    if (!onCancellationRequested || cancellationPending || stopped || controller.signal.aborted) return;
+    cancellationPending = true;
+    void (async () => {
+      const [intent] = await sharedDb.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+        eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
+        eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
+        eq(heartbeatRuns.observerEpoch, run.observerEpoch),
+        gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
+        sql`${heartbeatRuns.resultJson}->'executionCancellation'->>'state' = 'requested'`,
+      ));
+      if (intent && !stopped && !controller.signal.aborted) await onCancellationRequested();
+    })().catch(() => { /* intent remains durable; a later successful renewal retries */ })
+      .finally(() => { cancellationPending = false; });
+  };
   // Timing evidence for a loss: a renewal still in flight at the deadline
   // points at the database; a late deadline callback points at the event loop.
   let lastRenewedAt = Date.now();
@@ -215,6 +237,7 @@ export function watchLegacyControllerLease(sharedDb: Db, run: Run, controller: A
       lastRenewedAt = Date.now();
       renewalCount += 1;
       armDeadline(Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - startedAt)));
+      checkCancellation();
     }
   };
   const timer = setInterval(() => {

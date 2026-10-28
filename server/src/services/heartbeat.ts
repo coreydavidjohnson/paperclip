@@ -275,6 +275,7 @@ import {
 import {
   adapterExecutionControls,
   createAdapterExecutionControl,
+  registerAdapterExecutionControl,
 } from "./adapter-execution-control.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
@@ -1811,6 +1812,16 @@ export function heartbeatService(
     failedProcessRunCancellations,
   });
 
+  async function cancelSavedLegacyStop(run: typeof heartbeatRuns.$inferSelect) {
+    const current = await getRun(run.id);
+    if (!current || current.companyId !== run.companyId || current.status !== "running" ||
+        current.controllerBootId !== legacyControllerBootId || current.observerEpoch !== run.observerEpoch ||
+        parseObject(current.resultJson?.executionCancellation).state !== "requested") return;
+    await cancelRunInternal(run.id, current.error ?? undefined, {
+      errorCode: current.errorCode ?? undefined, resultJson: parseObject(current.resultJson),
+    }).catch(err => logger.warn({ err, runId: run.id }, "owning controller could not settle saved Stop intent"));
+  }
+
   // Recovery only attaches to an existing provider handle. No preparation or dispatch.
   async function observeExternalRun(run: typeof heartbeatRuns.$inferSelect, settled?: AdapterExecutionResult) {
     if (!run.externalRunHandle) return;
@@ -1821,9 +1832,15 @@ export function heartbeatService(
     const adapter = getServerAdapter(saved.adapterType);
     if (!settled && (!adapter.observeRun || !saved.config)) return;
     if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
-    const controller = new AbortController();
-    const lease = settled ? null : watchLegacyControllerLease(db, run, controller);
+    if (!settled && adapterExecutionControls.has(run.id)) return;
+    const executionControl = settled ? null : createAdapterExecutionControl();
+    const controller = executionControl?.controller ?? new AbortController();
+    if (executionControl) await registerAdapterExecutionControl(run.id, executionControl);
+    const lease = settled ? null : watchLegacyControllerLease(db, run, controller,
+      () => cancelSavedLegacyStop(run));
     try {
+      const current = await getRun(run.id);
+      if (!current || (!settled && current.status !== "running") || current.observerEpoch !== run.observerEpoch) return;
       const context = parseObject(run.contextSnapshot);
       const issueId = run.issueId ?? run.nativeIssueId ?? readNonEmptyString(context.issueId);
       const { config, secretKeys } = saved.config ? await boundedExternalRunOperation(() => secretsSvc.resolveAdapterConfigForRuntime(run.companyId, parseObject(saved.config)))
@@ -1856,7 +1873,13 @@ export function heartbeatService(
         runLedgerScope: await resolveLedgerScopeForRun(db, run.companyId, run), currentUserRedactionOptions,
         providerTraceCapture: false, onProviderTraceFinalized: () => {}, issueContext, onLog,
       });
-    } finally { lease?.stop(); }
+    } finally {
+      lease?.stop();
+      executionControl?.finish();
+      if (executionControl && adapterExecutionControls.get(run.id) === executionControl) {
+        adapterExecutionControls.delete(run.id);
+      }
+    }
   }
   const externalLiveness = createExternalRunLivenessWorker(db, {
     getAdapter: getServerAdapter,
@@ -2033,7 +2056,8 @@ export function heartbeatService(
     // Nested scopes refine the label without making any termination claim.
     executionControl.phases.enter("host_execution");
     const executionPhaseContext = { onExecutionPhase: executionControl.phases.enter };
-    const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller);
+    const controllerLease = watchLegacyControllerLease(db, run, executionControl.controller,
+      () => cancelSavedLegacyStop(run));
     let runScratch: HeartbeatRunScratch | null = null;
     let githubLauncherLocation:
       Parameters<typeof cleanupGitHubOperationLaunchers>[0] | null = null;
