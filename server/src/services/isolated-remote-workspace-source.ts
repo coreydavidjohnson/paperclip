@@ -29,7 +29,10 @@ export async function withIsolatedRepositorySourceLock<T>(db: Db, companyId: str
         const rows = await session<{ acquired: boolean }[]>`select pg_try_advisory_lock(hashtextextended(${key}, 0)) as acquired`;
         if (!rows[0]?.acquired) throw new IsolatedRepositorySourceBusy();
       } else await session`select pg_advisory_lock(hashtextextended(${key}, 0))`;
-      return await sourceLocks.run([...held, { db, key }], action);
+      const value = await sourceLocks.run([...held, { db, key }], action);
+      const [released] = await session<{ released: boolean }[]>`select pg_advisory_unlock(hashtextextended(${key}, 0)) as released`;
+      if (!released?.released) throw new Error("Isolated repository source lock was lost during setup");
+      return value;
     } finally {
       session.release();
     }

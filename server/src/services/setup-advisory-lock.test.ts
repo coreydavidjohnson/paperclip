@@ -50,6 +50,18 @@ describe.skipIf(!support.supported)("setup advisory locks", () => {
       await fixture.lock(contender, async () => undefined, true);
     });
 
+    it(`${fixture.name} does not report success after losing the lock connection`, async () => {
+      await expect(fixture.lock(db, async () => {
+        const [holder] = await db.execute<{ pid: number }>(sql`
+          select pid from pg_stat_activity where datname = current_database()
+          and application_name = 'paperclip-workspace-finalization-lock'
+        `);
+        await db.execute(sql`select pg_terminate_backend(${holder!.pid})`);
+        await setTimeout(50);
+      })).rejects.toThrow(/CONNECTION_CLOSED|lock was lost/);
+      await fixture.lock(contender, async () => undefined, true);
+    });
+
     it(`${fixture.name} releases exclusion after a failed setup`, async () => {
       await expect(fixture.lock(db, async () => { throw new Error("setup failed"); })).rejects.toThrow("setup failed");
       await fixture.lock(contender, async () => undefined, true);

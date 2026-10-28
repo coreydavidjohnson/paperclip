@@ -33,7 +33,10 @@ export async function withSkillVersionCacheLock<T>(db: Db, companyId: string, ac
         const rows = await session<{ acquired: boolean }[]>`select pg_try_advisory_lock(hashtextextended(${key}, 0)) as acquired`;
         if (!rows[0]?.acquired) throw new SkillCacheBusy();
       } else await session`select pg_advisory_lock(hashtextextended(${key}, 0))`;
-      return await locks.run([...held, { db, companyId }], action);
+      const value = await locks.run([...held, { db, companyId }], action);
+      const [released] = await session<{ released: boolean }[]>`select pg_advisory_unlock(hashtextextended(${key}, 0)) as released`;
+      if (!released?.released) throw new Error("Skill cache lock was lost during setup");
+      return value;
     } finally {
       session.release();
     }
