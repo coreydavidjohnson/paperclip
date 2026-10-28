@@ -976,7 +976,8 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     // acknowledge provider termination. This grants no replay/takeover right.
     if (run.runtimeMode === "legacy" && run.status === "running" && run.controllerBootId &&
         run.controllerBootId !== legacyControllerBootId) {
-      const saveIntent = (tx: Db) => tx.update(heartbeatRuns).set({
+      const stopTarget = run;
+      const saveIntent = async (tx: Db) => tx.update(heartbeatRuns).set({
         error: reason, errorCode,
         resultJson: preserveWorkspaceRestoreRecoveryMetadataSql({
           ...options.resultJson, cancellation,
@@ -984,10 +985,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         }, true),
         updatedAt: new Date(),
       }).where(and(
-        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+        eq(heartbeatRuns.id, stopTarget.id), eq(heartbeatRuns.companyId, stopTarget.companyId),
         eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
-        eq(heartbeatRuns.controllerBootId, run.controllerBootId!),
-        eq(heartbeatRuns.observerEpoch, run.observerEpoch),
+        eq(heartbeatRuns.controllerBootId, stopTarget.controllerBootId!),
+        eq(heartbeatRuns.observerEpoch, stopTarget.observerEpoch),
         sql`coalesce(${heartbeatRuns.resultJson}->'executionCancellation'->>'state', '') not in ('requested', 'acknowledged')`,
       )).returning({ id: heartbeatRuns.id });
       if (options.budgetEnforcement) {
@@ -1109,7 +1110,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
       const cancellation = await (async () => {
         try {
           if (control) {
-            await db
+            const updated = await db
               .update(heartbeatRuns)
               .set({
                 error: reason,
@@ -1129,8 +1130,16 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                 and(
                   eq(heartbeatRuns.id, run.id),
                   eq(heartbeatRuns.status, "running"),
+                  run.runtimeMode === "legacy" && run.controllerBootId ? and(
+                    eq(heartbeatRuns.companyId, run.companyId),
+                    eq(heartbeatRuns.controllerBootId, run.controllerBootId),
+                    eq(heartbeatRuns.observerEpoch, run.observerEpoch),
+                  ) : undefined,
                 ),
-              );
+              ).returning({ id: heartbeatRuns.id });
+            if (run.runtimeMode === "legacy" && run.controllerBootId && !updated.length) {
+              throw conflict("Execution ownership changed before Stop; inspect this run before continuing.");
+            }
             control.controller.abort(new Error(reason));
           }
           let terminationSettled = false;

@@ -42,6 +42,40 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
   await heartbeat.sweepExternalRunLiveness(); await heartbeat.drainActiveRunExecutions();
   expect(execute).not.toHaveBeenCalled(); expect(observe).toHaveBeenCalledOnce(); expect(await read(run.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "existing", observerEpoch: 2 });
  });
+ it.each(["saved intent", "local API"])("Stop reaches the original reattached provider through %s", async via => {
+  const run = await fixture();
+  probe.mockResolvedValue({ state: "active" });
+  let interrupts = 0;
+  let release!: () => void;
+  observe.mockImplementationOnce(async ctx => {
+   expect(ctx.handle).toEqual(run.externalRunHandle);
+   expect(ctx.runId).toBe(run.id);
+   await new Promise<void>(resolve => {
+    release = resolve;
+    ctx.signal.addEventListener("abort", () => { interrupts += 1; resolve(); }, { once: true });
+   });
+   return { exitCode: 0, signal: null, timedOut: false, sessionId: "existing",
+    resultJson: { executionCancellation: { state: "acknowledged", proof: "original_turn_stopped" } } };
+  });
+  try {
+   await heartbeat.sweepExternalRunLiveness();
+   await vi.waitFor(() => expect(observe).toHaveBeenCalledOnce());
+   if (via === "saved intent") {
+    await db.update(heartbeatRuns).set({ error: "Stop original", errorCode: "cancelled",
+     resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, run.id));
+   } else {
+    await heartbeat.cancelRun(run.id, "Stop original");
+   }
+   await vi.waitFor(async () => expect(await read(run.id)).toMatchObject({ status: "cancelled",
+    resultJson: { executionCancellation: { state: "acknowledged", proof: "original_turn_stopped" } } }), { timeout: 20000 });
+   await heartbeat.drainActiveRunExecutions();
+   expect(interrupts).toBe(1);
+   expect(execute).not.toHaveBeenCalled();
+   expect(observe).toHaveBeenCalledOnce();
+   const allRuns = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, run.agentId));
+   expect(allRuns).toHaveLength(1);
+  } finally { release?.(); await heartbeat.drainActiveRunExecutions(); }
+ }, 30000);
  it("stops the observer lease when configuration resolution fails and later reattaches", async () => {
   const run = await fixture();
   await db.update(heartbeatRuns).set({ runnerProfileJson: { externalObservation: { adapterType: "test_external", config: { setupFailure: run.id } } } }).where(eq(heartbeatRuns.id, run.id));
