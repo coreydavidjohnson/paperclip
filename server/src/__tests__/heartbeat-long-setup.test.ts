@@ -118,7 +118,7 @@ describe.skipIf(!support.supported)("heartbeat slow setup and automatic recovery
     const [retry] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, first!.id));
     expect(retry).toMatchObject({ status: "scheduled_retry", scheduledRetryAttempt: 1, scheduledRetryReason: "transient_failure" });
     expect(providerCalls).toBe(0);
-    await heartbeat.promoteDueScheduledRetries(new Date(retry!.scheduledRetryDueAt!.getTime() + 1));
+    await heartbeat.promoteDueScheduledRetries(new Date(retry!.scheduledRetryAt!.getTime() + 1));
     await heartbeat.resumeQueuedRunsForAgent(agent.companyId, agent.id);
     await expect.poll(async () => (await heartbeat.getRun(retry!.id))?.status, { timeout: 30000 }).toBe("succeeded");
     expect(providerCalls).toBe(1);
