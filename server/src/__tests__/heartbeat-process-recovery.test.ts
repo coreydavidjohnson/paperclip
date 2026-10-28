@@ -9020,10 +9020,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       const originalSet = update.set.bind(update);
       vi.spyOn(update, "set").mockImplementationOnce((value) => {
         const query = originalSet(value);
-        const originalWhere = query.where.bind(query);
-        vi.spyOn(query, "where").mockImplementationOnce((condition) => {
+        const originalExecute = query.execute.bind(query);
+        vi.spyOn(query, "execute").mockImplementationOnce(async (...args) => {
           reportWrite();
-          return writeGate.then(() => originalWhere(condition)) as unknown as ReturnType<typeof query.where>;
+          await writeGate;
+          return originalExecute(...args);
         });
         return query;
       });
