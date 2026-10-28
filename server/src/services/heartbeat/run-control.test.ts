@@ -292,7 +292,7 @@ describe.skipIf(!support.supported)("heartbeat run-control database wiring", () 
     runningProcesses.set(run.id, { child: { pid: 424242 } as never, graceSec: 4, processGroupId: 424242 });
     const deps = callbacks(db);
     const stop = createHeartbeatRunControl(db, deps).cancelRunInternal(run.id, "Stop original", {
-      resultJson: { requestedBy: "operator" },
+      resultJson: { requestedBy: "operator" }, suppressImmediateRecovery: true, terminationGraceMs: 1500,
     });
     const result = stop.then(value => ({ value }), error => ({ error }));
     try {
@@ -300,7 +300,8 @@ describe.skipIf(!support.supported)("heartbeat run-control database wiring", () 
         const current = await deps.getRun(run.id);
         expect(current?.status).toBe("running");
         expect(current?.resultJson).toMatchObject({ retained: "keep", requestedBy: "operator",
-          executionCancellation: { state: "requested" } });
+          executionCancellation: { state: "requested", targetControllerBootId: foreignBoot, targetObserverEpoch: 7,
+            requestOptions: { suppressImmediateRecovery: true, terminationGraceMs: 1500 } } });
       });
       expect(control.controller.signal.aborted).toBe(false);
       expect(terminateLocalService).not.toHaveBeenCalled();
@@ -357,6 +358,40 @@ describe.skipIf(!support.supported)("heartbeat run-control database wiring", () 
       expect(stopped?.resultJson).toMatchObject({ retainedDuringStop: true,
         executionCancellation: { state: "acknowledged", proof: "original_provider_turn" } });
     } finally { control.finish(); adapterExecutionControls.delete(run.id); }
+  });
+
+  it("a stale owner cannot terminalize or release after Stop settlement changes epoch", async () => {
+    const { run, control } = await ownedAdapterRun();
+    await db.update(heartbeatRuns).set({ controllerBootId: legacyControllerBootId }).where(eq(heartbeatRuns.id, run.id));
+    const deps = callbacks(db);
+    vi.mocked(waitForAdapterStop).mockImplementationOnce(async () => {
+      await db.update(heartbeatRuns).set({ observerEpoch: run.observerEpoch + 1,
+        resultJson: { executionCancellation: { state: "acknowledged" } },
+      }).where(eq(heartbeatRuns.id, run.id));
+    });
+    try {
+      await expect(createHeartbeatRunControl(db, deps).cancelRunInternal(run.id)).rejects.toMatchObject({ status: 409 });
+      expect((await deps.getRun(run.id))?.status).toBe("running");
+      expect(deps.wakeQueue.releaseIssueExecution).not.toHaveBeenCalled();
+      expect(deps.startNextQueuedRunForAgent).not.toHaveBeenCalled();
+    } finally { control.finish(); adapterExecutionControls.delete(run.id); }
+  });
+
+  it("does not overwrite acknowledgement committed between proof read and terminal CAS", async () => {
+    const { company, agent } = await fixture();
+    const run = await liveRun(company.id, agent.id);
+    await db.update(heartbeatRuns).set({ controllerBootId: legacyControllerBootId }).where(eq(heartbeatRuns.id, run.id));
+    const deps = callbacks(db);
+    const terminalize = deps.setRunStatusFromLive.getMockImplementation()!;
+    deps.setRunStatusFromLive.mockImplementationOnce(async (...args) => {
+      await db.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "acknowledged", proof: "newer" } } })
+        .where(eq(heartbeatRuns.id, run.id));
+      return terminalize(...args);
+    });
+    await expect(createHeartbeatRunControl(db, deps).cancelRunInternal(run.id)).rejects.toMatchObject({ status: 409 });
+    expect(await deps.getRun(run.id)).toMatchObject({ status: "running",
+      resultJson: { executionCancellation: { state: "acknowledged", proof: "newer" } } });
+    expect(deps.startNextQueuedRunForAgent).not.toHaveBeenCalled();
   });
 
   it("answers an owned adapter Stop that is still settling with a pending conflict", async () => {

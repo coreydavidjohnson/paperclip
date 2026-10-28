@@ -61,8 +61,9 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
    await heartbeat.sweepExternalRunLiveness();
    await vi.waitFor(() => expect(observe).toHaveBeenCalledOnce());
    if (via === "saved intent") {
+    const owner = await read(run.id);
     await db.update(heartbeatRuns).set({ error: "Stop original", errorCode: "cancelled",
-     resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, run.id));
+     resultJson: { executionCancellation: { state: "requested", targetControllerBootId: owner.controllerBootId, targetObserverEpoch: owner.observerEpoch } } }).where(eq(heartbeatRuns.id, run.id));
    } else {
     await heartbeat.cancelRun(run.id, "Stop original");
    }
@@ -76,6 +77,39 @@ describe.skipIf(!support.supported)("external heartbeat observer integration", (
    expect(allRuns).toHaveLength(1);
   } finally { release?.(); await heartbeat.drainActiveRunExecutions(); }
  }, 30000);
+ it("an unverified observer Stop does not terminalize or release the original run", async () => {
+  const run = await fixture(); probe.mockResolvedValue({ state: "active" });
+  let release!: () => void;
+  observe.mockImplementationOnce(async ctx => {
+   await new Promise<void>(resolve => { release = resolve; ctx.signal.addEventListener("abort", () => resolve(), { once: true }); });
+   return { exitCode: 0, signal: null, timedOut: false, resultJson: {} };
+  });
+  try {
+   await heartbeat.sweepExternalRunLiveness();
+   await vi.waitFor(() => expect(observe).toHaveBeenCalledOnce());
+   await expect(heartbeat.cancelRun(run.id, "Stop original")).rejects.toMatchObject({ status: 409 });
+   await heartbeat.drainActiveRunExecutions();
+   expect(await read(run.id)).toMatchObject({ status: "running", resultJson: { executionCancellation: { state: "requested" } } });
+   expect(execute).not.toHaveBeenCalled();
+  } finally { release?.(); await heartbeat.drainActiveRunExecutions(); }
+ });
+ it("lease loss detaches the observer without provider Stop or terminalization", async () => {
+  const run = await fixture(); probe.mockResolvedValue({ state: "active" });
+  let release!: () => void;
+  observe.mockImplementationOnce(async ctx => {
+   await new Promise<void>(resolve => { release = resolve; ctx.signal.addEventListener("abort", () => resolve(), { once: true }); });
+   expect(ctx.signal.reason.message).toBe("Legacy controller lease lost");
+   return { exitCode: 0, signal: null, timedOut: false, resultJson: {} };
+  });
+  try {
+   await heartbeat.sweepExternalRunLiveness();
+   await vi.waitFor(() => expect(observe).toHaveBeenCalledOnce());
+   await db.update(heartbeatRuns).set({ controllerLeaseExpiresAt: new Date(0) }).where(eq(heartbeatRuns.id, run.id));
+   await heartbeat.drainActiveRunExecutions();
+   expect(await read(run.id)).toMatchObject({ status: "running" });
+   expect(execute).not.toHaveBeenCalled();
+  } finally { release?.(); await heartbeat.drainActiveRunExecutions(); }
+ }, 20000);
  it("stops the observer lease when configuration resolution fails and later reattaches", async () => {
   const run = await fixture();
   await db.update(heartbeatRuns).set({ runnerProfileJson: { externalObservation: { adapterType: "test_external", config: { setupFailure: run.id } } } }).where(eq(heartbeatRuns.id, run.id));

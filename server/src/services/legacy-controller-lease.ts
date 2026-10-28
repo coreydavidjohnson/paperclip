@@ -40,6 +40,7 @@ export async function renewLegacyControllerLease(
   db: Db,
   run: Pick<Run, "id" | "companyId" | "controllerBootId" | "observerEpoch">,
   stage?: "dispatching",
+  onRenewed?: (intent: Record<string, unknown> | null) => void,
 ): Promise<boolean> {
   const [renewed] = await db.update(heartbeatRuns).set({
     controllerLeaseExpiresAt: sql`clock_timestamp() + interval '60 seconds'`,
@@ -50,7 +51,10 @@ export async function renewLegacyControllerLease(
     eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
     eq(heartbeatRuns.observerEpoch, run.observerEpoch),
     gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
-  )).returning({ id: heartbeatRuns.id });
+  )).returning({ id: heartbeatRuns.id,
+    stopIntent: sql<Record<string, unknown> | null>`${heartbeatRuns.resultJson}->'executionCancellation'`,
+  });
+  if (renewed) onRenewed?.(renewed.stopIntent);
   return Boolean(renewed);
 }
 
@@ -163,24 +167,19 @@ export function watchLegacyControllerLease(
   let stopped = false;
   let pending = false;
   let cancellationPending = false;
-  // Intent lookup/Stop must not occupy the dedicated renewal connection or
-  // extend assertOwned's deadline. One in-flight lookup/Stop per watcher.
-  const checkCancellation = () => {
-    if (!onCancellationRequested || cancellationPending || stopped || controller.signal.aborted) return;
+  // Intent comes from the fenced renewal itself, never a second unbounded
+  // lookup on the shared pool. Stop cannot occupy the renewal connection.
+  const checkCancellation = (intent: Record<string, unknown> | null) => {
+    if (!onCancellationRequested || cancellationPending || stopped || controller.signal.aborted ||
+        intent?.state !== "requested" || intent.targetControllerBootId !== legacyControllerBootId ||
+        intent.targetObserverEpoch !== run.observerEpoch) return;
     cancellationPending = true;
-    void (async () => {
-      const [intent] = await sharedDb.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
-        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-        eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
-        eq(heartbeatRuns.controllerBootId, legacyControllerBootId),
-        eq(heartbeatRuns.observerEpoch, run.observerEpoch),
-        gt(heartbeatRuns.controllerLeaseExpiresAt, sql`clock_timestamp()`),
-        sql`${heartbeatRuns.resultJson}->'executionCancellation'->>'state' = 'requested'`,
-      ));
-      if (intent && !stopped && !controller.signal.aborted) await onCancellationRequested();
-    })().catch(() => { /* intent remains durable; a later successful renewal retries */ })
+    void onCancellationRequested().catch(() => { /* durable intent remains retryable */ })
       .finally(() => { cancellationPending = false; });
   };
+  // Stop aborts provider work, not renewal. Retain the ownership lease through
+  // adapter settlement/copyback; only genuine lease loss aborts this guard.
+  const ownership = new AbortController();
   // Timing evidence for a loss: a renewal still in flight at the deadline
   // points at the database; a late deadline callback points at the event loop.
   let lastRenewedAt = Date.now();
@@ -189,16 +188,18 @@ export function watchLegacyControllerLease(
   let deadlineDueAt = 0;
   let deadline: ReturnType<typeof setTimeout> | undefined;
   const lost = (cause: LegacyControllerLeaseLossCause) => {
-    if (stopped || controller.signal.aborted) return;
+    if (stopped || ownership.signal.aborted) return;
     apiMetrics.failure("lease_loss");
     const now = Date.now();
     const oldestRenewal = Math.min(...[...renewalsInFlight].map((renewal) => renewal.startedAt));
-    controller.abort(new LegacyControllerLeaseLostError(cause, {
+    const reason = new LegacyControllerLeaseLostError(cause, {
       sinceRenewalMs: now - lastRenewedAt,
       renewalPendingMs: renewalsInFlight.size > 0 ? now - oldestRenewal : null,
       deadlineLateMs: cause === "renewal_deadline" ? Math.max(0, now - deadlineDueAt) : null,
       renewalCount,
-    }));
+    });
+    ownership.abort(reason);
+    controller.abort(reason);
   };
   const deadlinePassed = () => lost("renewal_deadline");
   const armDeadline = (delayMs: number) => {
@@ -209,42 +210,45 @@ export function watchLegacyControllerLease(
   };
   const adopted = stopClaimRenewal(run.id);
   armDeadline(Math.max(0, Math.max(run.controllerLeaseExpiresAt?.getTime() ?? 0, adopted?.expiresAt ?? 0) - Date.now()));
-  const assertOwned = async (stage?: "dispatching") => {
+  const renewOwned = async (stage?: "dispatching") => {
     if (stopped) return;
-    controller.signal.throwIfAborted();
+    ownership.signal.throwIfAborted();
     const startedAt = Date.now();
     const renewal = { startedAt };
     renewalsInFlight.add(renewal);
     let onAbort!: () => void;
     const aborted = new Promise<never>((_, reject) => {
-      onAbort = () => reject(controller.signal.reason);
-      controller.signal.addEventListener("abort", onAbort, { once: true });
+      onAbort = () => reject(ownership.signal.reason);
+      ownership.signal.addEventListener("abort", onAbort, { once: true });
     });
     let renewed: boolean;
     try {
-      renewed = await Promise.race([renewLegacyControllerLease(db, run, stage), aborted]);
+      renewed = await Promise.race([renewLegacyControllerLease(db, run, stage, checkCancellation), aborted]);
     } finally {
       renewalsInFlight.delete(renewal);
-      controller.signal.removeEventListener("abort", onAbort);
+      ownership.signal.removeEventListener("abort", onAbort);
     }
     if (stopped) return;
     if (!renewed) {
       lost("renewal_rejected");
-      controller.signal.throwIfAborted();
+      ownership.signal.throwIfAborted();
     }
-    controller.signal.throwIfAborted();
+    ownership.signal.throwIfAborted();
     if (!stopped) {
       lastRenewedAt = Date.now();
       renewalCount += 1;
       armDeadline(Math.max(0, LEGACY_CONTROLLER_LEASE_MS - (Date.now() - startedAt)));
-      checkCancellation();
     }
   };
   const timer = setInterval(() => {
     if (pending || stopped) return;
     pending = true;
-    void assertOwned().catch(() => lost("renewal_error")).finally(() => { pending = false; });
+    void renewOwned().catch(() => lost("renewal_error")).finally(() => { pending = false; });
   }, LEGACY_CONTROLLER_RENEW_MS);
   timer.unref();
-  return { assertOwned, stop() { stopped = true; clearInterval(timer); clearTimeout(deadline); } };
+  return { async assertOwned(stage?: "dispatching") {
+    controller.signal.throwIfAborted();
+    await renewOwned(stage);
+    controller.signal.throwIfAborted();
+  }, stop() { stopped = true; clearInterval(timer); clearTimeout(deadline); } };
 }

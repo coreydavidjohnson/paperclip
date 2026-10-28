@@ -975,13 +975,19 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     // or adapter handle. Persist intent; only the original execution owner can
     // acknowledge provider termination. This grants no replay/takeover right.
     if (run.runtimeMode === "legacy" && run.status === "running" && run.controllerBootId &&
-        run.controllerBootId !== legacyControllerBootId) {
+        (run.controllerBootId !== legacyControllerBootId ||
+          (run.externalRunHandle && !adapterExecutionControls.has(run.id) && !runningProcesses.has(run.id)))) {
       const stopTarget = run;
       const saveIntent = async (tx: Db) => tx.update(heartbeatRuns).set({
         error: reason, errorCode,
         resultJson: preserveWorkspaceRestoreRecoveryMetadataSql({
           ...options.resultJson, cancellation,
-          executionCancellation: { state: "requested", requestedAt: new Date().toISOString() },
+          executionCancellation: { state: "requested", requestedAt: new Date().toISOString(),
+            targetControllerBootId: stopTarget.controllerBootId, targetObserverEpoch: stopTarget.observerEpoch,
+            requestOptions: { resultJson: options.resultJson, eventMessage: options.eventMessage,
+              eventPayload: options.eventPayload, terminationGraceMs: options.terminationGraceMs,
+              suppressImmediateRecovery: options.suppressImmediateRecovery },
+          },
         }, true),
         updatedAt: new Date(),
       }).where(and(
@@ -989,7 +995,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         eq(heartbeatRuns.runtimeMode, "legacy"), eq(heartbeatRuns.status, "running"),
         eq(heartbeatRuns.controllerBootId, stopTarget.controllerBootId!),
         eq(heartbeatRuns.observerEpoch, stopTarget.observerEpoch),
-        sql`coalesce(${heartbeatRuns.resultJson}->'executionCancellation'->>'state', '') not in ('requested', 'acknowledged')`,
+        sql`(coalesce(${heartbeatRuns.resultJson}->'executionCancellation'->>'state', '') not in ('requested', 'acknowledged')
+          or (${heartbeatRuns.resultJson}->'executionCancellation'->>'state' = 'requested' and (
+            ${heartbeatRuns.resultJson}->'executionCancellation'->>'targetControllerBootId' is distinct from ${stopTarget.controllerBootId}
+            or ${heartbeatRuns.resultJson}->'executionCancellation'->>'targetObserverEpoch' is distinct from ${String(stopTarget.observerEpoch)})))`,
       )).returning({ id: heartbeatRuns.id });
       if (options.budgetEnforcement) {
         // A stale policy cannot enqueue Stop on a remote execution either.
@@ -1121,6 +1130,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                 resultJson: preserveWorkspaceRestoreRecoveryMetadataSql({
                   ...resultJson,
                   ...(!running ? { executionCancellation: {
+                    ...parseObject(resultJson.executionCancellation),
                     state: "requested", requestedAt: new Date().toISOString(),
                   } } : {}),
                 }, true),
@@ -1212,6 +1222,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           const finishedAt = new Date();
           const persistedCancellationResult =
             await getRun(run.id).then(current => parseObject(current?.resultJson));
+          if (control && !running && run.runtimeMode === "legacy" && run.controllerBootId &&
+              parseObject(persistedCancellationResult.executionCancellation).state !== "acknowledged") {
+            throw conflict("Provider termination is not verified; inspect this run before continuing.");
+          }
           return await setRunStatusFromLive(
             run.id,
             "cancelled",
@@ -1265,7 +1279,16 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                 : {}),
             },
             undefined,
-            pendingNativeRetry ? nativeRetryCancellationCommitCondition(persistedCancellationResult) : undefined,
+            pendingNativeRetry ? nativeRetryCancellationCommitCondition(persistedCancellationResult)
+              : run.runtimeMode === "legacy" && run.controllerBootId ? and(
+                  eq(heartbeatRuns.companyId, run.companyId),
+                  eq(heartbeatRuns.controllerBootId, run.controllerBootId),
+                  eq(heartbeatRuns.observerEpoch, run.observerEpoch),
+                  // Reject a proof change between read and terminal write, rather
+                  // than overwrite a newer acknowledgement with requested.
+                  sql`coalesce(${heartbeatRuns.resultJson}->'executionCancellation', 'null'::jsonb) =
+                    ${JSON.stringify(persistedCancellationResult.executionCancellation ?? null)}::jsonb`,
+                ) : undefined,
           );
         } catch (error) {
           if (processCancellationSettlement) {
@@ -1295,6 +1318,9 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         }
       })();
       const cancelled = cancellation.run;
+      if (!cancellation.updated && cancelled?.status === "running") {
+        throw conflict("Execution ownership or Stop proof changed before cancellation committed; inspect this run before continuing.");
+      }
 
       if (cancellation.updated && cancelled) {
         await setWakeupStatus(run.wakeupRequestId, "cancelled", {

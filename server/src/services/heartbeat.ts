@@ -252,6 +252,7 @@ import {
 
 import {
   legacyControllerBootId,
+  LegacyControllerLeaseLostError,
   watchLegacyControllerLease,
 } from "./legacy-controller-lease.js";
 
@@ -275,7 +276,6 @@ import {
 import {
   adapterExecutionControls,
   createAdapterExecutionControl,
-  registerAdapterExecutionControl,
 } from "./adapter-execution-control.js";
 import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { buildHeartbeatRunStatusLiveEventPayload } from "./heartbeat-run-status-payload.js";
@@ -1817,8 +1817,11 @@ export function heartbeatService(
     if (!current || current.companyId !== run.companyId || current.status !== "running" ||
         current.controllerBootId !== legacyControllerBootId || current.observerEpoch !== run.observerEpoch ||
         parseObject(current.resultJson?.executionCancellation).state !== "requested") return;
+    const intent = parseObject(current.resultJson?.executionCancellation);
+    if (intent.targetControllerBootId !== legacyControllerBootId || intent.targetObserverEpoch !== run.observerEpoch) return;
+    const requestOptions = parseObject(intent.requestOptions) as CancelRunOptions;
     await cancelRunInternal(run.id, current.error ?? undefined, {
-      errorCode: current.errorCode ?? undefined, resultJson: parseObject(current.resultJson),
+      ...requestOptions, errorCode: current.errorCode ?? undefined,
     }).catch(err => logger.warn({ err, runId: run.id }, "owning controller could not settle saved Stop intent"));
   }
 
@@ -1835,10 +1838,13 @@ export function heartbeatService(
     if (!settled && adapterExecutionControls.has(run.id)) return;
     const executionControl = settled ? null : createAdapterExecutionControl();
     const controller = executionControl?.controller ?? new AbortController();
-    if (executionControl) await registerAdapterExecutionControl(run.id, executionControl);
-    const lease = settled ? null : watchLegacyControllerLease(db, run, controller,
-      () => cancelSavedLegacyStop(run));
+    // No await between checking and registering the local observer owner.
+    // Observation never dispatches; an earlier ownerless Stop waits on intent.
+    if (executionControl) adapterExecutionControls.set(run.id, executionControl);
+    let lease: ReturnType<typeof watchLegacyControllerLease> | null = null;
     try {
+      lease = settled ? null : watchLegacyControllerLease(db, run, controller,
+        () => cancelSavedLegacyStop(run));
       const current = await getRun(run.id);
       if (!current || (!settled && current.status !== "running") || current.observerEpoch !== run.observerEpoch) return;
       const context = parseObject(run.contextSnapshot);
@@ -1852,6 +1858,9 @@ export function heartbeatService(
         handle: run.externalRunHandle as ExternalRunHandle, signal: controller.signal,
         onLog, onMeta: onAdapterMeta, onHandle: async handle => { await persistExternalRunHandle(db, run, handle); } });
       if ((await getRun(run.id))?.observerEpoch !== run.observerEpoch) return;
+      // Lease loss is detach-only. Stop needs actual provider termination proof.
+      if (controller.signal.aborted && (controller.signal.reason instanceof LegacyControllerLeaseLostError ||
+          parseObject(result.resultJson?.executionCancellation).state !== "acknowledged")) return;
       const issueContext = issueId ? await getIssueExecutionContext(run.companyId, issueId) : null;
       const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
       const taskSession = taskKey ? await getTaskSession(run.companyId, agent.id, agent.adapterType, taskKey) : null;
