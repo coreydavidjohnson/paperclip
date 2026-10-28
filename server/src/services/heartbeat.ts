@@ -4200,6 +4200,7 @@ export function heartbeatService(
       }),
 
     wakeup: trackWakeup,
+    resumeCommentOperationWake: heartbeatQueue.resumeCommentOperationWake,
     dispatchPendingNativeStatusWakeups,
     triggerIssueMonitor,
 

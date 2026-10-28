@@ -1,5 +1,23 @@
 # Luma Paperclip patches
 
+## PER-316 initial comment admission and durable ordinary wakes
+
+- Keep a new blocked-task composer operation on the existing one-shot transition
+  route. A retained request never changes endpoints. Do not probe and then
+  downgrade after a refusal, a reload, or an uncertain response.
+- Apply restrictive expected-user/company headers to the one-shot composer route
+  as well as the replay-safe route, and validate the returned receipt identity.
+- Commit an ordinary comment's deferred assignee wake in the same transaction as
+  its content, request receipt and audit. Use the existing queue admission and
+  issue-lock fence for immediate and scheduler delivery; never repeat an interrupt.
+- Keep source authority, original Stop ownership, pending approvals, unknown
+  outcomes, deleted input, pause and reassignment fences. This is source evidence,
+  not clean final review, full-image qualification or runtime acceptance.
+- Regressions and retained failures:
+  `docs/incidents/2026-10-28-comment-admission-and-wake.md`.
+- Retire when upstream supplies the equivalent no-downgrade composer selection
+  and transaction-bound ordinary-comment wake contract.
+
 Base: upstream `paperclipai/paperclip` master `4415665d67b16ffefbe4519c4bdd521f37bb87b9`
 (2026-10-17; after nightly `v2026.1017.0-nightly.0`, newest release `v2026.1012.0`).
 Branch `task/per980-rebase` carries only the patches below as separate commits on

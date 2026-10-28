@@ -48,6 +48,17 @@ import {
 } from "./helpers/embedded-postgres.js";
 
 const steerNativeSessionMock = vi.hoisted(() => vi.fn());
+const commentSyncFault = vi.hoisted(() => vi.fn());
+vi.mock("../services/issue-references.js", async importOriginal => {
+  const actual = await importOriginal<typeof import("../services/issue-references.js")>();
+  return { ...actual, issueReferenceService: (...args: Parameters<typeof actual.issueReferenceService>) => {
+    const service = actual.issueReferenceService(...args);
+    return { ...service, syncComment: async (...input: Parameters<typeof service.syncComment>) => {
+      commentSyncFault();
+      return service.syncComment(...input);
+    } };
+  } };
+});
 vi.mock("../services/native-runtime/native-session-executor.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/native-runtime/native-session-executor.js")>();
   steerNativeSessionMock.mockImplementation(actual.steerNativeSession);
@@ -77,6 +88,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   const testProcesses = new Map<string, ChildProcess>();
 
   afterEach(async () => {
+    commentSyncFault.mockReset();
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
     for (const [id, child] of testProcesses) {
@@ -2599,7 +2611,10 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(child.exitCode).toBeNull();
   });
 
-  it.each(["comments", "comments/replay-safe"])("rolls back the comment, receipt, interrupt wake, and audit as one operation (%s)", async path => {
+  it.each([
+    { path: "comments", interrupt: true }, { path: "comments/replay-safe", interrupt: true },
+    { path: "comments", interrupt: false }, { path: "comments/replay-safe", interrupt: false },
+  ])("rolls back the comment, receipt, wake, and audit as one operation (%j)", async ({ path, interrupt }) => {
     const seeded = await seedQueue();
     await db.update(agents).set({ adapterType: "claude_local", runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } })
       .where(eq(agents.id, seeded.agentId));
@@ -2618,7 +2633,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       BEFORE INSERT ON activity_log FOR EACH ROW EXECUTE FUNCTION fail_issue_comment_audit()`));
     try {
       const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send({
-        clientRequestId, body: "Must roll back with its receipt and stop intent", interrupt: true,
+        clientRequestId, body: "Must roll back with its receipt and stop intent", interrupt,
       });
       expect(response.status).toBe(500);
       expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(0);
@@ -2626,6 +2641,9 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
       expect(receipts.filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(0);
       const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.source, "issue_comment"));
       expect(wakes.filter(row => row.idempotencyKey?.startsWith("issue-comment-interrupt:") &&
+        row.payload?.issueId === seeded.issueId)).toHaveLength(0);
+      const normalWakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.source, "automation"));
+      expect(normalWakes.filter(row => row.idempotencyKey?.startsWith("issue-comment-wake:") &&
         row.payload?.issueId === seeded.issueId)).toHaveLength(0);
       const activities = await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId));
       expect(activities.filter(row => row.action === "issue.comment_added")).toHaveLength(0);
@@ -2637,13 +2655,13 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     }
     if (path === "comments/replay-safe") {
       const retry = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`).send({
-        clientRequestId, body: "Must roll back with its receipt and stop intent", interrupt: true,
+        clientRequestId, body: "Must roll back with its receipt and stop intent", interrupt,
       });
       expect(retry.status, JSON.stringify(retry.body)).toBe(201);
       expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(1);
       const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.source, "issue_comment_operation"));
       expect(receipts.filter(row => row.payload?.issueId === seeded.issueId)).toHaveLength(1);
-      expect(receipts.find(row => row.payload?.issueId === seeded.issueId)?.payload?.originalTargetRunId).toBe(seeded.runId);
+      expect(receipts.find(row => row.payload?.issueId === seeded.issueId)?.payload?.originalTargetRunId).toBe(interrupt ? seeded.runId : null);
     }
   });
 
@@ -2845,10 +2863,13 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     }
   });
 
-  it.each(["user", "company"])("refuses a replay-safe request after the expected %s identity changes", async field => {
+  it.each([
+    { path: "comments", field: "user" }, { path: "comments", field: "company" },
+    { path: "comments/replay-safe", field: "user" }, { path: "comments/replay-safe", field: "company" },
+  ])("refuses expected identity changes (%j)", async ({ path, field }) => {
     const seeded = await seedQueue();
     const clientRequestId = randomUUID();
-    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`)
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/${path}`)
       .set("X-Paperclip-Expected-User-Id", field === "user" ? "previous-user" : "queue-owner")
       .set("X-Paperclip-Expected-Company-Id", field === "company" ? randomUUID() : seeded.companyId)
       .send({ clientRequestId, body: "Do not send under a new login" });
@@ -2856,6 +2877,92 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, clientRequestId))).toHaveLength(0);
     expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId))).toHaveLength(1);
     expect(await db.select().from(activityLog).where(eq(activityLog.entityId, seeded.issueId))).toHaveLength(0);
+  });
+  it("retains ordinary comment wake delivery across post-commit failure and same-key replay", async () => {
+    const seeded = await seedQueue();
+    await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+    await db.update(agents).set({ adapterType: "claude_local" }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy" }).where(eq(heartbeatRuns.id, seeded.runId));
+    const payload = { clientRequestId: randomUUID(), body: "Keep delivery after the response fails" };
+    commentSyncFault.mockImplementationOnce(() => { throw new Error("forced post-commit sync failure"); });
+    const first = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send(payload);
+    expect(first.status).toBe(500);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.clientRequestId, payload.clientRequestId));
+    expect(comments).toHaveLength(1);
+    const replay = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`).send(payload);
+    expect(replay.status, JSON.stringify(replay.body)).toBe(201);
+    expect(replay.body.id).toBe(comments[0].id);
+    const wakes = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId)))
+      .filter(wake => wake.idempotencyKey?.startsWith("issue-comment-wake:"));
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ agentId: seeded.agentId, requestedByActorType: "user",
+      requestedByActorId: "queue-owner", payload: { issueId: seeded.issueId,
+        _paperclipWakeContext: { wakeCommentIds: [comments[0].id] } } });
+    expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, payload.clientRequestId))).toHaveLength(1);
+    await db.update(agents).set({ adapterType: "process", adapterConfig: {
+      command: process.execPath, args: ["-e", "process.exit(0)"],
+    } }).where(eq(agents.id, seeded.agentId));
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, seeded.runId));
+    await db.update(issues).set({ executionRunId: null, checkoutRunId: null }).where(eq(issues.id, seeded.issueId));
+    await db.update(agentWakeupRequests).set({ updatedAt: new Date(Date.now() - 60_000) }).where(eq(agentWakeupRequests.id, wakes[0].id));
+    await Promise.all([heartbeatService(db).resumeQueuedRuns(), heartbeatService(db).resumeQueuedRuns()]);
+    await heartbeatService(db).drainActiveRunExecutions();
+    const successors = (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId)))
+      .filter(run => Array.isArray(run.contextSnapshot?.wakeCommentIds) && run.contextSnapshot.wakeCommentIds.includes(comments[0].id));
+    expect(successors, JSON.stringify(successors.map(run => ({ id: run.id, status: run.status,
+      commentIds: run.contextSnapshot?.wakeCommentIds, error: run.errorCode })))).toHaveLength(1);
+    expect(successors[0].contextSnapshot?.wakeCommentIds).toContain(comments[0].id);
+    const [delivered] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wakes[0].id));
+    expect(delivered.runId).toBe(successors[0].id);
+    expect(delivered.status).not.toBe("deferred_issue_execution");
+  });
+  it.each(["done", "in_review", "reassigned", "agent-paused", "company-paused", "deleted"])(
+    "keeps durable comment wake authority fenced after %s", async change => {
+      const seeded = await seedQueue();
+      await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.id, seeded.wakeId));
+      await db.update(agents).set({ adapterType: "process", adapterConfig: {
+        command: process.execPath, args: ["-e", "process.exit(0)"],
+      } }).where(eq(agents.id, seeded.agentId));
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy", status: "succeeded", finishedAt: new Date() })
+        .where(eq(heartbeatRuns.id, seeded.runId));
+      await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, seeded.issueId));
+      commentSyncFault.mockImplementationOnce(() => { throw new Error("forced post-commit sync failure"); });
+      const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments/replay-safe`)
+        .send({ clientRequestId: randomUUID(), body: "Do not bypass later authority" });
+      expect(response.status).toBe(500);
+      const wake = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, seeded.companyId)))
+        .find(row => row.idempotencyKey?.startsWith("issue-comment-wake:"))!;
+      expect(wake).toBeDefined();
+      if (change === "done" || change === "in_review") await db.update(issues).set({ status: change }).where(eq(issues.id, seeded.issueId));
+      if (change === "reassigned") await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, seeded.issueId));
+      if (change === "agent-paused") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, seeded.agentId));
+      if (change === "company-paused") await db.update(companies).set({ status: "paused" }).where(eq(companies.id, seeded.companyId));
+      if (change === "deleted") await db.update(issueComments).set({ deletedAt: new Date() })
+        .where(eq(issueComments.id, String(wake.payload?.commentId)));
+      const attempts = await Promise.allSettled([heartbeatService(db).resumeCommentOperationWake(seeded.companyId, wake.id),
+        heartbeatService(db).resumeCommentOperationWake(seeded.companyId, wake.id)]);
+      for (const attempt of attempts) {
+        if (change === "agent-paused") {
+          expect(attempt.status).toBe("rejected");
+          if (attempt.status === "rejected") expect(attempt.reason.status).toBe(409);
+        } else expect(attempt.status).toBe("fulfilled");
+      }
+      await heartbeatService(db).drainActiveRunExecutions();
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, seeded.companyId))).toHaveLength(1);
+      const [retained] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+      expect(retained.runId).toBeNull();
+      expect(retained.status).toBe(["done", "in_review", "reassigned"].includes(change) ? "coalesced" : "deferred_issue_execution");
+    },
+  );
+  it("admits a one-shot blocked-task comment with matching expected identity", async () => {
+    const seeded = await seedQueue();
+    await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, seeded.issueId));
+    const payload = { clientRequestId: randomUUID(), body: "An ordinary blocked-task comment" };
+    const response = await request(app(seeded.companyId)).post(`/api/issues/${seeded.issueId}/comments`)
+      .set("X-Paperclip-Expected-User-Id", "queue-owner")
+      .set("X-Paperclip-Expected-Company-Id", seeded.companyId).send(payload);
+    expect(response.status, JSON.stringify(response.body)).toBe(201);
+    expect(await db.select().from(issueComments).where(eq(issueComments.clientRequestId, payload.clientRequestId))).toHaveLength(1);
   });
   it("preserves initial reopen behavior while disabling unsafe transition replay", async () => {
     const seeded = await seedQueue();

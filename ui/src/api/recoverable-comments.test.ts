@@ -23,7 +23,7 @@ describe("durable replay-safe composer requests", () => {
     expect(mockApi.post.mock.calls[0]?.[0]).toBe(`/issues/${scope.issueId}/comments/replay-safe`);
   });
   it.each([
-    { status: "done" }, { status: "cancelled" }, { status: "in_review" },
+    { status: "done" }, { status: "cancelled" }, { status: "in_review" }, { status: "blocked" },
     { assigneeAgentId: null }, { conversationAgentId: payload.attachmentIds[0] },
   ])("keeps unsupported initial composer variants one-shot (%j)", async variant => {
     mockApi.post.mockResolvedValue(receipt);
@@ -46,6 +46,52 @@ describe("durable replay-safe composer requests", () => {
     mockApi.post.mockResolvedValue(receipt);
     await issuesApi.addComposerComment(scope, { ...issue, status: "done" }, payload);
     expect(mockApi.post.mock.calls.map(([path]) => path)).toEqual(Array(4).fill(`/issues/${scope.issueId}/comments/replay-safe`));
+  });
+  it("admits an initial blocked-task comment without probing another control path", async () => {
+    mockApi.post.mockResolvedValue(receipt);
+    expect(await issuesApi.addComposerComment(scope, { ...issue, status: "blocked" }, payload)).toEqual(receipt);
+    expect(mockApi.post.mock.calls.map(([path]) => path)).toEqual([
+      `/issues/${scope.issueId}/comments`,
+    ]);
+    expect(mockApi.post.mock.lastCall?.[1]).toEqual(payload);
+    expect(mockApi.post.mock.lastCall?.[2]).toEqual(expect.objectContaining({ headers: {
+      "X-Paperclip-Expected-User-Id": scope.userId,
+      "X-Paperclip-Expected-Company-Id": scope.companyId,
+    } }));
+  });
+  it("does not downgrade a known refusal after an uncertain in-call attempt", async () => {
+    mockApi.post.mockRejectedValueOnce(new TypeError("lost"))
+      .mockRejectedValue(new ApiError("Unsupported", 409, { details: { code: "comment_operation_not_replay_safe" } }));
+    const pending = issuesApi.addComposerComment(scope, issue, payload);
+    const failed = expect(pending).rejects.toBeInstanceOf(CommentSubmissionUnknownError);
+    await vi.advanceTimersByTimeAsync(1000); await failed;
+    expect(mockApi.post.mock.calls.map(([path]) => path)).toEqual(Array(2).fill(`/issues/${scope.issueId}/comments/replay-safe`));
+    expect(issuesApi.canRecoverComment(scope, clientRequestId)).toBe(true);
+  });
+  it("keeps a one-shot payload and actor immutable across an in-flight context change", async () => {
+    const mutableScope = { ...scope };
+    const mutablePayload = structuredClone(payload);
+    mockApi.post.mockImplementationOnce(async () => {
+      mutableScope.userId = "other-user";
+      mutablePayload.body = "Edited draft";
+      mutablePayload.attachmentIds.push(scope.issueId);
+      return receipt;
+    });
+    expect(await issuesApi.addComposerComment(mutableScope, { ...issue, status: "blocked" }, mutablePayload)).toEqual(receipt);
+    expect(mockApi.post.mock.lastCall?.[1]).toEqual(payload);
+    expect(mockApi.post.mock.lastCall?.[2]?.headers["X-Paperclip-Expected-User-Id"]).toBe(scope.userId);
+  });
+  it.each(["lost-response", "foreign-receipt"])("never automatically repeats a one-shot transition after %s", async failure => {
+    if (failure === "lost-response") mockApi.post.mockRejectedValue(new TypeError("lost"));
+    else mockApi.post.mockResolvedValue({ ...receipt, authorUserId: "other-user" });
+    await expect(issuesApi.addComposerComment(scope, { ...issue, status: "blocked" }, payload)).rejects.toBeInstanceOf(CommentSubmissionUnknownError);
+    expect(mockApi.post).toHaveBeenCalledTimes(1);
+  });
+  it.each([403, 409, 422])("does not treat another known refusal as fallback permission (%s)", async status => {
+    const refusal = new ApiError("Refused", status, { details: { code: "comment_operation_key_conflict" } });
+    mockApi.post.mockRejectedValue(refusal);
+    await expect(issuesApi.addComposerComment(scope, issue, payload)).rejects.toBe(refusal);
+    expect(mockApi.post).toHaveBeenCalledTimes(1);
   });
   it("snapshots the expected actor before any in-flight login-context mutation", async () => {
     const mutableScope = { ...scope };

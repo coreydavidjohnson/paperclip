@@ -18363,15 +18363,17 @@ export function issueRoutes(
       // Use a separate endpoint, not an optional body field that an older server
       // could silently strip before executing a non-replay-safe operation.
       const replaySafeRequired = /\/comments\/replay-safe\/?$/.test(req.path);
-      if (replaySafeRequired) {
+      const expectedCommentUserId = req.header("X-Paperclip-Expected-User-Id");
+      const expectedCommentCompanyId = req.header("X-Paperclip-Expected-Company-Id");
+      if (replaySafeRequired || expectedCommentUserId !== undefined || expectedCommentCompanyId !== undefined) {
         if (req.actor.type !== "board" || !req.actor.userId) throw forbidden("Board user access required");
         // A login/company change must not post another user's retained draft.
         // These are restrictive expected-identity fences, never authentication.
-        const expectedUserId = req.header("X-Paperclip-Expected-User-Id");
-        const expectedCompanyId = req.header("X-Paperclip-Expected-Company-Id");
-        if ((expectedUserId !== undefined && expectedUserId !== req.actor.userId) ||
-            (expectedCompanyId !== undefined && expectedCompanyId !== issue.companyId))
+        if ((expectedCommentUserId !== undefined && expectedCommentUserId !== req.actor.userId) ||
+            (expectedCommentCompanyId !== undefined && expectedCommentCompanyId !== issue.companyId))
           throw forbidden("The saved comment user or company changed");
+      }
+      if (replaySafeRequired) {
         if (!req.body.clientRequestId) throw unprocessable("Replay-safe comments require a clientRequestId");
         if (issue.conversationAgentId) throw conflict("This comment variant is not replay-safe", {
           code: "comment_operation_not_replay_safe",
@@ -18578,6 +18580,7 @@ export function issueRoutes(
       let idempotentCommentOperation: {
         comment: Awaited<ReturnType<typeof svc.addComment>>;
         interruptWakeId: string | null;
+        commentWakeId: string | null;
         fastResponseEnqueued: boolean;
       } | null = null;
       let idempotentCommentAuditWritten = false;
@@ -18735,6 +18738,7 @@ export function issueRoutes(
             onBehalfOfUserId: authenticatedActorResponsibleUserId(req),
           }, operationCommentOptions, tx);
           let interruptWakeId: string | null = null;
+          let commentWakeId: string | null = null;
           if (target) {
             interruptWakeId = randomUUID();
             const interruptPayload = withQueuedCommentIdsInWakePayload({
@@ -18767,6 +18771,25 @@ export function issueRoutes(
             });
           }
 
+          if (!interruptWakeId && shouldWakeAssigneeForIssueComment({
+            selfComment: false, resumeRequested: false, commentCreatedByRunId: saved.createdByRunId,
+            issueAtCommentStart: lockedIssue, reopened: false, currentStatus: lockedIssue.status,
+          })) {
+            commentWakeId = randomUUID();
+            await tx.insert(agentWakeupRequests).values({
+              id: commentWakeId, companyId: issue.companyId, agentId: lockedIssue.assigneeAgentId!,
+              source: "automation", triggerDetail: "system", reason: "issue_commented",
+              payload: withQueuedCommentIdsInWakePayload({
+                issueId: issue.id, commentId: saved.id, mutation: "comment", issueCommentOperationId: operationKey,
+                _paperclipWakeContext: {
+                  issueId: issue.id, taskId: issue.id, source: "issue.comment", wakeReason: "issue_commented",
+                  ...(issue.externalConversationState && issue.identifier ? { taskKey: issue.identifier } : {}),
+                },
+              }, [saved.id]),
+              status: "deferred_issue_execution", requestedByActorType: "user", requestedByActorId: actor.actorId,
+              idempotencyKey: `issue-comment-wake:${operationKey}`,
+            });
+          }
           await tx.insert(agentWakeupRequests).values({
             id: randomUUID(),
             companyId: issue.companyId,
@@ -18781,6 +18804,7 @@ export function issueRoutes(
               requestUserId: actor.actorId,
               requestFingerprint,
               interruptWakeId,
+              commentWakeId,
               originalTargetRunId: target?.id ?? null,
             },
             status: "succeeded",
@@ -18826,6 +18850,7 @@ export function issueRoutes(
             kind: "created" as const,
             comment: saved,
             interruptWakeId,
+            commentWakeId,
             fastResponseEnqueued: Boolean(needsFastResponse),
           };
         });
@@ -18841,6 +18866,7 @@ export function issueRoutes(
           idempotentCommentOperation = {
             comment: operationResult.comment,
             interruptWakeId: operationResult.interruptWakeId,
+            commentWakeId: operationResult.commentWakeId,
             fastResponseEnqueued: operationResult.fastResponseEnqueued,
           };
           idempotentCommentAuditWritten = true;
@@ -19244,7 +19270,7 @@ export function issueRoutes(
       await issueReferencesSvc.syncComment(comment.id);
       await externalObjectsSvc.syncCommentSafely(comment.id);
       if (
-        currentIssue.assigneeAgentId && !idempotentCommentOperation?.interruptWakeId &&
+        currentIssue.assigneeAgentId && !idempotentCommentOperation?.interruptWakeId && !idempotentCommentOperation?.commentWakeId &&
         // Slack-linked messages need the normal attributed wake boundary so
         // the accepted requester and return-thread receipt travel with the run.
         !currentIssue.externalConversationState &&
@@ -19527,7 +19553,11 @@ export function issueRoutes(
           reopened,
           currentStatus: wakeIssueSnapshot.status,
         });
-        if (assigneeId && !goalCommentSteered && shouldWakeAssigneeForComment && !idempotentCommentOperation?.interruptWakeId) {
+        if (idempotentCommentOperation?.commentWakeId) {
+          void heartbeat.resumeCommentOperationWake(currentIssue.companyId, idempotentCommentOperation.commentWakeId)
+            .catch(err => logger.warn({ err, issueId: currentIssue.id }, "durable comment wake remains queued for recovery"));
+        }
+        if (assigneeId && !goalCommentSteered && shouldWakeAssigneeForComment && !idempotentCommentOperation) {
           if (reopened) {
             addWakeup(assigneeId, {
               source: "automation",

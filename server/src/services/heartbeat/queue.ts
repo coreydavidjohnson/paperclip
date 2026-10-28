@@ -64,6 +64,7 @@ import {
   gte,
   inArray,
   isNull,
+  like,
   lt,
   lte,
   ne,
@@ -1829,8 +1830,25 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
   async function resumeQueuedRuns() {
     if ((await getSchedulingSuppression()).suppressed) return;
-    await resumeExecutionWaitComments();
     const cutoff = await getWorktreeExecutionCutoff();
+    const commentWakes = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId })
+      .from(agentWakeupRequests).innerJoin(companies, eq(companies.id, agentWakeupRequests.companyId))
+      .where(and(eq(companies.status, "active"), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        like(agentWakeupRequests.idempotencyKey, "issue-comment-wake:%"),
+        lte(agentWakeupRequests.updatedAt, new Date(Date.now() - 30_000)),
+        cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
+      .orderBy(asc(agentWakeupRequests.updatedAt), asc(agentWakeupRequests.id)).limit(50);
+    for (const wake of commentWakes) {
+      const claimed = await db.update(agentWakeupRequests).set({ updatedAt: new Date() }).where(and(
+        eq(agentWakeupRequests.id, wake.id), eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        lte(agentWakeupRequests.updatedAt, new Date(Date.now() - 30_000)),
+      )).returning({ id: agentWakeupRequests.id });
+      if (!claimed.length) continue;
+      await resumeCommentOperationWake(wake.companyId, wake.id).catch(err => {
+        logger.warn({ err, queueId: wake.id }, "failed to resume durable comment wake");
+      });
+    }
+    await resumeExecutionWaitComments();
     const pendingInterrupts = await db.select({ id: agentWakeupRequests.id, companyId: agentWakeupRequests.companyId })
       .from(agentWakeupRequests).innerJoin(companies, eq(companies.id, agentWakeupRequests.companyId))
       .where(and(eq(agentWakeupRequests.status, "deferred_issue_execution"),
@@ -2204,6 +2222,52 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       .finally(() => {
         activeWakeupPromises.delete(promise);
       });
+    return promise;
+  }
+
+  function resumeCommentOperationWake(companyId: string, queueId: string) {
+    const promise = (async () => {
+      if ((await getSchedulingSuppression()).suppressed) return;
+      const [candidate] = await db.select().from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.id, queueId),
+        eq(agentWakeupRequests.status, "deferred_issue_execution"),
+        like(agentWakeupRequests.idempotencyKey, "issue-comment-wake:%"),
+        eq(agentWakeupRequests.requestedByActorType, "user"),
+      ));
+      if (!candidate || !candidate.requestedByActorId || !candidate.payload?.issueCommentOperationId) return;
+      const payload = parseObject(candidate.payload);
+      const issueId = readNonEmptyString(payload.issueId);
+      if (!issueId) return;
+      const wake = await db.transaction(async tx => {
+        const [task] = await tx.select().from(issues).where(and(
+          eq(issues.companyId, companyId), eq(issues.id, issueId),
+        )).for("update");
+        const [pending] = await tx.select().from(agentWakeupRequests).where(and(
+          eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.id, queueId),
+          eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId),
+        )).for("update");
+        if (!pending) return;
+        if (!task || task.assigneeAgentId !== pending.agentId || ["done", "cancelled", "in_review"].includes(task.status)) {
+          await tx.update(agentWakeupRequests).set({ status: "coalesced", finishedAt: new Date(), updatedAt: new Date(),
+            error: "Issue status or assignment changed before comment wake delivery" })
+            .where(eq(agentWakeupRequests.id, pending.id));
+          return;
+        }
+        const [company] = await tx.select({ status: companies.status }).from(companies).where(eq(companies.id, companyId));
+        if (company?.status !== "active") return;
+        return pending;
+      });
+      if (!wake) return;
+      return enqueueWakeup(wake.agentId, {
+        source: "automation", triggerDetail: "system", reason: "issue_commented",
+        payload: parseObject(wake.payload), contextSnapshot: parseObject(wake.payload?._paperclipWakeContext),
+        requestedByActorType: "user", requestedByActorId: wake.requestedByActorId,
+        queuedCommentRequestId: queueId, idempotencyKey: wake.idempotencyKey!,
+        issueStateGuard: { assigneeAgentId: wake.agentId, statuses: ["backlog", "todo", "in_progress", "blocked"] },
+      }, queueId);
+    })();
+    activeWakeupPromises.add(promise);
+    void promise.catch(() => {}).finally(() => activeWakeupPromises.delete(promise));
     return promise;
   }
 
@@ -5215,6 +5279,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
   return {
     enqueueWakeup,
+    resumeCommentOperationWake,
     dispatchPendingNativeStatusWakeups,
     startNextQueuedRunForAgent,
     countRunningRunsForAgent,

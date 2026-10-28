@@ -614,17 +614,26 @@ export const issuesApi = {
   ): Promise<IssueComment> => {
     if (issue.id !== scope.issueId || issue.companyId !== scope.companyId || !scope.userId)
       throw new Error("Comment user or task changed");
+    scope = { ...scope };
+    data = { ...data, ...(data.attachmentIds ? { attachmentIds: [...data.attachmentIds] } : {}) };
     // A retained intent always stays on its original safe path, even if the
     // latest task snapshot now requires a legacy transition. No downgrade.
     let retained: boolean;
     try { retained = sessionStorage.getItem(recoveryKey(scope, data.clientRequestId)) !== null; }
     catch { throw new Error("Browser storage is unavailable. No comment request was sent."); }
     if (retained || (issue.assigneeAgentId && !issue.conversationAgentId &&
-        ["backlog", "todo", "in_progress", "blocked"].includes(issue.status) && !data.reopen && !data.interrupt)) {
+        ["backlog", "todo", "in_progress"].includes(issue.status) && !data.reopen && !data.interrupt)) {
       if (retained && (data.reopen || data.interrupt)) throw new CommentSubmissionUnknownError();
       return issuesApi.addRecoverableComment(scope, data);
     }
-    return issuesApi.addComment(scope.issueId, data.body, data.reopen, data.interrupt, data.attachmentIds, data.clientRequestId);
+    return confirmedCommentResponse(
+      api.post<IssueComment>(`/issues/${scope.issueId}/comments`, data, { headers: {
+        "X-Paperclip-Expected-User-Id": scope.userId,
+        "X-Paperclip-Expected-Company-Id": scope.companyId,
+      } }),
+      response => hasCommentReceipt(response) && response.clientRequestId === data.clientRequestId &&
+        response.issueId === scope.issueId && response.companyId === scope.companyId && response.authorUserId === scope.userId,
+    );
   },
   // Ordinary assigned-task comments only. Persist the exact request before
   // I/O; never rebuild it from an editable draft or choose a legacy endpoint.
