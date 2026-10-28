@@ -12,6 +12,7 @@ import {
   waitForAdapterStop,
 } from "../adapter-execution-control.js";
 import { AdapterStopTimeoutError } from "../adapter-stop-timeout.js";
+import { legacyControllerBootId } from "../legacy-controller-lease.js";
 import { HttpError } from "../../errors.js";
 import { captureException } from "../../sentry.js";
 import { terminateLocalService } from "../local-service-supervisor.js";
@@ -33,6 +34,8 @@ vi.mock("../local-service-supervisor.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../local-service-supervisor.js")>(),
   terminateLocalService: vi.fn(async () => undefined),
 }));
+
+const { waitForAdapterStop: waitForAdapterStopActual } = await vi.importActual<typeof import("../adapter-execution-control.js")>("../adapter-execution-control.js");
 
 type Run = typeof heartbeatRuns.$inferSelect;
 function callbacks(db: Db) {
@@ -279,6 +282,82 @@ describe.skipIf(!support.supported)("heartbeat run-control database wiring", () 
     adapterExecutionControls.set(run.id, control);
     return { run, control };
   }
+
+  it.each([true, false])("a foreign controller Stop waits for provider proof (acknowledged: %s)", async acknowledged => {
+    const { run, control } = await ownedAdapterRun();
+    const foreignBoot = randomUUID();
+    await db.update(heartbeatRuns).set({ controllerBootId: foreignBoot, observerEpoch: 7,
+      resultJson: { retained: "keep" } }).where(eq(heartbeatRuns.id, run.id));
+    // A stale process/control with the same run key is not authority on this server.
+    runningProcesses.set(run.id, { child: { pid: 424242 } as never, graceSec: 4, processGroupId: 424242 });
+    const deps = callbacks(db);
+    const stop = createHeartbeatRunControl(db, deps).cancelRunInternal(run.id, "Stop original", {
+      resultJson: { requestedBy: "operator" },
+    });
+    const result = stop.then(value => ({ value }), error => ({ error }));
+    try {
+      await vi.waitFor(async () => {
+        const current = await deps.getRun(run.id);
+        expect(current?.status).toBe("running");
+        expect(current?.resultJson).toMatchObject({ retained: "keep", requestedBy: "operator",
+          executionCancellation: { state: "requested" } });
+      });
+      expect(control.controller.signal.aborted).toBe(false);
+      expect(terminateLocalService).not.toHaveBeenCalled();
+      expect(deps.setRunStatusFromLive).not.toHaveBeenCalled();
+      // Simulate only the real owner's committed provider receipt, never a new dispatch.
+      await db.update(heartbeatRuns).set({ status: "cancelled", resultJson: {
+        executionCancellation: { state: acknowledged ? "acknowledged" : "requested" },
+      } }).where(eq(heartbeatRuns.id, run.id));
+      const settled = await result;
+      if (acknowledged) expect(settled).toMatchObject({ value: { status: "cancelled" } });
+      else expect(settled).toMatchObject({ error: { status: 409 } });
+      expect(deps.finalizeAgentStatus).not.toHaveBeenCalled();
+      expect(deps.startNextQueuedRunForAgent).not.toHaveBeenCalled();
+      expect(terminateLocalService).not.toHaveBeenCalled();
+    } finally {
+      // Settle the baseline's incorrectly captured owner without leaving a pending test.
+      control.finish();
+      adapterExecutionControls.delete(run.id);
+    }
+  });
+
+  it.each(["controllerBootId", "observerEpoch"] as const)("fences a remote Stop against changed %s", async field => {
+    const { run, control } = await ownedAdapterRun();
+    await db.update(heartbeatRuns).set({ controllerBootId: randomUUID(), observerEpoch: 7 })
+      .where(eq(heartbeatRuns.id, run.id));
+    const deps = callbacks(db);
+    const stale = (await deps.getRun(run.id))!;
+    deps.getRun.mockResolvedValueOnce(stale);
+    await db.update(heartbeatRuns).set(field === "observerEpoch" ? { observerEpoch: 8 } : { controllerBootId: randomUUID() })
+      .where(eq(heartbeatRuns.id, run.id));
+    // Baseline returns promptly rather than blocking the red test's cleanup.
+    vi.mocked(waitForAdapterStop).mockRejectedValueOnce(new Error("wrong owner was captured"));
+    try {
+      await expect(createHeartbeatRunControl(db, deps).cancelRunInternal(run.id)).rejects.toMatchObject({ status: 409 });
+      expect((await deps.getRun(run.id))?.resultJson?.executionCancellation).toBeUndefined();
+      expect(control.controller.signal.aborted).toBe(false);
+      expect(deps.setRunStatusFromLive).not.toHaveBeenCalled();
+    } finally { vi.mocked(waitForAdapterStop).mockReset().mockImplementation(waitForAdapterStopActual); control.finish(); adapterExecutionControls.delete(run.id); }
+  });
+
+  it("preserves the owner's acknowledgement over Stop's stale requested snapshot", async () => {
+    const { run, control } = await ownedAdapterRun();
+    await db.update(heartbeatRuns).set({ controllerBootId: legacyControllerBootId,
+      resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, run.id));
+    const deps = callbacks(db);
+    vi.mocked(waitForAdapterStop).mockImplementationOnce(async () => {
+      await db.update(heartbeatRuns).set({ resultJson: {
+        executionCancellation: { state: "acknowledged", proof: "original_provider_turn" },
+        retainedDuringStop: true,
+      } }).where(eq(heartbeatRuns.id, run.id));
+    });
+    try {
+      const stopped = await createHeartbeatRunControl(db, deps).cancelRunInternal(run.id);
+      expect(stopped?.resultJson).toMatchObject({ retainedDuringStop: true,
+        executionCancellation: { state: "acknowledged", proof: "original_provider_turn" } });
+    } finally { control.finish(); adapterExecutionControls.delete(run.id); }
+  });
 
   it("answers an owned adapter Stop that is still settling with a pending conflict", async () => {
     const { run, control } = await ownedAdapterRun();

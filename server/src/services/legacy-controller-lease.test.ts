@@ -61,6 +61,36 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(saved.executionStage).toBe("dispatching");
     expect(await revokeExpiredLegacyController(db, run)).toBe(false);
   });
+  it("the lease owner consumes saved Stop intent once without blocking renewal", async () => {
+    const run = await seed();
+    await db.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } })
+      .where(eq(heartbeatRuns.id, run.id));
+    let release!: () => void;
+    const stopping = new Promise<void>(resolve => { release = resolve; });
+    const stop = vi.fn(async () => { await stopping; });
+    const controller = new AbortController();
+    const watch = watchLegacyControllerLease(db, run, controller, stop);
+    try {
+      await watch.assertOwned();
+      await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
+      await Promise.all([watch.assertOwned(), watch.assertOwned()]);
+      expect(stop).toHaveBeenCalledTimes(1);
+      expect(controller.signal.aborted).toBe(false);
+    } finally { watch.stop(); release(); }
+  });
+
+  it("a replaced observer cannot consume a saved Stop intent", async () => {
+    const run = await seed();
+    await db.update(heartbeatRuns).set({ observerEpoch: run.observerEpoch + 1,
+      resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, run.id));
+    const stop = vi.fn(async () => undefined);
+    const watch = watchLegacyControllerLease(db, run, new AbortController(), stop);
+    try {
+      await expect(watch.assertOwned()).rejects.toThrow("lease lost");
+      expect(stop).not.toHaveBeenCalled();
+    } finally { watch.stop(); }
+  });
+
   it("a replaced observer cannot renew the same controller boot lease", async () => {
     const run = await seed();
     await db.update(heartbeatRuns).set({ observerEpoch: run.observerEpoch + 1 }).where(eq(heartbeatRuns.id, run.id));
