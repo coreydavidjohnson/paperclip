@@ -1,3 +1,4 @@
+import { boundExecutionContinuation } from "./continuation-budget.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
@@ -83,7 +84,7 @@ export function deliveredContinuationCommentIds(context: unknown): {
     }
   };
   collect(wake.comments);
-  collect(continuation.messages);
+  collect(object(continuation.promptProjection ?? continuation).messages);
   return { known, ids };
 }
 
@@ -291,7 +292,8 @@ export async function buildExecutionContinuation(input: {
           )
       )[0]
     : null;
-  const priorEnvelope = object(previousRun?.context?.executionContinuation);
+  const priorSnapshot = object(previousRun?.context?.executionContinuation);
+  const priorEnvelope = object(priorSnapshot.promptProjection ?? priorSnapshot);
   const deliveredMessages = Array.isArray(priorEnvelope.messages)
     ? priorEnvelope.messages.map(object)
     : null;
@@ -442,7 +444,7 @@ export async function buildExecutionContinuation(input: {
     (hasConversationContinuationPolicy(lastTerminal.result) ||
       lastTerminal.status === "interrupted" || lastTerminal.errorCode === "process_lost")
     ? lastTerminal.id : undefined);
-  return {
+  const envelope: ExecutionContinuationEnvelope = {
     ...(interruptedRunId ? { interruptedRunId } : {}),
     ...(resumeDelta ? { resumeDelta } : {}),
     recoveryOutcomes: reconciliations
@@ -470,8 +472,12 @@ export async function buildExecutionContinuation(input: {
     // continuation-evidence section. It cannot supply objective or authority.
     completedWork: input.summary ??
       string(object(object(sourceRun?.result).nativeResult).summary)?.slice(0, 32_000) ??
-      string(object(sourceRun?.result).summary)?.slice(0, 32_000) ?? null,
+      string(object(sourceRun?.result).summary)?.slice(0, 32_000) ??
+      string(object(object(lastTerminal?.result).nativeResult).summary) ??
+      string(object(lastTerminal?.result).summary) ?? null,
     completedActions,
+    pendingInteractions: interactions.filter(row => row.status === "pending")
+      .map(row => ({ id: row.id, kind: row.kind, title: row.title, payload: row.payload })),
     unresolvedInteractionIds: interactions
       .filter((row) => row.status === "pending")
       .map((row) => row.id),
@@ -481,4 +487,5 @@ export async function buildExecutionContinuation(input: {
       summaryThroughCommentId: null,
     },
   };
+  return { ...envelope, promptProjection: boundExecutionContinuation(envelope) };
 }

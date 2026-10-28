@@ -594,9 +594,9 @@ export function decideQueuedRunStaleness(
     };
   }
 
-  if (facts.retryReasonKind === "native_safe_replacement" && facts.dependenciesBlocked) {
+  if ((facts.retryReasonKind === "native_safe_replacement" || facts.wakeReason === "transient_failure_retry") && facts.dependenciesBlocked) {
     return { stale: true, errorCode: "issue_dependencies_blocked",
-      reason: "Cancelled because issue dependencies became blocked before replacement dispatch",
+      reason: "Cancelled because issue dependencies became blocked before automatic retry dispatch",
       details: { issueId: facts.issueId,
         unresolvedBlockerIssueIds: facts.dependenciesBlocked.unresolvedBlockerIssueIds,
         unresolvedBlockerCount: facts.dependenciesBlocked.unresolvedBlockerCount } };

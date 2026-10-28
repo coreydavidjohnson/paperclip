@@ -79,6 +79,26 @@ heartbeat.ts.
   2026. Neither contains this fork's transport. Retire this carry when upstream
   provides equivalent bounded transport degradation and transition telemetry.
 
+## PER-1216 bounded wake history and dependency-safe transient dispatch
+
+- Checked upstream master `21137db805f8e265178d0293709ec0e6e3f3fc15` and
+  release `v2026.1023.0` on 2026-10-28. Native continuation still constructs
+  `full_task_history`; query projections do not impose a prompt budget.
+- Retain complete persisted snapshots and original board history. Render a
+  separate 24 KiB escaped-UTF-8 projection with all human/board direction,
+  pending questions, at most five recent agent comments and the latest existing
+  run summary as low-trust evidence. Earlier agent history has a native link.
+- Oversized human or interaction records require a full thread read before any
+  action; never truncate approval text or treat omitted authority as consent.
+  Delta baselines and delivered-comment receipts use the actual projection.
+- Recheck blocker edges at queued/final dispatch for transient retries, as the
+  existing scheduled gate already does. Explicit new user direction keeps its
+  existing admission path. Closing blockers uses the existing dependency wake.
+- Regression: `scripts/continuation-budget.test.mjs`, native continuation and
+  renderer tests. The production image gate runs these on its supported Node.
+- Retire this carry when upstream has equivalent bounded projections, intact
+  authority/receipts and the transient retry final-dispatch blocker check.
+
 ## PER-209 lossless interaction deltas on confirmed session resume
 
 - Compiler gate: keep native interaction fixtures typed to the persisted insert/result

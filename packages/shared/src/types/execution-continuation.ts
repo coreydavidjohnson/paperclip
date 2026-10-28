@@ -1,6 +1,7 @@
 /** Server-authored context. Each message retains its author and trust boundary. */
 export interface ExecutionContinuationEnvelope {
   version: 1;
+  promptProjection?: ExecutionContinuationEnvelope;
   companyId: string;
   issueId: string;
   trigger: {
@@ -67,9 +68,14 @@ export interface ExecutionContinuationEnvelope {
     operationId: string;
     result: unknown;
   }>;
+  pendingInteractions?: Array<{ id: string; kind: string; title: string | null; payload: unknown }>;
   unresolvedInteractionIds: string[];
   coverage: {
-    kind: "full_task_history" | "task_history_delta";
+    kind: "full_task_history" | "task_history_delta" | "bounded_task_history";
+    omittedAgentCommentCount?: number;
+    historyPath?: string;
+    requiresThreadFetch?: boolean;
+    pendingInteractionCount?: number;
     baseRunId?: string;
     throughCommentId: string | null;
     summaryThroughCommentId: null;

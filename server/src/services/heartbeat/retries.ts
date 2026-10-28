@@ -562,6 +562,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         : baseSchedule;
 
     const requiresIssueGate =
+      retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON ||
       isTransientWorkspaceGitScanCode(run.errorCode) ||
       hasConversationContinuationPolicy(run.resultJson) ||
       (retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON) ||
