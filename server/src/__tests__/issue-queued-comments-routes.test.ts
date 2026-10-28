@@ -35,6 +35,7 @@ import { issueRoutes } from "../routes/issues.js";
 import { getTaskDrainStatus, heartbeatService } from "../services/heartbeat.js";
 import { adapterExecutionControls, createAdapterExecutionControl, registerAdapterExecutionControl } from "../services/adapter-execution-control.js";
 import { terminalizeLegacyExecution } from "../services/legacy-execution-recovery.js";
+import { legacyControllerBootId } from "../services/legacy-controller-lease.js";
 import { authorizationService } from "../services/authorization.js";
 import { issueService } from "../services/issues.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
@@ -633,9 +634,10 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   async function ownedAdapterHandoffClient(observeRequest?: express.RequestHandler) {
     const seeded = await nativeHandoffClient("report_agent", "agent_key", observeRequest);
     await db.update(agents).set({ adapterType: "omnigent" }).where(eq(agents.id, seeded.agentId));
+    // This fixture registers the original adapter control on this controller.
     await db.update(heartbeatRuns).set({
       runtimeMode: "legacy", runtimeModeResolvedAt: new Date(), nativeIssueId: null,
-      controllerBootId: randomUUID(), controllerLeaseExpiresAt: new Date(Date.now() + 60_000),
+      controllerBootId: legacyControllerBootId, controllerLeaseExpiresAt: new Date(Date.now() + 60_000),
     }).where(eq(heartbeatRuns.id, seeded.runId));
     const control = createAdapterExecutionControl();
     let reportStop!: () => void;
@@ -1057,7 +1059,8 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
     testProcesses.set(seeded.runId, child);
     runningProcesses.set(seeded.runId, { child, graceSec: 1, processGroupId: null });
-    await db.update(heartbeatRuns).set({ processPid: child.pid }).where(eq(heartbeatRuns.id, seeded.runId));
+    // The spawned process belongs to this boot, not an absent foreign owner.
+    await db.update(heartbeatRuns).set({ processPid: child.pid, controllerBootId: legacyControllerBootId }).where(eq(heartbeatRuns.id, seeded.runId));
     // Occupy another task to inspect admission without invoking a paid provider.
     await db.insert(heartbeatRuns).values({ companyId: seeded.companyId, agentId: seeded.agentId,
       status: "running", contextSnapshot: { issueId: randomUUID() } });
