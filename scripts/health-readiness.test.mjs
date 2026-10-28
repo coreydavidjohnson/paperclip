@@ -45,7 +45,7 @@ async function fixture({ execute = () => Promise.resolve([]), missingDb = false,
     throw new Error(`Unexpected dependency call: ${name}`);
   }]));
   Object.assign(stubs, {
-    isLiveEventTransportReady: () => state.transport,
+    isLiveEventTransportReadyForRequests: () => state.transport,
     isControllerDraining: () => state.draining,
     getStartupRecoveryState: () => ({ phase: state.phase }),
     Router: () => ({

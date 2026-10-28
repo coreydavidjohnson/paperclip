@@ -29,6 +29,44 @@ describe("dedicated live-event session options and epochs", () => {
     const transport = createLiveEventTransport({ $client: pool } as unknown as Db, receive, ready, resync);
     return { clients, options, pool, password, ssl, socket, transport, ready, receive, resync };
   }
+  it("keeps API readiness for a short reconnect, without extending grace on failed retries", async () => {
+    const fixtureState = fixture();
+    expect(fixtureState.transport.isReadyForRequests()).toBe(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixtureState.transport.isReadyForRequests()).toBe(true);
+    fixtureState.options[0].onclose();
+    driver.mockImplementation(() => ({
+      unsafe: vi.fn(() => Promise.reject(new Error("unavailable"))),
+      notify: vi.fn(), end: vi.fn(() => Promise.resolve()),
+    }));
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(fixtureState.ready).toHaveBeenLastCalledWith(false);
+    expect(fixtureState.transport.isReadyForRequests()).toBe(true);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fixtureState.transport.isReadyForRequests()).toBe(false);
+    driver.mockImplementation(() => ({
+      unsafe: vi.fn(() => Promise.resolve([])), notify: vi.fn(), end: vi.fn(() => Promise.resolve()),
+    }));
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(fixtureState.transport.isReadyForRequests()).toBe(true);
+    await fixtureState.transport.stop();
+    expect(fixtureState.transport.isReadyForRequests()).toBe(false);
+  });
+  it("logs state changes once, with reasons and elapsed time but no event payload", async () => {
+    const fixtureState = fixture();
+    await vi.advanceTimersByTimeAsync(2000);
+    fixtureState.options[0].onclose();
+    fixtureState.options[0].onclose();
+    await vi.advanceTimersByTimeAsync(1000);
+    await fixtureState.transport.stop();
+    const changes = info.mock.calls.filter(call => call[1] === "live_event_transport_readiness_changed");
+    expect(changes.map(call => [call[0].ready, call[0].reason])).toEqual([
+      [false, "starting"], [true, "connected"], [false, "close"], [true, "reconnected"], [false, "stopped"],
+    ]);
+    expect(changes[2][0]).toMatchObject({ previous_ready: true, previous_state_ms: 2000 });
+    expect(changes[3][0]).toMatchObject({ previous_ready: false, previous_state_ms: 1000 });
+    expect(changes.every(call => !Object.hasOwn(call[0], "payload"))).toBe(true);
+  });
   it("reparses resolved credentials/TLS/multi-host options without sharing pool state", async () => {
     const f = fixture();
     await vi.advanceTimersByTimeAsync(0);

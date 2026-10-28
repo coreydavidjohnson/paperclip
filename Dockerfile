@@ -181,6 +181,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/controller-drain.test.ts \
     src/__tests__/db-errors.test.ts \
     src/__tests__/health-readiness-db.test.ts \
+    src/__tests__/live-events-readiness-db.test.ts \
     src/__tests__/issue-interactions-read-only-contract.test.ts \
     src/__tests__/heartbeat-wake-pool-starvation.test.ts \
     src/services/heartbeat/queue.test.ts \

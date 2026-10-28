@@ -6,7 +6,7 @@ import { sql } from "drizzle-orm";
 import { healthRoutes } from "../routes/health.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
-vi.mock("../services/live-events.js", () => ({ isLiveEventTransportReady: () => true }));
+vi.mock("../services/live-events.js", () => ({ isLiveEventTransportReadyForRequests: () => true }));
 vi.mock("../controller-drain.js", () => ({ isControllerDraining: () => false, beginControllerDrain: vi.fn() }));
 vi.mock("../startup-recovery-state.js", () => ({ getStartupRecoveryState: () => ({ phase: "ready" }) }));
 

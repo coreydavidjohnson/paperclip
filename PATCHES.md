@@ -22,6 +22,23 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-477 bounded API readiness during live-event reconnects
+
+- Keep raw transport state fail closed for UI WebSockets. After the first
+  successful LISTEN, allow ordinary API readiness for at most 30 seconds of
+  continuous transport loss. Failed reconnect attempts never reset that window.
+  Startup, explicit stop, controller drain, auth and the dedicated two-second
+  database probe remain fail closed. No agent concurrency cap or wake replay.
+- Log each raw transport readiness change once, with its fixed reason,
+  generation, prior state and monotonic elapsed duration. Do not log event
+  payloads, connection options or errors that can contain credentials.
+- The existing image-gated transport regression covers the exact grace boundary,
+  repeated failures, recovery, stop and transition logs. Infrastructure owns the
+  matching transition-count alert and the incident record.
+- Checked upstream master 65fa1cd61 and release v2026.1023.0 on October 28,
+  2026. Neither contains this fork's transport. Retire this carry when upstream
+  provides equivalent bounded transport degradation and transition telemetry.
+
 ## PER-209 lossless interaction deltas on confirmed session resume
 
 - Compiler gate: keep native interaction fixtures typed to the persisted insert/result
