@@ -1130,7 +1130,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
                 resultJson: preserveWorkspaceRestoreRecoveryMetadataSql({
                   ...resultJson,
                   ...(!running ? { executionCancellation: {
-                    ...parseObject(resultJson.executionCancellation),
+                    ...parseObject(parseObject(resultJson).executionCancellation),
                     state: "requested", requestedAt: new Date().toISOString(),
                   } } : {}),
                 }, true),

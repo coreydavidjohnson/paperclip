@@ -578,3 +578,21 @@ heartbeat.ts.
   pending review stages and genuine wait priority.
 - Retire when a released upstream service enforces equivalent first-class waits
   across supported writes and includes/navigates blocker links in board lists.
+
+## PER-1108 current-base cross-controller Stop handback
+
+- Port the historical owner-Stop contract to the current run-control module and
+  restart observer without replacing newer PER-316/PER-626 cancellation work.
+- Persist company-, controller- and observer-epoch-bound Stop intent. Only the
+  original controller interrupts its original provider handle; a requester
+  cannot signal a foreign process, replay work, or manufacture termination proof.
+- Consume intent through the existing fenced lease renewal. Keep renewing during
+  provider Stop settlement, but reject new dispatch. Lease loss stays detach-only.
+- Preserve stored Stop options and acknowledged proof, fence terminal writes
+  against ownership/proof races, and leave unverified termination pending.
+- Regressions: heartbeat/run-control.test.ts, legacy-controller-lease.test.ts,
+  heartbeat-external-observer-integration.test.ts. See
+  docs/incidents/2026-10-28-cross-controller-stop.md for failures and limitations.
+- Retire when upstream provides the equivalent owner-intent and original-handle
+  Stop contract on the extracted runtime. This entry is source evidence, not
+  independent approval or production multi-replica acceptance.
