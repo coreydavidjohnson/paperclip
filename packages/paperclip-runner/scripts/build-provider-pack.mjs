@@ -162,7 +162,8 @@ try {
   const candidateProviders = {};
   for (const provider of providerPackProviders(process.platform, process.arch, candidates)) {
     const assetPath = `provider-assets/${provider}/${process.platform}-${process.arch}`;
-    const metadata = await materializeCandidateProviderPack({ provider, outputRoot: join(temporaryRoot, assetPath) });
+    const metadata = await materializeCandidateProviderPack({ provider, outputRoot: join(temporaryRoot, assetPath),
+      cursorDistributionCachePath: process.env.PAPERCLIP_CURSOR_DISTRIBUTION_CACHE_PATH });
     if (typeof metadata?.version !== "string" || !metadata.version || metadata.version.length > 120
       || !/^sha256:[a-f0-9]{64}$/.test(metadata.profileDigest)
       || !/^sha256:[a-f0-9]{64}$/.test(metadata.closureDigest)) throw new Error("Candidate builder omitted its pinned identity");

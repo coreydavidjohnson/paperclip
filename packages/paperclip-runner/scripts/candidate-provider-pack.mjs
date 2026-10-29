@@ -32,7 +32,7 @@ export function parseProviderPackArguments(args) {
 }
 
 /** Closed source-owned builder registry; provider branches add their exact pins. */
-export async function materializeCandidateProviderPack({ provider, outputRoot }) {
+export async function materializeCandidateProviderPack({ provider, outputRoot, cursorDistributionCachePath }) {
   if (!CANDIDATES.has(provider)) throw new Error("Unknown candidate provider");
   if (provider === "pi") return materializePiDistribution({ outputRoot });
   if (provider === "copilot") {
@@ -40,7 +40,7 @@ export async function materializeCandidateProviderPack({ provider, outputRoot })
     return buildPinnedCopilotDistribution({ outputRoot });
   }
   if (provider === "cursor") {
-    const result = await materializePinnedCursorDistribution({ destination: outputRoot });
+    const result = await materializePinnedCursorDistribution({ destination: outputRoot, distributionCachePath: cursorDistributionCachePath });
     return { version: result.version,
       profileDigest: profiles.profiles.cursor.commandDigest,
       closureDigest: `sha256:${result.closureSha256}` };

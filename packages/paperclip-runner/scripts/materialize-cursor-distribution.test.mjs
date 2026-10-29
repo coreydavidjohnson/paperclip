@@ -58,6 +58,36 @@ test("refuses to overwrite any existing destination", async () => {
   await assert.rejects(materializePinnedCursorDistribution({ destination: join(root, "existing") }), /already exists/);
 });
 
+test("cached Cursor bytes must match the entire pinned execution closure", async testContext => {
+  const { copyVerifiedCursorDistribution } = await import("./materialize-cursor-distribution.mjs");
+  assert.equal(typeof copyVerifiedCursorDistribution, "function");
+  testContext.mock.method(globalThis, "fetch", async () => { throw new Error("cache must not download"); });
+  const root = await fixture();
+  const cache = join(root, "cache"); const destination = join(root, "copy");
+  await mkdir(cache);
+  await writeFile(join(cache, "node"), "node", { mode: 0o500 });
+  await writeFile(join(cache, "index.js"), "entry");
+  await mkdir(join(cache, "chunks")); await writeFile(join(cache, "chunks", "worker.js"), "worker");
+  const expected = { executable: "node", entrypoint: "index.js", closureSha256: (await cursorDistributionClosure(cache)).sha256 };
+  await symlink(join(root, "outside"), join(cache, ".paperclip-cursor-closure.json"));
+  await copyVerifiedCursorDistribution(cache, destination, expected);
+  await verifyCursorDistribution(destination, expected);
+  await assert.rejects(readFile(join(destination, ".paperclip-cursor-closure.json")), { code: "ENOENT" });
+  await writeFile(join(cache, "chunks", "worker.js"), "tampered");
+  await assert.rejects(copyVerifiedCursorDistribution(cache, join(root, "bad"), expected), /closure digest mismatch/);
+  await assert.rejects(readFile(join(root, "bad", "node")), { code: "ENOENT" });
+});
+
+test("invalid explicit distribution cache fails closed without a network fallback", async testContext => {
+  let requests = 0;
+  testContext.mock.method(globalThis, "fetch", async () => { requests += 1; return new Response("forbidden", { status: 403 }); });
+  const root = await fixture(); const cache = join(root, "cache");
+  await mkdir(cache); await writeFile(join(cache, "index.js"), "not pinned");
+  await assert.rejects(materializePinnedCursorDistribution({ distributionCachePath: cache, destination: join(root, "out") }), /closure digest mismatch/);
+  assert.equal(requests, 0);
+  await assert.rejects(readFile(join(root, "out", "index.js")), { code: "ENOENT" });
+});
+
 
 test("the isolation patch refuses unsupported, drifted, missing or repeated vendor bytes", () => {
   assert.throws(() => patchCursorRuntimeSource("not vendor bytes", "darwin-arm64"), /input digest mismatch/);

@@ -1,4 +1,5 @@
 # syntax=docker/dockerfile:1.20
+ARG PAPERCLIP_CURSOR_DISTRIBUTION_CACHE_IMAGE=scratch
 FROM node:24-trixie-slim AS base
 ARG USER_UID=1000
 ARG USER_GID=1000
@@ -154,7 +155,7 @@ RUN rm -rf packages/paperclip-runner/runner/target
 # Luma fork gate (PATCHES.md): every carried patch's regression suite and the
 # full workspace typecheck must pass before the production image is assembled.
 FROM build AS luma-patch-tests
-RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && node --test scripts/pnpm-resource-budget.test.mjs
+RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && node --test scripts/pnpm-resource-budget.test.mjs packages/paperclip-runner/scripts/materialize-cursor-distribution.test.mjs packages/paperclip-runner/scripts/candidate-provider-pack.test.mjs
 # BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
 RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
 RUN pnpm check:token-gates
@@ -259,11 +260,18 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
 # standard image so downstream Cloud compositions inherit the same artifacts.
 # Grok's native executable stays an external sandbox prerequisite; this pack
 # contains only its launcher.
+FROM ${PAPERCLIP_CURSOR_DISTRIBUTION_CACHE_IMAGE} AS cursor-distribution-cache
+
 FROM build AS runner-provider-pack
+ARG PAPERCLIP_CURSOR_DISTRIBUTION_CACHE_IMAGE
 # Unstamped local builds remain usable, but cannot qualify a remote pack.
 # Never invent a source revision to make an unqualified pack look verified.
-RUN mkdir -p /provider-pack \
+RUN --mount=from=cursor-distribution-cache,target=/cursor-cache \
+  mkdir -p /provider-pack \
   && if [ -n "${PAPERCLIP_BUILD_COMMIT}" ]; then \
+    if [ "${PAPERCLIP_CURSOR_DISTRIBUTION_CACHE_IMAGE}" != scratch ]; then \
+      export PAPERCLIP_CURSOR_DISTRIBUTION_CACHE_PATH=/cursor-cache/opt/paperclip-runner/provider-pack/provider-assets/cursor/linux-x64; \
+    fi; \
     PAPERCLIP_RUNNER_SOURCE_REVISION="${PAPERCLIP_BUILD_COMMIT}" node packages/paperclip-runner/scripts/build-provider-pack.mjs /provider-pack; \
   else \
     echo "Skipping remote provider pack: supply a full PAPERCLIP_BUILD_COMMIT to enable remote OpenCode/ACPX execution"; \

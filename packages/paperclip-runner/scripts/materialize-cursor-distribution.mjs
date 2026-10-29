@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -59,10 +59,18 @@ export async function verifyCursorDistribution(directory, distribution) {
   return closure;
 }
 
-/** A pinned archive only; never runs the vendor installer or discovers PATH. */
+export async function copyVerifiedCursorDistribution(source, destination, distribution) {
+  const cache = resolve(source);
+  await verifyCursorDistribution(cache, distribution);
+  await cp(cache, destination, { recursive: true, force: false, errorOnExist: true,
+    filter: sourcePath => sourcePath !== join(cache, TREE_MANIFEST) });
+  return verifyCursorDistribution(destination, distribution);
+}
+
 export async function materializePinnedCursorDistribution(options = {}) {
   const distribution = await cursorDistribution(options.platform, options.architecture);
   if (!options.destination) throw new Error("Cursor materialization requires an explicit destination");
+  if (options.distributionCachePath && options.archivePath) throw new Error("Cursor requires only one explicit distribution source");
   const destination = resolve(options.destination);
   await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
   try {
@@ -71,42 +79,46 @@ export async function materializePinnedCursorDistribution(options = {}) {
   } catch (error) { if (error.code !== "ENOENT") throw error; }
   const temporary = await mkdtemp(join(dirname(destination), ".cursor-install-"));
   try {
-    let archive;
-    if (options.archivePath) {
-      const stat = await lstat(options.archivePath);
-      if (!stat.isFile() || stat.size > MAX_ARCHIVE_BYTES) throw new Error("Cursor archive must be a bounded regular file");
-      archive = await readFile(options.archivePath);
+    const packageRoot = join(temporary, "unpacked", "dist-package");
+    if (options.distributionCachePath) {
+      await copyVerifiedCursorDistribution(options.distributionCachePath, packageRoot, distribution);
     } else {
-      const response = await fetch(distribution.url, { redirect: "error", signal: AbortSignal.timeout(180_000) });
-      if (!response.ok || !response.body) throw new Error(`Cursor archive download failed: ${response.status}`);
-      const chunks = [];
-      let length = 0;
-      for await (const chunk of response.body) {
-        length += chunk.length;
-        if (length > MAX_ARCHIVE_BYTES) throw new Error("Cursor archive download exceeds size limit");
-        chunks.push(chunk);
+      let archive;
+      if (options.archivePath) {
+        const stat = await lstat(options.archivePath);
+        if (!stat.isFile() || stat.size > MAX_ARCHIVE_BYTES) throw new Error("Cursor archive must be a bounded regular file");
+        archive = await readFile(options.archivePath);
+      } else {
+        const response = await fetch(distribution.url, { redirect: "error", signal: AbortSignal.timeout(180_000) });
+        if (!response.ok || !response.body) throw new Error(`Cursor archive download failed: ${response.status}`);
+        const chunks = [];
+        let length = 0;
+        for await (const chunk of response.body) {
+          length += chunk.length;
+          if (length > MAX_ARCHIVE_BYTES) throw new Error("Cursor archive download exceeds size limit");
+          chunks.push(chunk);
+        }
+        archive = Buffer.concat(chunks);
       }
-      archive = Buffer.concat(chunks);
+      if (digest(archive) !== distribution.archiveSha256) throw new Error("Cursor archive digest mismatch");
+      const archivePath = join(temporary, "archive.tar.gz");
+      const unpacked = join(temporary, "unpacked");
+      await writeFile(archivePath, archive, { mode: 0o600 });
+      await mkdir(unpacked, { mode: 0o700 });
+      // Only authenticated vendor archive bytes reach tar. Inspect entries first;
+      // links/special files are forbidden, and every path shares one fixed root.
+      for (const flag of ["-tzf", "-tvzf"]) {
+        const listing = spawnSync("/usr/bin/tar", [flag, archivePath], { encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
+        if (listing.status !== 0) throw new Error("Cursor archive listing failed");
+        const lines = listing.stdout.trim().split("\n");
+        if (flag === "-tzf" && lines.some(path => !path.startsWith("dist-package/") || path.split("/").includes("..") || /[\u0000-\u001f\u007f\\]/.test(path))) throw new Error("Cursor archive contains unsafe paths");
+        if (flag === "-tvzf" && lines.some(line => !["-", "d"].includes(line[0]))) throw new Error("Cursor archive contains links or special entries");
+      }
+      const extraction = spawnSync("/usr/bin/tar", ["-xzf", archivePath, "-C", unpacked, "--no-same-owner"], { encoding: "utf8", timeout: 120_000 });
+      if (extraction.status !== 0) throw new Error("Cursor archive extraction failed");
+      await verifyCursorDistribution(packageRoot, { ...distribution, closureSha256: distribution.vendorClosureSha256 });
+      await applyCursorRuntimePatch(packageRoot, `${distribution.platform}-${distribution.architecture}`);
     }
-    if (digest(archive) !== distribution.archiveSha256) throw new Error("Cursor archive digest mismatch");
-    const archivePath = join(temporary, "archive.tar.gz");
-    const unpacked = join(temporary, "unpacked");
-    await writeFile(archivePath, archive, { mode: 0o600 });
-    await mkdir(unpacked, { mode: 0o700 });
-    // Only authenticated vendor archive bytes reach tar. Inspect entries first;
-    // links/special files are forbidden, and every path shares one fixed root.
-    for (const flag of ["-tzf", "-tvzf"]) {
-      const listing = spawnSync("/usr/bin/tar", [flag, archivePath], { encoding: "utf8", timeout: 30_000, maxBuffer: 4 * 1024 * 1024 });
-      if (listing.status !== 0) throw new Error("Cursor archive listing failed");
-      const lines = listing.stdout.trim().split("\n");
-      if (flag === "-tzf" && lines.some(path => !path.startsWith("dist-package/") || path.split("/").includes("..") || /[\u0000-\u001f\u007f\\]/.test(path))) throw new Error("Cursor archive contains unsafe paths");
-      if (flag === "-tvzf" && lines.some(line => !["-", "d"].includes(line[0]))) throw new Error("Cursor archive contains links or special entries");
-    }
-    const extraction = spawnSync("/usr/bin/tar", ["-xzf", archivePath, "-C", unpacked, "--no-same-owner"], { encoding: "utf8", timeout: 120_000 });
-    if (extraction.status !== 0) throw new Error("Cursor archive extraction failed");
-    const packageRoot = join(unpacked, "dist-package");
-    await verifyCursorDistribution(packageRoot, { ...distribution, closureSha256: distribution.vendorClosureSha256 });
-    await applyCursorRuntimePatch(packageRoot, `${distribution.platform}-${distribution.architecture}`);
     const closure = await verifyCursorDistribution(packageRoot, distribution);
     // Record the pinned inventory for a later runtime lease. Its digest must be
     // checked against the checked-in distribution pin before trusting entries.

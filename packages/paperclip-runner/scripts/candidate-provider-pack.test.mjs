@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseProviderPackArguments, materializeCandidateProviderPack, providerPackProviders, providerPackManifestFields } from "./candidate-provider-pack.mjs";
 
 test("candidate options stay explicit and supported native assets are included by default", () => {
@@ -49,5 +52,14 @@ test("Pi pack selection reaches its pinned builder and rejects unsafe output bef
     throw new Error("Unexpected download for invalid Pi output");
   });
   await assert.rejects(materializeCandidateProviderPack({ provider: "pi", outputRoot: "relative-pi-output" }), /Pi distribution output must be absolute/);
+  assert.equal(requests, 0);
+});
+
+test("Cursor pack selection passes its explicit cache to the pinned verifier", async testContext => {
+  let requests = 0;
+  testContext.mock.method(globalThis, "fetch", async () => { requests += 1; return new Response("forbidden", { status: 403 }); });
+  const root = await mkdtemp(join(tmpdir(), "cursor-pack-cache-"));
+  testContext.after(() => rm(root, { recursive: true, force: true }));
+  await assert.rejects(materializeCandidateProviderPack({ provider: "cursor", outputRoot: join(root, "output"), cursorDistributionCachePath: join(root, "missing-cache") }), { code: "ENOENT" });
   assert.equal(requests, 0);
 });
