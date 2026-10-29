@@ -97,6 +97,10 @@ export function subscribeLiveEventTransportResync(listener: () => void) {
 
 export function isLiveEventTransportReady() { return transportReady; }
 
+export function isLiveEventTransportReadyForRequests() {
+  return transport?.isReadyForRequests() ?? transportReady;
+}
+
 export function subscribeLiveEventTransportState(listener: (ready: boolean) => void) {
   uiEmitter.on(transportState, listener);
   return () => uiEmitter.off(transportState, listener);

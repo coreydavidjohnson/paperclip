@@ -18,6 +18,9 @@ export function createLiveEventTransport(
   let sequence = 0;
   let stopped = false;
   let ready = false;
+  let initialized = false;
+  let connectedOnce = false;
+  let stateStartedAt = performance.now();
   let generation = 0;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let client: ReturnType<typeof postgres> | undefined;
@@ -25,13 +28,26 @@ export function createLiveEventTransport(
   const pending: string[] = [];
   const seen = new Map<string, number>();
 
-  function readiness(value: boolean) { ready = value; setReady(value); }
+  function readiness(value: boolean, reason: string) {
+    if (initialized && ready === value) return;
+    const now = performance.now();
+    logger.info({
+      event: "live_event_transport_readiness_changed",
+      ready: value, previous_ready: initialized ? ready : null,
+      reason, generation, previous_state_ms: Math.round(now - stateStartedAt),
+    }, "live_event_transport_readiness_changed");
+    initialized = true;
+    ready = value;
+    connectedOnce ||= value;
+    stateStartedAt = now;
+    setReady(value);
+  }
 
   function fail(epoch: number, reason: string) {
     if (epoch !== generation || stopped) return;
     logger.warn({ reason, generation: epoch }, "live_event_transport_failed");
     generation += 1;
-    readiness(false);
+    readiness(false, reason);
     pending.length = 0; // A lost response is not evidence that NOTIFY did not commit.
     seen.clear();
     draining = false;
@@ -99,7 +115,7 @@ export function createLiveEventTransport(
     try {
       await bounded(sql.unsafe(`LISTEN ${CHANNEL}`), epoch);
       if (stopped || epoch !== generation) return;
-      readiness(true);
+      readiness(true, connectedOnce ? "reconnected" : "connected");
       timer = setTimeout(() => { void probe(epoch); }, 1000);
     } catch { fail(epoch, "probe_error"); }
   }
@@ -136,9 +152,13 @@ export function createLiveEventTransport(
     finally { if (epoch === generation) draining = false; }
   }
 
-  readiness(false);
+  readiness(false, "starting");
   connect();
   return {
+    isReadyForRequests() {
+      return !stopped && (ready ||
+        (connectedOnce && performance.now() - stateStartedAt < 30_000));
+    },
     publish(event: LiveEvent) {
       if (!ready || stopped) return;
       try {
@@ -161,7 +181,7 @@ export function createLiveEventTransport(
       if (stopped) return;
       stopped = true;
       generation += 1;
-      readiness(false);
+      readiness(false, "stopped");
       clearTimeout(timer);
       pending.length = 0;
       const old = client;

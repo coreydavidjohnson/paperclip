@@ -1,5 +1,5 @@
 import { apiMetrics } from "../api-metrics.js";
-import { isLiveEventTransportReady } from "../services/live-events.js";
+import { isLiveEventTransportReadyForRequests } from "../services/live-events.js";
 import { beginControllerDrain, isControllerDraining } from "../controller-drain.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
@@ -155,7 +155,7 @@ export function healthRoutes(
   // Fixed codes only: database errors may contain connection strings or SQL.
   function readinessStateReasons() {
     const reasons: string[] = [];
-    if (!isLiveEventTransportReady()) reasons.push("transport_not_ready");
+    if (!isLiveEventTransportReadyForRequests()) reasons.push("transport_not_ready");
     if (isControllerDraining()) reasons.push("controller_draining");
     if (getStartupRecoveryState().phase !== "ready") reasons.push("startup_not_ready");
     return reasons;
