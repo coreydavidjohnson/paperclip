@@ -1904,6 +1904,35 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const strandedIssues = new Set<string>();
     for (const { wake, issueStatus } of strandedQueues) {
       const issueKey = `${wake.companyId}:${String(wake.payload?.issueId)}`;
+      if (wake.requestedByActorType === "user" && queuedCommentIdsFromWakePayload(wake.payload).length &&
+          parseObject(wake.payload?.executionWait).reason === "execution_recovery" &&
+          !wake.idempotencyKey?.startsWith("chat-inbound:") && !wake.payload?.dotRequestId &&
+          wake.payload?.mutation !== "interaction" && !["done", "cancelled"].includes(issueStatus)) {
+        const [openRecovery] = await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, wake.companyId),
+          sql`${issueRecoveryActions.sourceIssueId}::text = ${String(wake.payload?.issueId)}`,
+          inArray(issueRecoveryActions.status, ["active", "escalated"]),
+        )).limit(1);
+        if (!openRecovery) {
+          if (strandedIssues.has(issueKey)) continue;
+          strandedIssues.add(issueKey);
+          const context = withQueuedCommentIdsInRunContext(parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY]),
+            queuedCommentIdsFromWakePayload(wake.payload));
+          await enqueueWakeup(wake.agentId, {
+            source: wake.source as WakeupOptions["source"],
+            triggerDetail: wake.triggerDetail as WakeupOptions["triggerDetail"],
+            reason: readNonEmptyString(context.wakeReason) ?? wake.reason,
+            payload: parseObject(wake.payload), contextSnapshot: context,
+            requestedByActorType: "user", requestedByActorId: wake.requestedByActorId,
+            queuedCommentRequestId: wake.id,
+            idempotencyKey: wake.idempotencyKey ?? undefined,
+            issueStateGuard: { assigneeAgentId: wake.agentId, statuses: [issueStatus] },
+          }, wake.id).catch(err => {
+            logger.warn({ err, queueId: wake.id }, "failed to re-admit saved comment after recovery resolved");
+          });
+          continue;
+        }
+      }
       if (["todo", "in_progress"].includes(issueStatus) && wake.requestedAt.getTime() <= Date.now() - 120_000 &&
           !wake.idempotencyKey?.startsWith("chat-inbound:") && !wake.payload?.dotRequestId &&
           ((!queuedCommentIdsFromWakePayload(wake.payload).length && wake.payload?.mutation !== "interaction") ||

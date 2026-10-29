@@ -209,6 +209,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/heartbeat-run-output.test.ts \
     src/__tests__/heartbeat-stranded-wakes-db.test.ts \
     src/__tests__/heartbeat-process-recovery.test.ts \
+    src/__tests__/heartbeat-stranded-wakes-db.test.ts \
     src/__tests__/live-events-transport.test.ts \
     src/__tests__/live-events-ws.test.ts \
     src/__tests__/home-lab-delegation.test.ts \
