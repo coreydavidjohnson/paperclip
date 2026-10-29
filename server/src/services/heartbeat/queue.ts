@@ -1905,7 +1905,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     for (const { wake, issueStatus } of strandedQueues) {
       const issueKey = `${wake.companyId}:${String(wake.payload?.issueId)}`;
       if (wake.requestedByActorType === "user" && queuedCommentIdsFromWakePayload(wake.payload).length &&
-          parseObject(wake.payload?.executionWait).reason === "execution_recovery" &&
+          ["execution_recovery", "execution_reconciliation_required"].includes(String(parseObject(wake.payload?.executionWait).reason)) &&
           !wake.idempotencyKey?.startsWith("chat-inbound:") && !wake.payload?.dotRequestId &&
           wake.payload?.mutation !== "interaction" && !["done", "cancelled"].includes(issueStatus)) {
         const [openRecovery] = await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
@@ -3494,11 +3494,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             reconciledSourceRunId = sourceRunId;
           }
 
-          let continuationWait = { reason: "execution_recovery", message: "Waiting for execution recovery. Your message is saved." };
+          let continuationWait: { reason: string; message: string } | null = null;
           const deferBlockedExecution = async (
             executionBlocker: Pick<NonNullable<Awaited<ReturnType<typeof getExecutionBlocker>>>, "recoveryActionId" | "nextAction">,
           ) => {
-            const condition = { recoveryActionId: executionBlocker.recoveryActionId, ...continuationWait };
+            const condition = { recoveryActionId: executionBlocker.recoveryActionId,
+              ...(continuationWait ?? { reason: "execution_reconciliation_required", message: executionBlocker.nextAction }) };
             if (executionWaitRequestId) {
               await tx.update(agentWakeupRequests).set({
                 payload: sql`jsonb_set(coalesce(${agentWakeupRequests.payload}, '{}'::jsonb), '{executionWait}', ${JSON.stringify(condition)}::jsonb)`,
@@ -4536,6 +4537,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             commentId: wakeCommentId ?? null, failedRunId: opts.failedRunId, successorRunId: explicitContinuationRunId,
             queuedCommentInterruptId: opts.queuedCommentInterruptId,
             queuedCommentRequestId: opts.queuedCommentRequestId,
+            onBlocked: (reason, message) => { continuationWait = { reason, message }; },
           });
           if (!explicitContinuation && executionBlocker) return deferBlockedExecution(executionBlocker);
           if (explicitContinuation) {

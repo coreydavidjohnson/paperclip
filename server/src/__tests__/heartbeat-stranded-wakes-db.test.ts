@@ -167,7 +167,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     expect(runs.find(r=>r.id!==f.run.id)?.contextSnapshot?.ordinal).toBe(0);
   });
 
-  it.each(["native", "legacy"])("admits a resolved recovery comment after a %s run exactly once", async runtimeMode => {
+  async function savedCommentFixture(runtimeMode: string) {
     const fixtureData = await fixture("in_progress");
     await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, fixtureData.agent.id));
     await db.update(heartbeatRuns).set({ runtimeMode }).where(eq(heartbeatRuns.id, fixtureData.run.id));
@@ -182,6 +182,12 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
           message: "Waiting for execution recovery. Your message is saved." },
         _paperclipWakeContext: { issueId: fixtureData.issue.id, wakeReason: "issue_commented" },
       }, [comment.id]) }).returning();
+    return { ...fixtureData, comment, wake };
+  }
+
+  it.each(["native", "legacy"])("admits a resolved recovery comment after a %s run exactly once", async runtimeMode => {
+    const fixtureData = await savedCommentFixture(runtimeMode);
+    const { comment, wake } = fixtureData;
     const secondQueue = createHeartbeatQueue(db, fixtureData.deps);
     await Promise.all([fixtureData.queue.resumeQueuedRuns(), secondQueue.resumeQueuedRuns()]);
     await fixtureData.queue.resumeQueuedRuns();
@@ -193,6 +199,32 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
     expect(receipt.status).not.toBe("deferred_issue_execution");
     expect(receipt.runId).toBe(successor.id);
+  });
+
+  it("keeps a saved comment behind a resolved no-replay hold with its actual next action", async () => {
+    const fixtureData = await savedCommentFixture("native");
+    const nextAction = "Inspect the external outcome before authorizing more work.";
+    await db.update(issueRecoveryActions).set({ nextAction, evidence: {
+      runId: fixtureData.run.id, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" },
+    } }).where(eq(issueRecoveryActions.sourceIssueId, fixtureData.issue.id));
+    await fixtureData.queue.resumeQueuedRuns();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id))).toHaveLength(1);
+    expect(fixtureData.deps.executeRun).not.toHaveBeenCalled();
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
+    expect(receipt.status).toBe("deferred_issue_execution");
+    expect(receipt.payload?.executionWait).toMatchObject({ reason: "execution_reconciliation_required", message: nextAction });
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixtureData.issue.id));
+    expect(action.evidence.automaticRecovery).toEqual({ replay: "blocked", actionOutcome: "unknown" });
+  });
+
+  it.each(["deleted", "reassigned", "live_run"])("does not start a successor for a %s saved-comment wake", async gate => {
+    const fixtureData = await savedCommentFixture("native");
+    if (gate === "deleted") await db.update(issueComments).set({ deletedAt: new Date() }).where(eq(issueComments.id, fixtureData.comment.id));
+    if (gate === "reassigned") await db.update(issues).set({ assigneeAgentId: null }).where(eq(issues.id, fixtureData.issue.id));
+    if (gate === "live_run") await db.update(heartbeatRuns).set({ status: "running", finishedAt: null }).where(eq(heartbeatRuns.id, fixtureData.run.id));
+    await fixtureData.queue.resumeQueuedRuns();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id))).toHaveLength(1);
+    expect(fixtureData.deps.executeRun).not.toHaveBeenCalled();
   });
 
   it("does not let an old generic wake hide newer interaction delivery", async () => {
