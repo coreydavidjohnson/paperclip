@@ -1,4 +1,5 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { legacyExecutionWasReleased } from "../legacy-execution-release.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { recoveryRunSelect, retryAccountingRunSelect } from "../recovery-run-query.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
@@ -4791,7 +4792,9 @@ export function recoveryService(
               eq(heartbeatRuns.id, executionRecoverySource.id),
             ),
           );
-        if (source && await legacyExecutionNeedsReconciliationWithEvidence(db, source)) {
+        if (source && await legacyExecutionWasReleased(db, issue, source)) {
+          latestRun = null;
+        } else if (source && await legacyExecutionNeedsReconciliationWithEvidence(db, source)) {
           await terminalizeLegacyExecution({
             db,
             run: source,

@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { EXECUTION_PREPARATION_SPAN_ATTRS, runWithRuntimeParent } from "@paperclipai/adapter-utils/acpx-engine/startup-timing";
 import { createHash } from "node:crypto";
 import { isSpanContextValid, ROOT_CONTEXT, SpanStatusCode, trace, type Context } from "@opentelemetry/api";
+import { logger } from "../middleware/logger.js";
 
 type PreparationPhase = "environment_selection" | "execution_configuration" | "session"
   | "workspace" | "github_environment" | "github_launchers" | "run_output"
@@ -182,7 +183,17 @@ export function measureToolDiscovery<T>(schedule: (work: () => Promise<T>) => Pr
 }
 
 export function createRunPreparationTiming(runId: string, scope: "heartbeat.prepare" | "native.controller" = "heartbeat.prepare") {
-  return <T>(phase: PreparationPhase, work: () => T | Promise<T>): Promise<T> => measure(runId, `${scope}.${phase}`, work);
+  return async <T>(phase: PreparationPhase, work: () => T | Promise<T>): Promise<T> => {
+    const startedAt = performance.now();
+    let outcome = "succeeded";
+    try { return await measure(runId, `${scope}.${phase}`, work); }
+    catch (error) { outcome = "failed"; throw error; }
+    finally {
+      const durationMs = Math.round(performance.now() - startedAt);
+      if (durationMs >= 30_000) logger.warn({ runId, phase: `${scope}.${phase}`, durationMs, outcome },
+        "Run preparation phase exceeded 30 seconds");
+    }
+  };
 }
 
 const workspaceSyncDetailPhases = {

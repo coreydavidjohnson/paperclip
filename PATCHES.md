@@ -22,6 +22,43 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-1199 isolated source lock keepalive
+
+- Backport upstream 0b266bd08 (PR 16956), which uses the existing workspace
+  keepalive on the actual advisory-lock transaction during source preparation.
+  Honor the database idle timeout. Keep transaction-scoped mutual exclusion,
+  reentrancy and try-only behavior. Do not raise the database timeout or replay
+  failed setup work. The generic dedicated-connection callback is outside the
+  reserved transaction, so a keepalive there would not keep this lock alive.
+- A real-Postgres regression configures a one-second idle timeout, holds the
+  lock for 2.5 seconds, proves a second connection remains excluded, then
+  verifies release and exactly one execution of the work callback. Before the
+  backport it fails with CONNECTION_CLOSED at the database timeout.
+- Retire when the fork base includes upstream 0b266bd08.
+- Log preparation phases over 30 seconds with run ID, phase, elapsed time and
+  outcome even when tracing is disabled. Do not include errors, credentials or
+  workspace contents. This distinguishes acquisition, realization and earlier
+  setup phases on the next incident rather than guessing from total run delay.
+
+## PER-316 released legacy failure freshness
+
+- An old terminal legacy run cannot undo a later release to todo or in
+  progress. Require a company-scoped blocked-to-released status audit, or a
+  settled block by that exact run followed by the current released status.
+  Description edits alone are not release evidence. Use the stable finished
+  timestamp, not the run update timestamp rewritten by recovery.
+- Check at stranded-work discovery, recovery-action creation under the issue
+  lock, and automatic settlement under the issue/coordinator/run/action locks.
+  Current failures still block. Existing no-replay, workspace repair, Stop,
+  approval and dependency gates remain authoritative. A resolved action with
+  replay blocked can still defer a wake. A status release is not permission
+  to repeat actions with unknown outcomes.
+- Real-Postgres regressions cover both release states, pending settlement,
+  equal clock ticks, newer failures, metadata-only edits, missing timestamps,
+  company scope and retained unsafe-workspace holds. The production image
+  patch-test stage includes the regression.
+- Retire when upstream enforces equivalent release freshness at these paths.
+
 ## PER-477 bounded API readiness during live-event reconnects
 
 - Keep raw transport state fail closed for UI WebSockets. After the first

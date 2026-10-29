@@ -32,6 +32,7 @@ import { parseIssueExecutionState } from "./issue-execution-policy.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
+import { legacyExecutionWasReleased } from "./legacy-execution-release.js";
 
 /** An operator records observed outcomes; this is not permission to blindly retry. */
 export async function validateExecutionReconciliation(input: {
@@ -681,6 +682,7 @@ export async function settleUnrecoverableExecutions(
         )
           return;
         const current =
+          !(await legacyExecutionWasReleased(tx as unknown as Db, task, run)) &&
           !isSupersededConversationRun(task, run) &&
           action.returnOwnerAgentId !== null &&
           task.assigneeAgentId === action.returnOwnerAgentId &&

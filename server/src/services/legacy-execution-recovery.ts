@@ -13,6 +13,7 @@ import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
 import { logActivity } from "./activity-log.js";
 import { isSupersededConversationRun } from "./agent-conversations.js";
 import { issueService } from "./issues.js";
+import { legacyExecutionWasReleased } from "./legacy-execution-release.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 export const LEGACY_RECOVERY_CAUSE = "legacy_execution_requires_reconciliation";
@@ -224,6 +225,7 @@ export async function terminalizeLegacyExecution(input: {
         fingerprint, attemptCount: 1 });
       return updated;
     }
+    if (task && await legacyExecutionWasReleased(tx as unknown as Db, task, updated)) return updated;
     const review = task?.status === "in_review" ? parseIssueExecutionState(task.executionState) : null;
     const isCurrentReviewer = review?.status === "pending" &&
       review.currentParticipant?.type === "agent" && review.currentParticipant.agentId === run.agentId;
