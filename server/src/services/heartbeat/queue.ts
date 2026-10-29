@@ -33,7 +33,8 @@ import {
   admitExplicitNativeContinuation,
   undeliveredLegacyUserCommentIds,
 } from "../explicit-native-continuation.js";
-import { canRetryStoppedRun } from "../cancelled-native-startup.js";
+import { canRetryStoppedRun, isCancelledNativeStartup } from "../cancelled-native-startup.js";
+import { acknowledgedNativeStopExecutionHasStopped } from "../acknowledged-native-stop.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
 import { isPreDispatchDependencyWaitVerified, isUnusedExecutionAdmissionVerified } from "../pre-dispatch-review-wait.js";
 import { isConversationAdapter } from "../conversation-continuation.js";
@@ -3643,9 +3644,19 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
               isNull(agentWakeupRequests.runId),
               inArray(agentWakeupRequests.status, ["deferred_issue_execution", "skipped", "coalesced"])));
-            const stoppedBeforeComment = latest?.status === "cancelled" && !newUserComment;
+            const runOnlyStopSettled = latest?.runtimeMode === "native" && opts.queuedCommentRequestId &&
+              !liveRunExecutions.has(latest.id) &&
+              await acknowledgedNativeStopExecutionHasStopped(tx as unknown as Db, latest);
+            const [startupCoordinator] = latest?.status === "cancelled" && newUserComment
+              ? await tx.select().from(nativeRunFinalizations).where(and(
+                  eq(nativeRunFinalizations.companyId, issue.companyId), eq(nativeRunFinalizations.runId, latest.id),
+                )) : [];
+            const startupCanSettle = latest?.status === "cancelled" && newUserComment &&
+              await isCancelledNativeStartup(tx as unknown as Db, latest, startupCoordinator) &&
+              Boolean(await getExecutionBlocker(tx as unknown as Db, issue.companyId, issue.id));
+            const stoppedBeforeComment = latest?.status === "cancelled" && !newUserComment && !runOnlyStopSettled;
             if (stoppedBeforeComment ||
-                (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
+                (latest && !startupCanSettle && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
               if (opts.queuedCommentRequestId) {
                 continuationWait = stoppedBeforeComment
                   ? { reason: "message_predates_stop", message: "This message arrived before the previous run stopped. Send a new message to continue." }
