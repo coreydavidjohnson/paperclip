@@ -52,3 +52,9 @@ saved-comment recovery path. Duplicate sweepers must create only one successor.
 
 Full image qualification, deployed-image canary and the post-release check of
 the original saved comment IDs remain distinct from these isolated tests.
+
+Follow-up review retained the existing unused-admission exception: a cancelled,
+never-started `execution_reconciliation_required` receipt without provider
+process/session identity is not an operator Stop. The saved-comment tests cover
+that sequence alongside a genuine previously started Stop. Both still require
+normal cleanup and execution-authority checks.

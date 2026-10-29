@@ -3632,10 +3632,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
               isNull(agentWakeupRequests.runId),
               inArray(agentWakeupRequests.status, ["deferred_issue_execution", "skipped", "coalesced"])));
-            if ((latest?.status === "cancelled" && !newUserComment) ||
+            const unusedAdmission = latest?.status === "cancelled" && !latest.startedAt &&
+              latest.errorCode === "execution_reconciliation_required" &&
+              !latest.processPid && !latest.processGroupId && !latest.nativeSessionId;
+            const stoppedBeforeComment = latest?.status === "cancelled" && !newUserComment &&
+              !(opts.queuedCommentRequestId && unusedAdmission);
+            if (stoppedBeforeComment ||
                 (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
               if (opts.queuedCommentRequestId) {
-                continuationWait = latest?.status === "cancelled" && !newUserComment
+                continuationWait = stoppedBeforeComment
                   ? { reason: "message_predates_stop", message: "This message arrived before the previous run stopped. Send a new message to continue." }
                   : { reason: "cleanup_pending", message: "Waiting for the previous run's cleanup to finish. Your message is saved." };
                 return deferBlockedExecution({ recoveryActionId: null, nextAction: continuationWait.message });
