@@ -32,6 +32,37 @@ const support = await getEmbeddedPostgresTestSupport();
   let db: ReturnType<typeof createDb>;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("explicit-native-message-"); db = createDb(database.connectionString); }, 90_000);
   afterAll(async () => { await database?.cleanup(); });
+  it.each(["done", "cancelled"])("retires saved legacy comments on a %s issue without re-queuing recovery wakes", async status => {
+    const fixture = await seed();
+    await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, fixture.agentId));
+    await db.update(issues).set({ status }).where(eq(issues.id, fixture.issueId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", runtimeModeResolvedAt: new Date(),
+      errorCode: "omnigent_recovery_evidence_missing" }).where(eq(heartbeatRuns.id, fixture.sourceRunId));
+    await db.update(issueRecoveryActions).set({ ownerType: "board", returnOwnerAgentId: fixture.agentId,
+      cause: "legacy_execution_requires_reconciliation" }).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId));
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId: fixture.companyId, agentId: fixture.agentId,
+      source: "on_demand", reason: "issue_commented", status: "deferred_issue_execution",
+      requestedByActorType: "user", requestedByActorId: "board",
+      payload: { issueId: fixture.issueId, commentId: fixture.commentId, resumeIntent: true,
+        executionWait: { reason: "execution_recovery" },
+        _paperclipWakeContext: { issueId: fixture.issueId, wakeReason: "issue_commented", wakeCommentIds: [fixture.commentId] } },
+    }).returning();
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.resumeQueuedRuns();
+    const receipts = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, fixture.companyId));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ id: wake!.id, status: "skipped", error: "issue_terminal" });
+    expect(receipts[0]!.finishedAt).toBeInstanceOf(Date);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, fixture.issueId));
+    expect(issue!.status).toBe(status);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, fixture.companyId))).toHaveLength(1);
+    expect(await db.select().from(issueComments).where(eq(issueComments.id, fixture.commentId))).toHaveLength(1);
+    const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixture.issueId));
+    expect(action).toMatchObject({ status: "resolved", outcome: "blocked",
+      evidence: { automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } } });
+  });
+
   async function seed() {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
     const sourceRunId = randomUUID(), successorRunId = randomUUID();

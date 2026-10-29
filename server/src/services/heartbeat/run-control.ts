@@ -531,6 +531,19 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     let commentIds = queuedCommentIdsFromWakePayload(payload);
     const issueId = readNonEmptyString(payload.issueId);
     if (!issueId || wake.idempotencyKey?.startsWith("chat-inbound:")) return;
+    const terminal = await db.transaction(async tx => {
+      const [task] = await tx.select({ status: issues.status }).from(issues).where(and(
+        eq(issues.companyId, companyId), eq(issues.id, issueId),
+      )).for("update");
+      if (!task || !["done", "cancelled"].includes(task.status)) return false;
+      const now = new Date();
+      await tx.update(agentWakeupRequests).set({
+        status: "skipped", error: "issue_terminal", finishedAt: now, updatedAt: now,
+      }).where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.id, queueId),
+        eq(agentWakeupRequests.status, "deferred_issue_execution")));
+      return true;
+    });
+    if (terminal) return;
     const response = await readQueuedInteractionResponse(db, companyId, issueId, payload);
     if (!commentIds.length && !response) return;
     // Resolved cards are immutable input. Only an explicit Interrupt click can
