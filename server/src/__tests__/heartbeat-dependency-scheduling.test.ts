@@ -840,6 +840,49 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       .where(eq(heartbeatRuns.id, activeRunId));
   });
 
+  it("keeps equal-priority issue runs FIFO across statuses", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const activeIssueId = randomUUID();
+    const olderIssueId = randomUUID();
+    const newerIssueId = randomUUID();
+    const order: string[] = [];
+    let releaseActive!: () => void;
+    const activeGate = new Promise<void>((resolve) => { releaseActive = resolve; });
+
+    await db.insert(companies).values({ id: companyId, name: "FIFO", issuePrefix: `F${companyId.slice(0, 6)}`, defaultResponsibleUserId: "responsible-user" });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "FIFO agent", role: "engineer", status: "active", adapterType: "codex_local", runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } });
+    await db.insert(issues).values([
+      { id: activeIssueId, companyId, title: "Active", status: "todo", assigneeAgentId: agentId, responsibleUserId: "responsible-user" },
+      { id: olderIssueId, companyId, title: "Older todo", status: "todo", priority: "high", assigneeAgentId: agentId, responsibleUserId: "responsible-user" },
+      { id: newerIssueId, companyId, title: "Newer in progress", status: "in_progress", priority: "high", assigneeAgentId: agentId, responsibleUserId: "responsible-user" },
+    ]);
+    mockAdapterExecute.mockImplementation(async (context: any) => {
+      order.push(context.context.issueId);
+      if (order.length === 1) await activeGate;
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, context.context.issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "FIFO test", provider: "test", model: "test-model" };
+    });
+    const wake = (issueId: string) => heartbeat.wakeup(agentId, { source: "assignment", triggerDetail: "system", reason: "issue_assigned", payload: { issueId }, contextSnapshot: { issueId } });
+    try {
+      await wake(activeIssueId);
+      expect(await waitForCondition(async () => order.length === 1, 30_000)).toBe(true);
+      const olderRun = await wake(olderIssueId);
+      const newerRun = await wake(newerIssueId);
+      expect(olderRun).not.toBeNull();
+      expect(newerRun).not.toBeNull();
+      await db.update(heartbeatRuns).set({ createdAt: new Date(Date.now() - 2_000) }).where(eq(heartbeatRuns.id, olderRun!.id));
+      await db.update(heartbeatRuns).set({ createdAt: new Date(Date.now() - 1_000) }).where(eq(heartbeatRuns.id, newerRun!.id));
+      expect(order).toEqual([activeIssueId]);
+    } finally {
+      releaseActive();
+    }
+    expect(await waitForCondition(async () => order.includes(olderIssueId) && order.includes(newerIssueId), 30_000)).toBe(true);
+    await heartbeat.drainActiveRunExecutions();
+    expect(order.slice(0, 3)).toEqual([activeIssueId, olderIssueId, newerIssueId]);
+  }, 60_000);
+
   it("honors maxConcurrentRuns 1 by leaving a second assignment wake queued", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

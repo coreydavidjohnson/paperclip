@@ -242,4 +242,28 @@ describeEmbeddedPostgres("heartbeat queued-run claim isolation", () => {
     expect(await runStatus(rejectedRunId)).toMatchObject({ status: "cancelled" });
     expect(await runStatus(healthyRunId)).toMatchObject({ status: "succeeded" });
   });
+
+  it("starts non-issue runs in queue order", async () => {
+    const { companyId, agentId } = await insertAgent();
+    const { runId: olderRunId } = await insertClaimableRun(companyId, agentId, new Date(Date.now() - 2_000));
+    const { runId: newerRunId } = await insertClaimableRun(companyId, agentId, new Date(Date.now() - 1_000));
+    let releaseOlder!: () => void;
+    const olderGate = new Promise<void>((resolve) => { releaseOlder = resolve; });
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await olderGate;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "FIFO test", provider: "test", model: "test-model" };
+    });
+
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await vi.waitFor(() => expect(mockAdapterExecute).toHaveBeenCalledOnce(), { timeout: 30_000 });
+      expect(await runStatus(olderRunId)).toMatchObject({ status: "running" });
+      expect(await runStatus(newerRunId)).toMatchObject({ status: "queued" });
+    } finally {
+      releaseOlder();
+    }
+    await heartbeat.drainActiveRunExecutions();
+    expect(await runStatus(olderRunId)).toMatchObject({ status: "succeeded" });
+    expect(await runStatus(newerRunId)).toMatchObject({ status: "succeeded" });
+  }, 60_000);
 });
