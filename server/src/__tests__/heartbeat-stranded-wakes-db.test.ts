@@ -227,6 +227,45 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     expect(fixtureData.deps.executeRun).not.toHaveBeenCalled();
   });
 
+  it.each(["approval", "question", "cleanup", "finalizing", "agent_paused"])("retains a saved comment behind %s, then admits it after that gate clears", async gate => {
+    const fixtureData = await savedCommentFixture("native");
+    if (gate === "approval") {
+      const [approval] = await db.insert(approvals).values({ companyId: fixtureData.company.id,
+        type: "governed_action", status: "pending", payload: {} }).returning();
+      await db.insert(issueApprovals).values({ companyId: fixtureData.company.id,
+        issueId: fixtureData.issue.id, approvalId: approval.id });
+    }
+    if (gate === "question") await db.insert(issueThreadInteractions).values({ companyId: fixtureData.company.id,
+      issueId: fixtureData.issue.id, kind: "question", status: "pending", payload: { questions: [] } as never });
+    if (gate === "cleanup") await db.insert(environmentLeases).values({ companyId: fixtureData.company.id,
+      heartbeatRunId: fixtureData.run.id, issueId: fixtureData.issue.id, status: "pending_cleanup" });
+    if (gate === "finalizing") await db.insert(nativeRunFinalizations).values({ companyId: fixtureData.company.id,
+      runId: fixtureData.run.id, issueId: fixtureData.issue.id, phase: "pending" });
+    if (gate === "agent_paused") fixtureData.deps.getAgentInvokability.mockResolvedValue({
+      invokable: false, reason: "paused", message: "Resume the paused agent before this message can start.",
+    });
+    await fixtureData.queue.resumeQueuedRuns();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id))).toHaveLength(1);
+    expect(fixtureData.deps.executeRun).not.toHaveBeenCalled();
+    const [held] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
+    expect(held.status).toBe("deferred_issue_execution");
+    expect(held.payload?.executionWait).toMatchObject({ reason: gate === "agent_paused" ? "agent.not_invokable"
+      : gate === "approval" || gate === "question" ? "decision_pending" : "cleanup_pending", message: expect.any(String) });
+    if (gate === "approval") await db.update(approvals).set({ status: "approved" }).where(eq(approvals.companyId, fixtureData.company.id));
+    if (gate === "question") await db.update(issueThreadInteractions).set({ status: "withdrawn" }).where(eq(issueThreadInteractions.issueId, fixtureData.issue.id));
+    if (gate === "cleanup") await db.update(environmentLeases).set({ status: "released", releasedAt: new Date(), cleanupStatus: "success" }).where(eq(environmentLeases.heartbeatRunId, fixtureData.run.id));
+    if (gate === "finalizing") await db.update(nativeRunFinalizations).set({ phase: "applied" }).where(eq(nativeRunFinalizations.runId, fixtureData.run.id));
+    if (gate === "agent_paused") fixtureData.deps.getAgentInvokability.mockResolvedValue({ invokable: true });
+    await fixtureData.queue.resumeQueuedRuns();
+    await fixtureData.queue.resumeQueuedRuns();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id));
+    expect(runs).toHaveLength(2);
+    expect(runs.find(run => run.id !== fixtureData.run.id)?.contextSnapshot?.wakeCommentIds).toEqual([fixtureData.comment.id]);
+    expect(fixtureData.deps.executeRun).toHaveBeenCalledTimes(1);
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
+    expect(receipt.runId).toBe(runs.find(run => run.id !== fixtureData.run.id)?.id);
+  });
+
   it("does not let an old generic wake hide newer interaction delivery", async () => {
     const f = await fixture("todo");
     const [approval] = await db.insert(approvals).values({companyId:f.company.id,type:"governed_action",status:"pending",payload:{}}).returning();
