@@ -1,5 +1,5 @@
 import type { Db } from "@paperclipai/db";
-import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, environmentLeases, nativeRunFinalizations, issues, issueRecoveryActions, issueThreadInteractions, approvals, issueApprovals, issueRelations } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, environmentLeases, nativeRunFinalizations, issues, issueComments, issueRecoveryActions, issueThreadInteractions, approvals, issueApprovals, issueRelations } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -8,6 +8,7 @@ import { createWakeQueue } from "../modules/wake-queue/index.js";
 import { createHeartbeatRunState } from "../services/heartbeat/run-state.js";
 import { createHeartbeatRunPreparation } from "../services/heartbeat/run-preparation.js";
 import { createHeartbeatQueue, type HeartbeatQueueDependencies } from "../services/heartbeat/queue.js";
+import { withQueuedCommentIdsInWakePayload } from "../services/issue-queued-comment-queue.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 function callbacks(db: Db) {
@@ -164,6 +165,34 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId,f.agent.id));
     expect(runs).toHaveLength(2);
     expect(runs.find(r=>r.id!==f.run.id)?.contextSnapshot?.ordinal).toBe(0);
+  });
+
+  it.each(["native", "legacy"])("admits a resolved recovery comment after a %s run exactly once", async runtimeMode => {
+    const fixtureData = await fixture("in_progress");
+    await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, fixtureData.agent.id));
+    await db.update(heartbeatRuns).set({ runtimeMode }).where(eq(heartbeatRuns.id, fixtureData.run.id));
+    const [comment] = await db.insert(issueComments).values({ companyId: fixtureData.company.id,
+      issueId: fixtureData.issue.id, authorType: "user", authorUserId: "board-user",
+      body: "Continue from this saved direction. Do not bypass an approval." }).returning();
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId: fixtureData.company.id,
+      agentId: fixtureData.agent.id, source: "assignment", triggerDetail: "system", reason: "issue_commented",
+      requestedByActorType: "user", requestedByActorId: "board-user", status: "deferred_issue_execution",
+      requestedAt: new Date(Date.now() - 600000), payload: withQueuedCommentIdsInWakePayload({
+        issueId: fixtureData.issue.id, executionWait: { reason: "execution_recovery",
+          message: "Waiting for execution recovery. Your message is saved." },
+        _paperclipWakeContext: { issueId: fixtureData.issue.id, wakeReason: "issue_commented" },
+      }, [comment.id]) }).returning();
+    const secondQueue = createHeartbeatQueue(db, fixtureData.deps);
+    await Promise.all([fixtureData.queue.resumeQueuedRuns(), secondQueue.resumeQueuedRuns()]);
+    await fixtureData.queue.resumeQueuedRuns();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id));
+    expect(runs).toHaveLength(2);
+    const successor = runs.find(run => run.id !== fixtureData.run.id)!;
+    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([comment.id]);
+    expect(fixtureData.deps.executeRun).toHaveBeenCalledTimes(1);
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
+    expect(receipt.status).not.toBe("deferred_issue_execution");
+    expect(receipt.runId).toBe(successor.id);
   });
 
   it("does not let an old generic wake hide newer interaction delivery", async () => {
