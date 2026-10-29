@@ -62,6 +62,48 @@ heartbeat.ts.
   patch-test stage includes the regression.
 - Retire when upstream enforces equivalent release freshness at these paths.
 
+## Native stranded-work admission after setup failure
+
+- A failed disposition-repair run is an infrastructure retry, not another
+  successful-source disposition decision. Route it through the existing bounded
+  failure retry without spending a second disposition slot.
+- Preserve the compact query's bootstrap/provider-dispatch evidence. Retry a
+  known database disconnect only when the run positively proves provider work
+  never started. Generic setup, authentication and unknown-outcome failures
+  remain fail closed.
+- A released legacy run no longer owns an in-progress issue's next assignment.
+  Admit the fresh assignment through normal status-version, concurrency and
+  execution gates. Never dispatch untouched seeded in-progress work this way.
+- Real-Postgres process-recovery tests cover the active repair action, repeated
+  scans, timer-disabled agent and release to in-progress. No fill CronJob and no
+  timer enablement are needed. Retire when upstream provides equivalent recovery.
+
+## PER-464 terminal comment recovery receipts
+
+- Under the company-scoped issue lock, retire the original deferred comment wake
+  when its issue is done or cancelled. Keep the comments and all recovery holds.
+  Do not enqueue a replacement wake that the terminal-state guard will reject.
+- Real-Postgres regressions scan twice and retain exactly one settled receipt,
+  with no provider turn. A resolved recovery action is not reopened or rewritten.
+- Retire when upstream settles terminal queued-comment receipts before enqueue.
+
+## Per-issue ten-run budget
+
+- Upstream master b7261aa4, checked October 29, has agent daily run/cost caps and
+  billed-cents company, agent and project policies, but no issue run cap.
+- Count durable run identities per company and issue. After ten runs, refuse
+  new wake admission and queued dispatch, move the issue to blocked and write
+  one `needs judging: N runs` system note. Stop due monitor wakes. Preserve
+  already-started work, saved user input, board status repairs and all holds.
+- A board user's audited blocked-to-todo/in-progress release grants the next
+  ten-run allowance. This includes board-sweep operations recorded as a user.
+  An agent release or a comment alone does not reset it. Existing queued work
+  that starts after release counts in the new allowance.
+- Real-Postgres queue tests cover the tenth/eleventh boundary, automatic sources,
+  retry dispatch, reset authority, equal timestamps and guarded board repairs.
+  No schema migration, per-agent configuration or separate scheduler is added.
+- Retire when upstream provides the same issue-level admission limit and reset.
+
 ## PER-477 bounded API readiness during live-event reconnects
 
 - Keep raw transport state fail closed for UI WebSockets. After the first

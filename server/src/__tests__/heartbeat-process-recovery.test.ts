@@ -11849,7 +11849,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(issue?.executionRunId).toBeNull();
   });
 
-  it.each([false, true])("enqueues one bounded plan-only continuation with legacy productivity review present: %s", async (withLegacyReview) => {
+  it.each([
+    { withLegacyReview: false, cancelledRuns: 0 },
+    { withLegacyReview: true, cancelledRuns: 0 },
+    { withLegacyReview: true, cancelledRuns: 10 },
+  ])("bounds plan-only continuation with legacy review $withLegacyReview and $cancelledRuns cancelled runs", async ({ withLegacyReview, cancelledRuns }) => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
       runStatus: "failed",
@@ -11875,10 +11879,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     let planOnlyRunId = "";
     mockAdapterExecute.mockImplementationOnce(async (input?: unknown) => {
       planOnlyRunId = (input as { runId: string }).runId;
-      if (withLegacyReview) {
-        // These pre-dispatch cancellations used to satisfy both the no-comment
-        // and churn thresholds and suppress an otherwise valid continuation.
-        await db.insert(heartbeatRuns).values(Array.from({ length: 10 }, (_, index) => ({
+      if (cancelledRuns > 0) {
+        await db.insert(heartbeatRuns).values(Array.from({ length: cancelledRuns }, (_, index) => ({
           id: randomUUID(), companyId, agentId,
           invocationSource: "automation", triggerDetail: "system", status: "cancelled",
           errorCode: "execution_reconciliation_required",
@@ -11902,25 +11904,30 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await heartbeat.drainActiveRunExecutions();
 
     expect(planOnlyRunId).not.toBe("");
-    const livenessWakes = await waitForValue(async () => {
+    const readLivenessWakes = async () => {
       const rows = await selectRecoveryWakesByAgent(agentId);
       // Follow-up repairs can already exist. Match this plan-only result,
       // rather than relying on the database's unordered row order.
       const matching = rows.filter((row) => row.reason === "issue_disposition_repair"
         && row.payload?.retryOfRunId === planOnlyRunId);
-      return matching.length > 0 ? matching : null;
-    });
-    expect(livenessWakes).toHaveLength(1);
-    const livenessWake = livenessWakes![0]!;
-    expect(livenessWake?.payload).toMatchObject({
-      issueId,
-      dispositionRepairAttempt: 1,
-    });
-
-    const sourceRunId = (
-      livenessWake?.payload as Record<string, unknown> | null
-    )?.retryOfRunId;
-    expect(sourceRunId).toBe(planOnlyRunId);
+      return matching;
+    };
+    if (cancelledRuns >= 10) {
+      expect(await readLivenessWakes()).toHaveLength(0);
+      expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe("blocked");
+      expect((await db.select().from(issueComments).where(eq(issueComments.issueId, issueId)))
+        .some((comment) => comment.body.includes("needs judging:"))).toBe(true);
+    } else {
+      const livenessWakes = await waitForValue(async () => {
+        const matching = await readLivenessWakes();
+        return matching.length > 0 ? matching : null;
+      });
+      expect(livenessWakes).toHaveLength(1);
+      expect(livenessWakes![0]!.payload).toMatchObject({
+        issueId, dispositionRepairAttempt: 1, retryOfRunId: planOnlyRunId,
+      });
+    }
+    const sourceRunId = planOnlyRunId;
     const sourceRun = await db
       .select()
       .from(heartbeatRuns)

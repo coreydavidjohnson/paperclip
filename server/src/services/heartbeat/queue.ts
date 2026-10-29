@@ -1,4 +1,6 @@
 import { assertRecoveryStatusWriteAllowed } from "../guarded-status-repair.js";
+import { enforceIssueRunBudget } from "./issue-run-budget.js";
+import { publishActivity, type ActivityPublication } from "../activity-log.js";
 import { admitReconciledUserContinuation } from "../execution-recovery-resolution.js";
 import { startClaimedLegacyControllerLease } from "../legacy-controller-lease.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
@@ -528,15 +530,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     return null;
   }
 
-  async function cancelQueuedRunForHeartbeatDailyCap(
+  async function cancelQueuedRunForHeartbeatBudget(
     run: typeof heartbeatRuns.$inferSelect,
-    dailyCapBlock: NonNullable<
-      Awaited<ReturnType<typeof getHeartbeatDailyCapBlock>>
-    >,
+    dailyCapBlock: { reason: string; observed: number; limit: number },
+    reason = "Cancelled because the agent reached a per-day heartbeat budget cap before adapter invocation",
   ) {
     const now = new Date();
-    const reason =
-      "Cancelled because the agent reached a per-day heartbeat budget cap before adapter invocation";
     const cancelled = await setRunStatus(run.id, "cancelled", {
       finishedAt: now,
       error: reason,
@@ -548,7 +547,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         limit: dailyCapBlock.limit,
         effectiveTimeoutSec: 0,
         timeoutConfigured: false,
-        timeoutSource: "heartbeat_daily_cap_gate",
+        timeoutSource: dailyCapBlock.reason === "issue.run_budget_exhausted" ? "issue_run_budget_gate" : "heartbeat_daily_cap_gate",
         timeoutFired: false,
       },
     });
@@ -1073,6 +1072,16 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     if (!run.startedAt && !await canStartNewExternalBotWork(agent)) return null;
 
     const context = parseObject(run.contextSnapshot);
+    const budgetIssueId = run.nativeIssueId ?? run.issueId ?? readNonEmptyString(context.issueId) ?? readNonEmptyString(context.taskId);
+    const budgetPublications: ActivityPublication[] = [];
+    let issueBudgetBlock: Awaited<ReturnType<typeof enforceIssueRunBudget>> = null;
+    async function admitIssueRunBudget(tx: Db) {
+      if (run.startedAt || !budgetIssueId || !isUuidLike(budgetIssueId)) return true;
+      issueBudgetBlock = await enforceIssueRunBudget(
+        tx, run.companyId, budgetIssueId, budgetPublications, run.id,
+      );
+      return !issueBudgetBlock;
+    }
     const budgetBlock = await budgets.getInvocationBlock(
       run.companyId,
       run.agentId,
@@ -1096,7 +1105,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       },
     );
     if (dailyCapBlock) {
-      await cancelQueuedRunForHeartbeatDailyCap(run, dailyCapBlock);
+      await cancelQueuedRunForHeartbeatBudget(run, dailyCapBlock);
       return null;
     }
 
@@ -1421,6 +1430,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   })
                   .where(eq(heartbeatRuns.id, lockedRun.id));
               }
+              if (!await admitIssueRunBudget(tx as unknown as Db)) {
+                return { kind: "stale" as const, run: null };
+              }
               const authoritativeIds = queuedCommentIdsFromWakePayload(
                 wake.payload,
               );
@@ -1614,13 +1626,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return claimQueuedNativeReviewRun(tx, {
               run, claimedAt, claimValues,
               agentNameKey: normalizeAgentNameKey(agent.name),
-              admit: claimSlot,
+              admit: async (claimTx) => await claimSlot(claimTx) && await admitIssueRunBudget(claimTx),
             });
           }
           return tx.transaction(async (claimTx) => {
             if (!await claimSlot(claimTx as unknown as Db)) return null;
             const issueClaim = await lockIssueExecutionClaim(claimTx as unknown as Db);
             if (issueClaim.blocked) return null;
+            if (!await admitIssueRunBudget(claimTx as unknown as Db)) return null;
             const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(
               eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued"),
             )).returning().then((rows) => rows[0] ?? null);
@@ -1628,6 +1641,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return claimedRun;
           });
         });
+    budgetPublications.forEach(publishActivity);
+    if (issueBudgetBlock) {
+      const block = issueBudgetBlock as NonNullable<Awaited<ReturnType<typeof enforceIssueRunBudget>>>;
+      await cancelQueuedRunForHeartbeatBudget(run, block, block.message);
+      return null;
+    }
     if (!claimed) return null;
     startClaimedLegacyControllerLease(db, claimed);
 
@@ -2789,6 +2808,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const agentNameKey = normalizeAgentNameKey(agent.name);
 
       const cancelledRunsToEmit: (typeof heartbeatRuns.$inferSelect)[] = [];
+      const budgetPublications: ActivityPublication[] = [];
 
       const outcome = await db
         .transaction(async (tx) => {
@@ -4328,6 +4348,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             return { kind: "skipped" as const };
           }
 
+          const issueBudget = await enforceIssueRunBudget(tx as unknown as Db,
+            issue.companyId, issue.id, budgetPublications);
+          if (issueBudget) {
+            if (executionWaitRequestId || durableRequest || wakeCommentId ||
+                hasInteractionContinuationWakeContext(enrichedContextSnapshot)) {
+              continuationWait = { reason: issueBudget.reason, message: issueBudget.message };
+              return deferBlockedExecution({ recoveryActionId: null, nextAction: issueBudget.message });
+            }
+            return { kind: "skipped" as const };
+          }
+
           let explicitContinuation = await admitExplicitNativeContinuation({
             db: tx as unknown as Db, companyId: issue.companyId, issueId: issue.id,
             agentId, actorType: opts.requestedByActorType, actorId: opts.requestedByActorId,
@@ -4558,6 +4589,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           throw error;
         });
 
+      budgetPublications.forEach(publishActivity);
       // Telemetry for the cancelled runs is best-effort background work.
       // Fire it here and never await it: none of the lifecycle work below,
       // nor this function's return, depends on it, so a slow telemetry
