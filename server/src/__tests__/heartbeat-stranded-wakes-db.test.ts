@@ -227,6 +227,26 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     expect(fixtureData.deps.executeRun).not.toHaveBeenCalled();
   });
 
+  it.each(["unused_admission", "operator_stop"])("preserves saved-comment authority after %s", async source => {
+    const fixtureData = await savedCommentFixture("native");
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(Date.now() + 1000),
+      errorCode: source === "unused_admission" ? "execution_reconciliation_required" : "cancelled",
+      startedAt: source === "unused_admission" ? null : new Date(Date.now() - 60000),
+    }).where(eq(heartbeatRuns.id, fixtureData.run.id));
+    await fixtureData.queue.resumeQueuedRuns();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id));
+    expect(runs).toHaveLength(source === "unused_admission" ? 2 : 1);
+    expect(fixtureData.deps.executeRun).toHaveBeenCalledTimes(source === "unused_admission" ? 1 : 0);
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
+    if (source === "unused_admission") {
+      expect(receipt.runId).toBe(runs.find(run => run.id !== fixtureData.run.id)?.id);
+      expect(runs.find(run => run.id !== fixtureData.run.id)?.contextSnapshot?.wakeCommentIds).toEqual([fixtureData.comment.id]);
+    } else {
+      expect(receipt.status).toBe("deferred_issue_execution");
+      expect(receipt.payload?.executionWait).toMatchObject({ reason: "message_predates_stop" });
+    }
+  });
+
   it.each(["approval", "question", "cleanup", "finalizing", "agent_paused"])("retains a saved comment behind %s, then admits it after that gate clears", async gate => {
     const fixtureData = await savedCommentFixture("native");
     if (gate === "approval") {
