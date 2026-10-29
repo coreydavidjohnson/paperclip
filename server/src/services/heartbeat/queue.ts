@@ -1905,7 +1905,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     for (const { wake, issueStatus } of strandedQueues) {
       const issueKey = `${wake.companyId}:${String(wake.payload?.issueId)}`;
       if (wake.requestedByActorType === "user" && queuedCommentIdsFromWakePayload(wake.payload).length &&
-          ["execution_recovery", "execution_reconciliation_required"].includes(String(parseObject(wake.payload?.executionWait).reason)) &&
           !wake.idempotencyKey?.startsWith("chat-inbound:") && !wake.payload?.dotRequestId &&
           wake.payload?.mutation !== "interaction" && !["done", "cancelled"].includes(issueStatus)) {
         const [openRecovery] = await db.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
@@ -3605,7 +3604,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               return { kind: "replayed" as const, run: { ...prior, contextSnapshot } };
             }
           }
-          if (livenessReceipt && !livenessReceipt.runId) {
+          if ((livenessReceipt && !livenessReceipt.runId) || opts.queuedCommentRequestId) {
             const [latest] = await tx.select().from(heartbeatRuns).where(and(
               eq(heartbeatRuns.companyId, issue.companyId),
               or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
@@ -3623,7 +3622,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   isNull(issueComments.deletedAt), gt(issueComments.createdAt, latest.finishedAt),
                 )) : [];
             // Saving a resolved decision does not authorize restarting stopped work.
-            await tx.update(agentWakeupRequests).set({
+            if (livenessReceipt) await tx.update(agentWakeupRequests).set({
               payload: { ...livenessReceipt.payload, [DEFERRED_WAKE_CONTEXT_KEY]: enrichedContextSnapshot },
               // Adoption must be visible to periodic admission even if another
               // decision still holds this legacy, previously terminal receipt.
@@ -3635,13 +3634,19 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               inArray(agentWakeupRequests.status, ["deferred_issue_execution", "skipped", "coalesced"])));
             if ((latest?.status === "cancelled" && !newUserComment) ||
                 (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
+              if (opts.queuedCommentRequestId) {
+                continuationWait = latest?.status === "cancelled" && !newUserComment
+                  ? { reason: "message_predates_stop", message: "This message arrived before the previous run stopped. Send a new message to continue." }
+                  : { reason: "cleanup_pending", message: "Waiting for the previous run's cleanup to finish. Your message is saved." };
+                return deferBlockedExecution({ recoveryActionId: null, nextAction: continuationWait.message });
+              }
               return { kind: "deferred" as const };
             }
           }
           // Provider-stop evidence cannot answer a question or approve work.
           // Keep one durable receipt under the issue lock; normal stranded-wake
           // recovery rechecks these gates before admitting it after resolution.
-          if (livenessReceipt || opts.idempotencyKey?.startsWith("liveness:")) {
+          if (livenessReceipt || opts.queuedCommentRequestId || opts.idempotencyKey?.startsWith("liveness:")) {
             const cards = await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
               eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
               eq(issueThreadInteractions.status, "pending"),
@@ -3653,10 +3658,15 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             const readiness = await issuesSvc.listDependencyReadiness(issue.companyId, [issue.id], tx)
               .then(rows => rows.get(issue.id));
             if (cards.length || pendingApprovals.length || readiness?.isDependencyReady === false) {
-              const condition = { pendingInteractionIds: cards.map(card => card.id), pendingApprovalIds: pendingApprovals.map(approval => approval.id), unresolvedBlockerIssueIds: readiness?.unresolvedBlockerIssueIds ?? [] };
+              const condition = { reason: cards.length || pendingApprovals.length ? "decision_pending" : "dependency_pending",
+                message: cards.length || pendingApprovals.length
+                  ? "A pending approval or question must be resolved before this message can start."
+                  : "Waiting for this task's linked prerequisites to finish. Your message is saved.",
+                pendingInteractionIds: cards.map(card => card.id), pendingApprovalIds: pendingApprovals.map(approval => approval.id), unresolvedBlockerIssueIds: readiness?.unresolvedBlockerIssueIds ?? [] };
               if (livenessReceipt) return { kind: "deferred" as const };
               if (executionWaitRequestId) await tx.update(agentWakeupRequests).set({
                 status: "deferred_issue_execution", runId: null, claimedAt: null, finishedAt: null,
+                payload: sql`jsonb_set(coalesce(${agentWakeupRequests.payload}, '{}'::jsonb), '{executionWait}', ${JSON.stringify(condition)}::jsonb)`,
               }).where(eq(agentWakeupRequests.id, executionWaitRequestId));
               else await tx.insert(agentWakeupRequests).values({
                 ...durableReceiptFields, companyId: issue.companyId, agentId, source, triggerDetail, reason,

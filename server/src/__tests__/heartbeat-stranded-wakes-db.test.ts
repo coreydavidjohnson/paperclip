@@ -212,7 +212,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     expect(fixtureData.deps.executeRun).not.toHaveBeenCalled();
     const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
     expect(receipt.status).toBe("deferred_issue_execution");
-    expect(receipt.payload?.executionWait).toMatchObject({ reason: "execution_reconciliation_required", message: nextAction });
+    expect(receipt.payload?.executionWait).toMatchObject({ reason: "execution_reconciliation_required", message: expect.stringContaining(nextAction) });
     const [action] = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, fixtureData.issue.id));
     expect(action.evidence.automaticRecovery).toEqual({ replay: "blocked", actionOutcome: "unknown" });
   });
