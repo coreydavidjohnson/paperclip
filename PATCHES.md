@@ -635,5 +635,11 @@ heartbeat.ts.
 - Persist a specific admission reason and actual blocker next action. Keep the
   real-Postgres stranded-wake regression module in the image gate. See
   docs/incidents/2026-10-29-stranded-saved-comment-recovery.md.
+- Classify dependency-only cancellations from verified pre-dispatch and retained
+  database evidence, not their error code alone. Exclude only their generated
+  false unknown-outcome holds. Never hide older real holds or workspace repair.
+- Preserve the meaningful Stop predecessor across later unused admissions.
+  A held older receipt must not prevent newer eligible direction from entering
+  admission. Retain verified run-only Stop and unclaimed startup delivery.
 - Retire when upstream provides equivalent durable saved-comment promotion
   across native and legacy recovery with these authority and cleanup fences.
