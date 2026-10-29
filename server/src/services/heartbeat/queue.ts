@@ -3663,7 +3663,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   ? "A pending approval or question must be resolved before this message can start."
                   : "Waiting for this task's linked prerequisites to finish. Your message is saved.",
                 pendingInteractionIds: cards.map(card => card.id), pendingApprovalIds: pendingApprovals.map(approval => approval.id), unresolvedBlockerIssueIds: readiness?.unresolvedBlockerIssueIds ?? [] };
-              if (livenessReceipt) return { kind: "deferred" as const };
+              if (livenessReceipt && !executionWaitRequestId) return { kind: "deferred" as const };
               if (executionWaitRequestId) await tx.update(agentWakeupRequests).set({
                 status: "deferred_issue_execution", runId: null, claimedAt: null, finishedAt: null,
                 payload: sql`jsonb_set(coalesce(${agentWakeupRequests.payload}, '{}'::jsonb), '{executionWait}', ${JSON.stringify(condition)}::jsonb)`,

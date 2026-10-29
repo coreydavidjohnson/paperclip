@@ -45,6 +45,10 @@ saved-comment recovery path. Duplicate sweepers must create only one successor.
 - `heartbeat-stranded-wakes-db.test.ts` is mandatory in the image gate. It
   checks persisted successor context, executor invocation and adopted receipt,
   not just a ticket status or helper call. Deadlines are unchanged.
+- The complete 29-test real-Postgres module passes at `b35f1fd72`, including
+  finalization after fixture ownership correction. Namespace absence and driver
+  exit 0 are independently verified. The final image gate rechecks the final
+  source, including the receipt wait-message correction.
 
 Full image qualification, deployed-image canary and the post-release check of
 the original saved comment IDs remain distinct from these isolated tests.
