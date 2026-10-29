@@ -143,7 +143,7 @@ export async function admitExplicitNativeContinuation(input: {
   )).for("update");
   if (!actions.length) return null;
   const blocker = await getExecutionBlocker(db, companyId, issueId);
-  if (blocker && blocker.recoveryActionId === null) return null;
+  if (!blocker || blocker.recoveryActionId === null) return null;
   const [pendingInteraction] = await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
     eq(issueThreadInteractions.companyId, companyId), eq(issueThreadInteractions.issueId, issueId),
     eq(issueThreadInteractions.status, "pending"),

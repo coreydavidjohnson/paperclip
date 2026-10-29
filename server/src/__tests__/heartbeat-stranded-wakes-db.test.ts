@@ -195,7 +195,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id));
     expect(runs).toHaveLength(2);
     const successor = runs.find(run => run.id !== fixtureData.run.id)!;
-    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([comment.id]);
+    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([fixtureData.comment.id, comment.id]);
     expect(fixtureData.deps.executeRun).toHaveBeenCalledTimes(1);
     const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
     expect(receipt.status).not.toBe("deferred_issue_execution");
@@ -288,12 +288,15 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     const [admitted] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
     expect(admitted.runId).toBe(successor.id);
     const [held] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
-    expect(held.status).toBe("deferred_issue_execution");
-    expect(held.payload?.executionWait).toMatchObject({ reason: "message_predates_stop" });
+    expect(held.status).toBe("coalesced");
+    expect(held.runId).toBe(successor.id);
   });
 
   it.each([["historical", "comment"], ["recorded", "comment"], ["historical", "assignment"]])("starts released dependency-only work with %s cancellation evidence and a %s wake", async (evidence, source) => {
     const fixtureData = await savedCommentFixture("legacy");
+    const [conversationAgent] = await db.update(agents).set({ adapterType: "omnigent" })
+      .where(eq(agents.id, fixtureData.agent.id)).returning();
+    fixtureData.deps.getAgent.mockResolvedValue(conversationAgent);
     const [blocker] = await db.insert(issues).values({ companyId: fixtureData.company.id,
       title: "Former prerequisite", status: "todo" }).returning();
     await db.insert(issueRelations).values({ companyId: fixtureData.company.id,
