@@ -1,4 +1,4 @@
-import { isPreDispatchReviewWait } from "./pre-dispatch-review-wait.js";
+import { isPreDispatchDependencyWaitVerified, isPreDispatchReviewWait } from "./pre-dispatch-review-wait.js";
 import { and, desc, eq, gt, inArray, not, or, sql } from "drizzle-orm";
 import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
 import { z } from "zod";
@@ -53,12 +53,29 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
 
   const ownership = await getConversationOwnershipBlocker(db, companyId, issueId);
   if (ownership) return { ...ownership, recoveryActionId: null };
-  const [action] = restoreHold ? [restoreHold] : await db.select().from(issueRecoveryActions).where(and(
+  const candidates = restoreHold ? [restoreHold] : await db.select().from(issueRecoveryActions).where(and(
     eq(issueRecoveryActions.companyId, companyId),
     eq(issueRecoveryActions.sourceIssueId, issueId),
     executionBlockerPredicate(),
     boundary ? gt(issueRecoveryActions.createdAt, boundary.createdAt) : undefined,
-  )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id)).limit(1);
+  )).orderBy(desc(issueRecoveryActions.updatedAt), desc(issueRecoveryActions.id));
+  let action: typeof issueRecoveryActions.$inferSelect | undefined;
+  for (const candidate of candidates) {
+    const automatic = candidate.evidence.automaticRecovery as Record<string, unknown> | undefined;
+    const sourceId = z.string().guid().safeParse(candidate.evidence.runId ?? candidate.evidence.sourceRunId);
+    if (!restoreHold && candidate.cause === "legacy_execution_requires_reconciliation" &&
+        !candidate.evidence.executionReconciliation && automatic?.policy === "preserve_without_replay_v1" &&
+        automatic.actionOutcome === "unknown" && sourceId.success) {
+      const [source] = await db.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.id, sourceId.data),
+        or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId),
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
+      )).limit(1);
+      if (source && await isPreDispatchDependencyWaitVerified(db, source)) continue;
+    }
+    action = candidate;
+    break;
+  }
   if (!action) return null;
   const parsedRunId = z.string().guid().safeParse(action.evidence.runId ?? action.evidence.sourceRunId);
   const runId = parsedRunId.success ? parsedRunId.data : null;

@@ -35,6 +35,7 @@ import {
 } from "../explicit-native-continuation.js";
 import { canRetryStoppedRun } from "../cancelled-native-startup.js";
 import { getExecutionBlocker } from "../execution-blocker.js";
+import { isPreDispatchDependencyWaitVerified, isUnusedExecutionAdmissionVerified } from "../pre-dispatch-review-wait.js";
 import { isConversationAdapter } from "../conversation-continuation.js";
 import { recordExecutionWait } from "../execution-wait.js";
 import {
@@ -1828,6 +1829,26 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     return cancelled;
   }
 
+  async function continuationPredecessor(queryDb: Db, companyId: string, issueId: string) {
+    let before: { createdAt: Date; id: string } | undefined;
+    for (;;) {
+      const history = await queryDb.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        or(eq(heartbeatRuns.issueId, issueId), eq(heartbeatRuns.nativeIssueId, issueId),
+          sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
+        before ? or(lt(heartbeatRuns.createdAt, before.createdAt),
+          and(eq(heartbeatRuns.createdAt, before.createdAt), lt(heartbeatRuns.id, before.id))) : undefined,
+      )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(20);
+      for (const predecessor of history) {
+        if (await hasPendingIssueRunCleanup(queryDb, companyId, predecessor.id) ||
+            (!(await isUnusedExecutionAdmissionVerified(queryDb, predecessor)) &&
+             !(await isPreDispatchDependencyWaitVerified(queryDb, predecessor)))) return predecessor;
+      }
+      if (history.length < 20) return null;
+      before = history.at(-1)!;
+    }
+  }
+
   async function resumeQueuedRuns() {
     if ((await getSchedulingSuppression()).suppressed) return;
     const cutoff = await getWorktreeExecutionCutoff();
@@ -1914,10 +1935,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         )).limit(1);
         if (!openRecovery) {
           if (strandedIssues.has(issueKey)) continue;
-          strandedIssues.add(issueKey);
           const context = withQueuedCommentIdsInRunContext(parseObject(wake.payload?.[DEFERRED_WAKE_CONTEXT_KEY]),
             queuedCommentIdsFromWakePayload(wake.payload));
-          await enqueueWakeup(wake.agentId, {
+          const admitted = await enqueueWakeup(wake.agentId, {
             source: wake.source as WakeupOptions["source"],
             triggerDetail: wake.triggerDetail as WakeupOptions["triggerDetail"],
             reason: readNonEmptyString(context.wakeReason) ?? wake.reason,
@@ -1929,6 +1949,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           }, wake.id).catch(err => {
             logger.warn({ err, queueId: wake.id }, "failed to re-admit saved comment after recovery resolved");
           });
+          if (admitted) strandedIssues.add(issueKey);
           continue;
         }
       }
@@ -2951,17 +2972,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
                 inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
               )).limit(1);
-              const [latest] = await tx.select().from(heartbeatRuns).where(and(
-                eq(heartbeatRuns.companyId, agent.companyId),
-                or(eq(heartbeatRuns.nativeIssueId, issueId), eq(heartbeatRuns.issueId, issueId),
-                  sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`),
-              )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+              const latest = await continuationPredecessor(tx as unknown as Db, agent.companyId, issueId);
               // Stop is not a new assignment. A terminal result also does not
               // prove that the old workspace/lease finalizer has released it.
               if (latest && (!isHeartbeatRunTerminalStatus(latest.status) ||
                   liveRunExecutions.has(latest.id) ||
-                  (latest.status === "cancelled" && !(latest.startedAt === null &&
-                    latest.errorCode === "execution_reconciliation_required")) ||
+                  latest.status === "cancelled" ||
                   await hasPendingIssueRunCleanup(tx as unknown as Db, agent.companyId, latest.id))) {
                 return { kind: "deferred" as const };
               }
@@ -3605,11 +3621,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             }
           }
           if ((livenessReceipt && !livenessReceipt.runId) || opts.queuedCommentRequestId) {
-            const [latest] = await tx.select().from(heartbeatRuns).where(and(
-              eq(heartbeatRuns.companyId, issue.companyId),
-              or(eq(heartbeatRuns.issueId, issue.id), eq(heartbeatRuns.nativeIssueId, issue.id),
-                sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issue.id}`),
-            )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(1);
+            const latest = await continuationPredecessor(tx as unknown as Db, issue.companyId, issue.id);
             // A new authenticated user comment is new authority, not replay of
             // the cancelled turn. Cleanup and normal execution blockers still gate it.
             const [newUserComment] = latest?.status === "cancelled" && latest.finishedAt &&
@@ -3632,11 +3644,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(agentWakeupRequests.companyId, issue.companyId), eq(agentWakeupRequests.agentId, agentId),
               isNull(agentWakeupRequests.runId),
               inArray(agentWakeupRequests.status, ["deferred_issue_execution", "skipped", "coalesced"])));
-            const unusedAdmission = latest?.status === "cancelled" && !latest.startedAt &&
-              latest.errorCode === "execution_reconciliation_required" &&
-              !latest.processPid && !latest.processGroupId && !latest.nativeSessionId;
-            const stoppedBeforeComment = latest?.status === "cancelled" && !newUserComment &&
-              !(opts.queuedCommentRequestId && unusedAdmission);
+            const stoppedBeforeComment = latest?.status === "cancelled" && !newUserComment;
             if (stoppedBeforeComment ||
                 (latest && await hasPendingIssueRunCleanup(tx as unknown as Db, issue.companyId, latest.id))) {
               if (opts.queuedCommentRequestId) {

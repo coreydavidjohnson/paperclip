@@ -1,5 +1,5 @@
 import type { Db } from "@paperclipai/db";
-import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, environmentLeases, nativeRunFinalizations, issues, issueComments, issueRecoveryActions, issueThreadInteractions, approvals, issueApprovals, issueRelations } from "@paperclipai/db";
+import { agents, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, environmentLeases, nativeRunFinalizations, issues, issueComments, issueRecoveryActions, issueThreadInteractions, approvals, issueApprovals, issueRelations } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -292,7 +292,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     expect(held.payload?.executionWait).toMatchObject({ reason: "message_predates_stop" });
   });
 
-  it.each(["historical", "recorded"])("starts released dependency-only work with %s cancellation evidence", async evidence => {
+  it.each([["historical", "comment"], ["recorded", "comment"], ["historical", "assignment"]])("starts released dependency-only work with %s cancellation evidence and a %s wake", async (evidence, source) => {
     const fixtureData = await savedCommentFixture("legacy");
     const [blocker] = await db.insert(issues).values({ companyId: fixtureData.company.id,
       title: "Former prerequisite", status: "todo" }).returning();
@@ -309,17 +309,63 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     } }).where(eq(issueRecoveryActions.sourceIssueId, fixtureData.issue.id));
     await db.delete(issueRelations).where(eq(issueRelations.relatedIssueId, fixtureData.issue.id));
     await db.update(issues).set({ status: "todo" }).where(eq(issues.id, fixtureData.issue.id));
+    if (source === "assignment") await db.update(agentWakeupRequests).set({ requestedByActorType: "system",
+      reason: "issue_assigned", payload: { issueId: fixtureData.issue.id,
+        _paperclipWakeContext: { issueId: fixtureData.issue.id, wakeReason: "issue_assigned" } },
+    }).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
     expect(await legacyExecutionNeedsReconciliationWithEvidence(db, cancelled)).toBe(false);
     await fixtureData.queue.resumeQueuedRuns();
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id));
     expect(runs).toHaveLength(2);
     const successor = runs.find(run => run.id !== cancelled.id)!;
-    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([fixtureData.comment.id]);
+    if (source === "comment") expect(successor.contextSnapshot?.wakeCommentIds).toEqual([fixtureData.comment.id]);
     expect(fixtureData.deps.executeRun).toHaveBeenCalledExactlyOnceWith(successor.id);
     const [task] = await db.select().from(issues).where(eq(issues.id, fixtureData.issue.id));
     expect(task.status).not.toBe("blocked");
     const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
     expect(receipt.runId).toBe(successor.id);
+  });
+
+  it.each(["started", "selection", "session", "event", "lease", "finalizer", "outcome", "older_hold"])("retains %s evidence despite a dependency cancellation code", async evidence => {
+    const fixtureData = await savedCommentFixture("legacy");
+    const [cancelled] = await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "issue_dependencies_blocked",
+      startedAt: evidence === "started" ? new Date(Date.now() - 60000) : null,
+      runtimeModeResolvedAt: evidence === "selection" ? new Date(Date.now() - 60000) : null,
+      sessionIdAfter: evidence === "session" ? "retained-provider" : null,
+      resultJson: evidence === "outcome" ? { executionRecovery: { kind: "external_liveness", providerStopped: false } } : null,
+    }).where(eq(heartbeatRuns.id, fixtureData.run.id)).returning();
+    if (evidence === "event") await db.insert(heartbeatRunEvents).values({ companyId: fixtureData.company.id,
+      agentId: fixtureData.agent.id, runId: cancelled.id, seq: 1, eventType: "adapter.invoke" });
+    if (evidence === "lease") await db.insert(environmentLeases).values({ companyId: fixtureData.company.id,
+      heartbeatRunId: cancelled.id, issueId: fixtureData.issue.id, status: "pending_cleanup" });
+    if (evidence === "finalizer") {
+      await db.update(heartbeatRuns).set({ nativeIssueId: fixtureData.issue.id }).where(eq(heartbeatRuns.id, cancelled.id));
+      await db.insert(nativeRunFinalizations).values({ companyId: fixtureData.company.id,
+        runId: cancelled.id, issueId: fixtureData.issue.id, phase: "pending" });
+    }
+    await db.update(issueRecoveryActions).set({ outcome: "blocked", evidence: {
+      runId: cancelled.id, automaticRecovery: { policy: "preserve_without_replay_v1", replay: "blocked", actionOutcome: "unknown" },
+    } }).where(eq(issueRecoveryActions.sourceIssueId, fixtureData.issue.id));
+    if (evidence === "older_hold") {
+      const [unknown] = await db.insert(heartbeatRuns).values({ companyId: fixtureData.company.id,
+        agentId: fixtureData.agent.id, status: "failed", errorCode: "external_liveness_unknown",
+        startedAt: new Date(Date.now() - 90000), finishedAt: new Date(Date.now() - 60000),
+        createdAt: new Date(Date.now() - 100000), contextSnapshot: { issueId: fixtureData.issue.id },
+      }).returning();
+      await db.insert(issueRecoveryActions).values({ companyId: fixtureData.company.id, sourceIssueId: fixtureData.issue.id,
+        kind: "active_run_watchdog", cause: "legacy_execution_requires_reconciliation", fingerprint: `legacy:${unknown.id}`,
+        status: "resolved", outcome: "blocked", createdAt: new Date(Date.now() - 60000), updatedAt: new Date(Date.now() - 60000),
+        evidence: { runId: unknown.id, automaticRecovery: { replay: "blocked", actionOutcome: "unknown" } },
+        nextAction: "Inspect the retained external outcome." });
+    }
+    if (evidence !== "older_hold") {
+      const [current] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, cancelled.id));
+      expect(await legacyExecutionNeedsReconciliationWithEvidence(db, current)).toBe(true);
+    }
+    await fixtureData.queue.resumeQueuedRuns();
+    expect(fixtureData.deps.executeRun).not.toHaveBeenCalled();
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
+    expect(receipt.status).toBe("deferred_issue_execution");
   });
 
   it.each(["approval", "question", "cleanup", "finalizing", "agent_paused"])("retains a saved comment behind %s, then admits it after that gate clears", async gate => {

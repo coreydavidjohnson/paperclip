@@ -40,6 +40,37 @@ export function isPreDispatchReviewWait(
  * checked against the same evidence that gates explicit user admission. */
 export async function isPreDispatchReviewWaitVerified(db: Db, run: Run): Promise<boolean> {
   if (!isPreDispatchReviewWait(run)) return false;
+  return hasNoRetainedDispatch(db, run);
+}
+
+function hasNoDispatchClaim(run: Run): boolean {
+  return run.startedAt === null && run.runtimeModeResolvedAt === null &&
+    run.processPid === null && run.processGroupId === null && run.processStartedAt === null &&
+    run.nativeIssueId === null && run.nativeSessionId === null && run.sessionIdAfter === null &&
+    run.controllerBootId === null && run.controllerLeaseExpiresAt === null && run.executionStage === null;
+}
+
+export async function isPreDispatchDependencyWaitVerified(db: Db, run: Run): Promise<boolean> {
+  if (run.runtimeMode !== "legacy" || run.status !== "cancelled" ||
+      run.errorCode !== "issue_dependencies_blocked" || !hasNoDispatchClaim(run)) return false;
+  if (run.resultJson !== null && (run.resultJson.stopReason !== run.errorCode ||
+      !["dependency_gate", "stale_queued_run_gate"].includes(String(run.resultJson.timeoutSource)) ||
+      Object.keys(run.resultJson).some(key => !["stopReason", "effectiveTimeoutSec", "timeoutConfigured",
+        "timeoutSource", "timeoutFired", "executionRecovery"].includes(key)) ||
+      (run.resultJson.executionRecovery !== undefined &&
+        ((run.resultJson.executionRecovery as Record<string, unknown>)?.kind !== "bootstrap" ||
+         (run.resultJson.executionRecovery as Record<string, unknown>)?.providerWorkStarted !== false)))) return false;
+  return hasNoRetainedDispatch(db, run);
+}
+
+export async function isUnusedExecutionAdmissionVerified(db: Db, run: Run): Promise<boolean> {
+  if (run.status !== "cancelled" || run.errorCode !== "execution_reconciliation_required" ||
+      !hasNoDispatchClaim(run) || run.resultJson?.workspaceRestoreFailure ||
+      run.resultJson?.workspaceRestoreRecovery || run.resultJson?.executionCancellation) return false;
+  return hasNoRetainedDispatch(db, run);
+}
+
+async function hasNoRetainedDispatch(db: Db, run: Run): Promise<boolean> {
   const [coordinator] = await db.select({ id: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(and(
     eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),
   )).limit(1);

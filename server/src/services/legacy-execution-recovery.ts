@@ -1,6 +1,6 @@
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
 import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
-import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
+import { isPreDispatchDependencyWaitVerified, isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { normalizeMaxTurnStopReason } from "./heartbeat-stop-metadata.js";
 import { claimedAdapterType, hasConversationContinuationPolicy } from "./conversation-continuation.js";
@@ -42,6 +42,7 @@ export function legacyExecutionNeedsReconciliation(
     return false;
   // A fresh model turn cannot repair or verify unrestored files.
   if (run.resultJson?.workspaceRestoreFailure === "restore_unsafe_archive" || hasRequiredWorkspaceRecovery(run.resultJson)) return true;
+  if (run.status === "cancelled" && run.errorCode === "issue_dependencies_blocked") return true;
   // Provider uncertainty cannot inherit an unrelated conversation replay policy.
   if (["external_liveness_unknown", "external_deadline_exceeded", "external_result_unavailable"].includes(run.errorCode ?? "")) return true;
   // A fresh conversation turn lets the agent decide what remains. The retry
@@ -80,7 +81,8 @@ export function legacyExecutionNeedsReconciliation(
  * The synchronous classifier stays conservative for callers without a DB proof. */
 export async function legacyExecutionNeedsReconciliationWithEvidence(db: Db, run: Run): Promise<boolean> {
   return await hasUnrestoredRemoteWorkspace(db, run) ||
-    (legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run)));
+    (legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run)) &&
+      !(await isPreDispatchDependencyWaitVerified(db, run)));
 }
 
 /** Persist the failed legacy run, owned lock release and operator decision together. */
