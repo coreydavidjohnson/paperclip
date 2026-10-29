@@ -624,3 +624,16 @@ heartbeat.ts.
   exact-approval interrupt case. Keep all original assertions and 15-second
   deadlines, and retain foreign-owner stale-map negative controls. See the
   cross-controller Stop incident follow-up for the retained four-case failure.
+
+## PER-316 saved-comment admission after resolved recovery
+
+- Re-admit durable user-comment wakes through ordinary issue-locked admission
+  after open recovery actions resolve, for native and legacy predecessors.
+- Preserve original actor/comment/receipt identity, concurrent-sweeper
+  deduplication, Stop and no-replay evidence, pending decisions, dependencies and
+  predecessor cleanup. Mutable wait text is not queue identity.
+- Persist a specific admission reason and actual blocker next action. Keep the
+  real-Postgres stranded-wake regression module in the image gate. See
+  docs/incidents/2026-10-29-stranded-saved-comment-recovery.md.
+- Retire when upstream provides equivalent durable saved-comment promotion
+  across native and legacy recovery with these authority and cleanup fences.

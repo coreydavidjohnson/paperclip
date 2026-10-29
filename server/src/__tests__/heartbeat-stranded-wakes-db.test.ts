@@ -239,8 +239,11 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
       issueId: fixtureData.issue.id, kind: "question", status: "pending", payload: { questions: [] } as never });
     if (gate === "cleanup") await db.insert(environmentLeases).values({ companyId: fixtureData.company.id,
       heartbeatRunId: fixtureData.run.id, issueId: fixtureData.issue.id, status: "pending_cleanup" });
-    if (gate === "finalizing") await db.insert(nativeRunFinalizations).values({ companyId: fixtureData.company.id,
-      runId: fixtureData.run.id, issueId: fixtureData.issue.id, phase: "pending" });
+    if (gate === "finalizing") {
+      await db.update(heartbeatRuns).set({ nativeIssueId: fixtureData.issue.id }).where(eq(heartbeatRuns.id, fixtureData.run.id));
+      await db.insert(nativeRunFinalizations).values({ companyId: fixtureData.company.id,
+        runId: fixtureData.run.id, issueId: fixtureData.issue.id, phase: "pending" });
+    }
     if (gate === "agent_paused") fixtureData.deps.getAgentInvokability.mockResolvedValue({
       invokable: false, reason: "paused", message: "Resume the paused agent before this message can start.",
     });
