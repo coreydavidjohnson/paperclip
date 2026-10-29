@@ -282,7 +282,7 @@ const support = await getEmbeddedPostgresTestSupport();
     });
     it("persists full history but renders a fresh long wake below 40 KiB", async () => {
       const added = Array.from({ length: 162 }, (_, index) => ({
-        id: randomUUID(), companyId, issueId, authorType: "agent", authorAgentId: agentId,
+        id: randomUUID(), companyId, issueId, authorType: "agent" as const, authorAgentId: agentId,
         body: `Agent history ${index}: ${"unchanged status ".repeat(90)}`,
         createdAt: new Date(Date.UTC(2026, 9, 28, 18, 0, index)),
       }));
