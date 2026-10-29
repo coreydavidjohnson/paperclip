@@ -1462,14 +1462,16 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
   });
 
   it.each([
-    ['high', 'Huron', 'blocked', false, false, true],
-    ['critical', 'Huron', 'blocked', false, false, true],
-    ['medium', 'Huron', 'blocked', false, false, false],
-    ['high', 'Internal', 'blocked', false, false, false],
-    ['high', 'Huron', 'done', false, false, false],
-    ['high', 'Huron', 'blocked', true, false, false],
-    ['high', 'Huron', 'blocked', false, true, true],
-  ] as const)('orders %s dependency for %s %s (hidden=%s cycle=%s boost=%s) without preemption', async (priority, clientName, clientStatus, hidden, cycle, boosted) => {
+    ['critical', 'Internal', 'blocked', false, false, true, 'low'],
+    ['high', 'Huron', 'blocked', false, false, true, 'low'],
+    ['high', 'Huron', 'blocked', false, false, false, 'critical'],
+    ['critical', 'Huron', 'blocked', false, false, false, 'critical'],
+    ['medium', 'Huron', 'blocked', false, false, false, 'critical'],
+    ['high', 'Internal', 'blocked', false, false, false, 'critical'],
+    ['high', 'Huron', 'done', false, false, false, 'critical'],
+    ['high', 'Huron', 'blocked', true, false, false, 'critical'],
+    ['high', 'Huron', 'blocked', false, true, false, 'critical'],
+  ] as const)('orders %s dependency for %s %s (hidden=%s cycle=%s candidateFirst=%s olderPriority=%s) without preemption', async (priority, clientName, clientStatus, hidden, cycle, candidateFirst, olderPriority) => {
     const companyId = randomUUID(), agentId = randomUUID(), clientId = randomUUID();
     const activeId = randomUUID(), internalId = randomUUID(), candidateId = randomUUID(), middleId = randomUUID(), clientIssueId = randomUUID();
     await db.insert(companies).values({id: companyId, name: 'Client queue', issuePrefix: `C${companyId.slice(0, 6)}`, defaultResponsibleUserId: 'responsible-user'});
@@ -1479,7 +1481,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     ]);
     await db.insert(issues).values([
       {id: activeId, companyId, title: 'Already working', status: 'todo', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
-      {id: internalId, companyId, title: 'Older critical internal', status: 'in_progress', priority: 'critical', assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
+      {id: internalId, companyId, title: 'Older in-progress internal', status: 'in_progress', priority: olderPriority, assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
       {id: candidateId, companyId, title: 'Ready client blocker', status: 'todo', priority, assigneeAgentId: agentId, responsibleUserId: 'responsible-user'},
       {id: middleId, companyId, title: 'Intermediate blocker', status: 'blocked', assigneeAgentId: agentId},
       {id: clientIssueId, companyId, title: 'Client deliverable', status: clientStatus, hiddenAt: hidden ? new Date() : null, assigneeAgentId: clientId},
@@ -1502,8 +1504,12 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       await wake(candidateId);
       expect(order).toEqual([activeId]);
     } finally { finish(); }
-    expect(await waitForCondition(async () => order.length === 3, 15000)).toBe(true);
+    expect(await waitForCondition(async () => order.includes(internalId) && order.includes(candidateId), 15000)).toBe(true);
     await heartbeat.drainActiveRunExecutions();
-    expect(order.slice(0, 3)).toEqual(boosted ? [activeId, candidateId, internalId] : [activeId, internalId, candidateId]);
+    expect(order.slice(0, 2)).toEqual([activeId, candidateFirst ? candidateId : internalId]);
+    // Resolving the blocker can legitimately wake higher-priority descendants.
+    expect(order.filter(id => id === internalId || id === candidateId)).toEqual(
+      candidateFirst ? [candidateId, internalId] : [internalId, candidateId],
+    );
   }, 60000);
 });

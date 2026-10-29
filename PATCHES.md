@@ -421,7 +421,8 @@ heartbeat.ts.
   `12e3abaf98baa25ae58bf53dcc3f4d10594b6293` without restoring obsolete observer,
   admission-suspension or observer-retirement controllers. The split heartbeat
   modules retain claimed-lease adoption, isolated renewal pools, queued-comment
-  delivery acknowledgements, staleness checks and explicit client-path priority.
+  delivery acknowledgements and staleness checks. Queue priority is governed by
+  PER-1117 below, not a client-path exception.
   Retain scoped comment attribution, default projects, whole-note audit identity,
   typed routing-child cleanup, managed-compression provenance, owner handback,
   bounded readiness, attention/dashboard queries and UI refresh/read receipts.
@@ -497,3 +498,18 @@ heartbeat.ts.
   refusal/repair, guarded replay and durable normal same-session continuation.
 - Upstream checked at `67aa87a93bb1bbc4559105497863f541f9fb4e9b` (2026-10-25).
   Its resolve path still requires a blocked source; no equivalent guard exists.
+
+
+## PER-1117 queued issue priority across readiness classes
+
+- Ready issue runs use critical, high, medium, low priority, then queued time.
+  Neither in-progress status nor a client-blocking dependency path overrides
+  explicit issue priority. Non-issue runs retain FIFO in their existing group.
+- Readiness grouping, claim-time dependency/authority/approval checks, start
+  locks and active run concurrency remain unchanged. Running work is not preempted.
+- Regression: the existing real-PostgreSQL dependency-scheduling table now
+  includes older low in-progress versus later critical work, high client blockers
+  versus critical internal work, equal-priority FIFO and no-preemption assertions.
+- Upstream checked at 1fbbef45a on 2026-10-26: its queue still ranks in-progress
+  status ahead of priority. Remove when upstream provides strict priority-first
+  ordering among ready issue runs and these regression cases pass unchanged.

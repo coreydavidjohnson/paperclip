@@ -657,35 +657,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
   }
 
-  async function listQueuedClientPathIssueIds(companyId: string, issueIds: string[]) {
-    if (issueIds.length === 0) return new Set<string>();
-    // UNION over only (root_id, id) terminates malformed dependency cycles.
-    // Follow native blocks edges, not parenthood or resolved dependencies.
-    const rows = await db.execute<{ id: string }>(sql`
-      with recursive client_paths(root_id, id) as (
-        select candidate.id, candidate.id from ${issues} candidate
-        where candidate.company_id = ${companyId}
-          and candidate.id in (${sql.join(issueIds.map(id => sql`${id}::uuid`), sql`, `)})
-          and candidate.priority in ('critical', 'high')
-          and candidate.status not in ('done', 'cancelled') and candidate.hidden_at is null
-        union
-        select path.root_id, dependent.id from client_paths path
-        join ${issueRelations} relation on relation.issue_id = path.id
-          and relation.company_id = ${companyId} and relation.type = 'blocks'
-        join ${issues} dependent on dependent.id = relation.related_issue_id
-          and dependent.company_id = ${companyId}
-          and dependent.status not in ('done', 'cancelled') and dependent.hidden_at is null
-      )
-      select distinct path.root_id as id from client_paths path
-      join ${issues} client_issue on client_issue.id = path.id and client_issue.company_id = ${companyId}
-      join ${agents} client_agent on client_agent.id = client_issue.assignee_agent_id
-        and client_agent.company_id = ${companyId}
-      where path.root_id <> path.id and client_agent.name in
-        ('Co-Intelligence', 'Huron', 'AC Foods', 'AffirmedRx', 'Paragon', 'North Labs')
-    `);
-    return new Set(rows.map(row => row.id));
-  }
-
   async function listQueuedRunDependencyReadiness(
     companyId: string,
     queuedRuns: Array<typeof heartbeatRuns.$inferSelect>,
@@ -2079,7 +2050,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       const issueRows = await db
         .select({
           id: issues.id,
-          status: issues.status,
           priority: issues.priority,
         })
         .from(issues)
@@ -2092,8 +2062,6 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             : sql`false`,
         );
       const issueById = new Map(issueRows.map((row) => [row.id, row]));
-      const clientPathIssueIds = agent.name === "Home Lab"
-        ? await listQueuedClientPathIssueIds(agent.companyId, queuedIssueIds) : new Set<string>();
       const companyAgents = await listCompanyAgentOrgRows(agent.companyId);
       const prioritizedRuns = [...queuedRuns].sort((left, right) => {
         const leftIssueId = readNonEmptyString(
@@ -2116,23 +2084,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           : true;
         const leftIssue = leftIssueId ? issueById.get(leftIssueId) : null;
         const rightIssue = rightIssueId ? issueById.get(rightIssueId) : null;
-        const leftClientPath = leftReady && Boolean(leftIssueId && clientPathIssueIds.has(leftIssueId));
-        const rightClientPath = rightReady && Boolean(rightIssueId && clientPathIssueIds.has(rightIssueId));
-        if (leftClientPath !== rightClientPath) return leftClientPath ? -1 : 1;
-        const leftRank = leftIssueId
-          ? leftReady
-            ? leftIssue?.status === "in_progress"
-              ? 0
-              : 1
-            : 3
-          : 2;
-        const rightRank = rightIssueId
-          ? rightReady
-            ? rightIssue?.status === "in_progress"
-              ? 0
-              : 1
-            : 3
-          : 2;
+        // Ready issue work is priority-first regardless of status or client path.
+        // Keep non-issue FIFO and dependency readiness ahead of priority.
+        const leftRank = leftIssueId ? (leftReady ? 0 : 2) : 1;
+        const rightRank = rightIssueId ? (rightReady ? 0 : 2) : 1;
         if (leftRank !== rightRank) return leftRank - rightRank;
         const leftPriorityRank = issueRunPriorityRank(leftIssue?.priority);
         const rightPriorityRank = issueRunPriorityRank(rightIssue?.priority);
