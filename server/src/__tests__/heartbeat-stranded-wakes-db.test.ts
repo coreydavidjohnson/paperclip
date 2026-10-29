@@ -297,7 +297,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     const [blocker] = await db.insert(issues).values({ companyId: fixtureData.company.id,
       title: "Former prerequisite", status: "todo" }).returning();
     await db.insert(issueRelations).values({ companyId: fixtureData.company.id,
-      issueId: fixtureData.issue.id, relatedIssueId: blocker.id, type: "blocked_by" });
+      issueId: blocker.id, relatedIssueId: fixtureData.issue.id, type: "blocks" });
     await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, fixtureData.issue.id));
     const [cancelled] = await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: "issue_dependencies_blocked",
       startedAt: null, finishedAt: new Date(Date.now() - 1000),
@@ -307,7 +307,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     await db.update(issueRecoveryActions).set({ outcome: "blocked", evidence: {
       runId: cancelled.id, automaticRecovery: { policy: "preserve_without_replay_v1", replay: "blocked", actionOutcome: "unknown" },
     } }).where(eq(issueRecoveryActions.sourceIssueId, fixtureData.issue.id));
-    await db.delete(issueRelations).where(eq(issueRelations.issueId, fixtureData.issue.id));
+    await db.delete(issueRelations).where(eq(issueRelations.relatedIssueId, fixtureData.issue.id));
     await db.update(issues).set({ status: "todo" }).where(eq(issues.id, fixtureData.issue.id));
     expect(await legacyExecutionNeedsReconciliationWithEvidence(db, cancelled)).toBe(false);
     await fixtureData.queue.resumeQueuedRuns();
