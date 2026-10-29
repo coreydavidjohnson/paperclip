@@ -374,6 +374,43 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
     } });
   });
 
+  it.each([
+    Object.assign(new Error("write CONNECTION_CLOSED database:5432"), { code: "CONNECTION_CLOSED" }),
+    new Error("Failed query", { cause: Object.assign(new Error("connection lost"), { code: "08006" }) }),
+    Object.assign(new Error("terminating connection due to idle-in-transaction timeout"), { code: "25P03" }),
+  ])("schedules a bounded retry for a database disconnect before provider dispatch: %s", async error => {
+    const fixtureState = await fixture();
+    fixtureState.deps.scheduleBoundedRetryForRun.mockResolvedValue({
+      outcome: "scheduled", run: fixtureState.run, dueAt: new Date(), attempt: 1, maxAttempts: 2,
+    });
+    await fixtureState.completion.failRunSetup(fixtureState.setup(error));
+    expect(await read(fixtureState.run.id)).toMatchObject({ status: "failed", errorCode: "setup_failed",
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } });
+    expect(fixtureState.deps.scheduleBoundedRetryForRun).toHaveBeenCalledOnce();
+    expect(fixtureState.deps.scheduleInteractionContinuationInfrastructureRetryIfEligible).not.toHaveBeenCalled();
+    expect(fixtureState.deps.scheduleBoundedRetryForRun.mock.invocationCallOrder[0]).toBeLessThan(
+      fixtureState.deps.releaseIssueExecutionAndPromote.mock.invocationCallOrder[0]!);
+  });
+
+  it.each([
+    Object.assign(new Error("permission denied"), { code: "42501" }),
+    Object.assign(new Error("password authentication failed"), { code: "28P01" }),
+    new Error("Unknown setup failure"),
+  ])("does not retry permanent or unknown setup errors: %s", async error => {
+    const fixtureState = await fixture();
+    await fixtureState.completion.failRunSetup(fixtureState.setup(error));
+    expect(fixtureState.deps.scheduleBoundedRetryForRun).not.toHaveBeenCalled();
+  });
+
+  it("does not replay provider work after a database disconnect", async () => {
+    const fixtureState = await fixture();
+    await fixtureState.completion.failRunSetup(fixtureState.setup(
+      Object.assign(new Error("write CONNECTION_CLOSED database:5432"), { code: "CONNECTION_CLOSED" }), true));
+    expect(fixtureState.deps.scheduleBoundedRetryForRun).not.toHaveBeenCalled();
+    expect(await read(fixtureState.run.id)).toMatchObject({ resultJson: {
+      executionRecovery: { providerWorkStarted: true } } });
+  });
+
   it("records a lease lost before dispatch as a retryable host stop, not an opaque setup failure", async () => {
     const f = await fixture();
     f.controller.abort(new LegacyControllerLeaseLostError("renewal_rejected"));

@@ -28,13 +28,16 @@ heartbeat.ts.
   keepalive on the actual advisory-lock transaction during source preparation.
   Honor the database idle timeout. Keep transaction-scoped mutual exclusion,
   reentrancy and try-only behavior. Do not raise the database timeout or replay
-  failed setup work. The generic dedicated-connection callback is outside the
+  work inside the lock callback. The generic dedicated-connection callback is outside the
   reserved transaction, so a keepalive there would not keep this lock alive.
 - A real-Postgres regression configures a one-second idle timeout, holds the
   lock for 2.5 seconds, proves a second connection remains excluded, then
   verifies release and exactly one execution of the work callback. Before the
   backport it fails with CONNECTION_CLOSED at the database timeout.
 - Retire when the fork base includes upstream 0b266bd08.
+- Reuse the existing bounded retry budget for known database disconnects before
+  provider dispatch. Preserve the actual dispatch flag in recovery evidence;
+  never retry provider work, permanent failures or unknown setup errors.
 - Log preparation phases over 30 seconds with run ID, phase, elapsed time and
   outcome even when tracing is disabled. Do not include errors, credentials or
   workspace contents. This distinguishes acquisition, realization and earlier
