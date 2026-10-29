@@ -1840,9 +1840,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           and(eq(heartbeatRuns.createdAt, before.createdAt), lt(heartbeatRuns.id, before.id))) : undefined,
       )).orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id)).limit(20);
       for (const predecessor of history) {
-        if (await hasPendingIssueRunCleanup(queryDb, companyId, predecessor.id) ||
-            (!(await isUnusedExecutionAdmissionVerified(queryDb, predecessor)) &&
-             !(await isPreDispatchDependencyWaitVerified(queryDb, predecessor)))) return predecessor;
+        if (!(await isUnusedExecutionAdmissionVerified(queryDb, predecessor)) &&
+            !(await isPreDispatchDependencyWaitVerified(queryDb, predecessor))) return predecessor;
       }
       if (history.length < 20) return null;
       before = history.at(-1)!;

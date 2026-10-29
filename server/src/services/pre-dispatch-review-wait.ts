@@ -51,7 +51,7 @@ function hasNoDispatchClaim(run: Run): boolean {
 }
 
 export async function isPreDispatchDependencyWaitVerified(db: Db, run: Run): Promise<boolean> {
-  if (run.runtimeMode !== "legacy" || run.status !== "cancelled" ||
+  if (run.runtimeMode !== "legacy" || run.status !== "cancelled" || !run.finishedAt ||
       run.errorCode !== "issue_dependencies_blocked" || !hasNoDispatchClaim(run)) return false;
   if (run.resultJson !== null && (run.resultJson.stopReason !== run.errorCode ||
       !["dependency_gate", "stale_queued_run_gate"].includes(String(run.resultJson.timeoutSource)) ||
@@ -64,9 +64,11 @@ export async function isPreDispatchDependencyWaitVerified(db: Db, run: Run): Pro
 }
 
 export async function isUnusedExecutionAdmissionVerified(db: Db, run: Run): Promise<boolean> {
-  if (run.status !== "cancelled" || run.errorCode !== "execution_reconciliation_required" ||
+  if (run.status !== "cancelled" || !run.finishedAt || run.errorCode !== "execution_reconciliation_required" ||
       !hasNoDispatchClaim(run) || run.resultJson?.workspaceRestoreFailure ||
       run.resultJson?.workspaceRestoreRecovery || run.resultJson?.executionCancellation) return false;
+  const recovery = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  if (recovery && (recovery.kind !== "bootstrap" || recovery.providerWorkStarted !== false)) return false;
   return hasNoRetainedDispatch(db, run);
 }
 

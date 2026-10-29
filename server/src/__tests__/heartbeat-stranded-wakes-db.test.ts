@@ -195,7 +195,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, fixtureData.agent.id));
     expect(runs).toHaveLength(2);
     const successor = runs.find(run => run.id !== fixtureData.run.id)!;
-    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([fixtureData.comment.id, comment.id]);
+    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([comment.id]);
     expect(fixtureData.deps.executeRun).toHaveBeenCalledTimes(1);
     const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
     expect(receipt.status).not.toBe("deferred_issue_execution");
@@ -284,7 +284,7 @@ describe.skipIf(!support.supported)("stranded deferred wakes (PER-1016)", () => 
     expect(runs).toHaveLength(2);
     expect(fixtureData.deps.executeRun).toHaveBeenCalledTimes(1);
     const successor = runs.find(run => run.id !== fixtureData.run.id)!;
-    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([comment.id]);
+    expect(successor.contextSnapshot?.wakeCommentIds).toEqual([fixtureData.comment.id, comment.id]);
     const [admitted] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id));
     expect(admitted.runId).toBe(successor.id);
     const [held] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, fixtureData.wake.id));
