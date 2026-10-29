@@ -41,7 +41,7 @@ export const recoveryRunSelect = {
     else (select to_jsonb(result) from jsonb_to_record(
       case when jsonb_typeof(${heartbeatRuns.resultJson}) = 'object'
         then ${heartbeatRuns.resultJson} end
-    ) as result("errorFamily" jsonb, "workspaceValidation" jsonb,
+    ) as result("errorFamily" jsonb, "executionRecovery" jsonb, "workspaceValidation" jsonb,
       "configurationIncomplete" jsonb, "cancelledByActorType" jsonb,
       "finalizationReasonCode" jsonb, "providerQuotaRetryNotBefore" jsonb,
       "retryNotBefore" jsonb, "transientRetryNotBefore" jsonb)) end`,

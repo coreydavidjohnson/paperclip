@@ -7852,6 +7852,58 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     });
   });
 
+  it("retries stranded pre-dispatch database failure inside a disposition repair without spending another repair slot", async () => {
+    const fixture = await seedStrandedIssueFixture({ status: "in_progress", runStatus: "failed",
+      runErrorCode: "setup_failed", runError: "write CONNECTION_CLOSED paperclip-db-rw:5432" });
+    const sourceRunId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: fixture.companyId, agentId: fixture.agentId,
+      status: "succeeded", runtimeMode: "legacy", scopeKind: "issue", issueId: fixture.issueId,
+      contextSnapshot: { issueId: fixture.issueId }, createdAt: new Date("2026-03-18T23:00:00Z"),
+      finishedAt: new Date("2026-03-18T23:05:00Z") });
+    const episode = { id: sourceRunId, attempt: 1, maxAttempts: 2 };
+    const [action] = await db.insert(issueRecoveryActions).values({ companyId: fixture.companyId,
+      sourceIssueId: fixture.issueId, kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target",
+      ownerType: "agent", ownerAgentId: fixture.agentId, fingerprint: "legacy_disposition:v1:setup-recovery",
+      nextAction: "Choose a durable disposition", attemptCount: 1, maxAttempts: 2 }).returning();
+    await db.update(heartbeatRuns).set({ scopeKind: "issue", issueId: fixture.issueId, startedAt: null,
+      contextSnapshot: { issueId: fixture.issueId, taskId: fixture.issueId, source: "issue.deliberate_wait_disposition_repair",
+        retryReason: "issue_disposition_repair", dispositionRepairAttempt: 1,
+        dispositionRepairFingerprint: "legacy_disposition:v1:setup-recovery", dispositionRepairSourceRunId: sourceRunId,
+        legacyDispositionEpisode: episode } }).where(eq(heartbeatRuns.id, fixture.runId));
+    await db.update(issues).set({ checkoutRunId: null, executionRunId: null }).where(eq(issues.id, fixture.issueId));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: true, maxConcurrentRuns: 2 } } })
+      .where(eq(agents.id, fixture.agentId));
+    const heartbeat = heartbeatService(db);
+    const first = await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.reconcileStrandedAssignedIssues();
+    expect(first.continuationRequeued, JSON.stringify(first)).toBe(1);
+    const retries = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, fixture.runId));
+    expect(retries).toHaveLength(1);
+    expect(retries[0]).toMatchObject({ status: "scheduled_retry", scheduledRetryReason: "transient_failure",
+      scheduledRetryAttempt: 1, contextSnapshot: { legacyDispositionEpisode: episode, dispositionRepairAttempt: 1 } });
+    expect((await db.select().from(issues).where(eq(issues.id, fixture.issueId)))[0]!.status).toBe("in_progress");
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id)))[0])
+      .toMatchObject({ attemptCount: 1, status: "active" });
+  });
+
+  it("dispatches released in-progress work as a new assignment rather than retrying its stale run", async () => {
+    const fixture = await seedStrandedIssueFixture({ status: "in_progress", runStatus: "failed",
+      runErrorCode: "setup_failed", runError: "write CONNECTION_CLOSED paperclip-db-rw:5432" });
+    await db.update(issues).set({ checkoutRunId: null, executionRunId: null }).where(eq(issues.id, fixture.issueId));
+    await db.insert(activityLog).values({ companyId: fixture.companyId, actorType: "user", actorId: "board-reviewer",
+      action: "issue.updated", entityType: "issue", entityId: fixture.issueId,
+      details: { status: "in_progress", _previous: { status: "blocked" } } });
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: true, maxConcurrentRuns: 2 } } })
+      .where(eq(agents.id, fixture.agentId));
+    const result = await heartbeatService(db).reconcileStrandedAssignedIssues();
+    expect(result.assignmentDispatched).toBe(1);
+    const runs = await selectRecoveryRunsByAgent(fixture.agentId);
+    expect(runs).toHaveLength(2);
+    expect(runs.find(run => run.id !== fixture.runId)).toMatchObject({ retryOfRunId: null,
+      contextSnapshot: { source: "issue.assigned_in_progress_liveness_dispatch" } });
+  });
+
   it("reschedules an expired persisted disposition repair without duplicating the retry", async () => {
     const { companyId, agentId, issueId } = await seedStrandedIssueFixture({
       status: "in_progress",

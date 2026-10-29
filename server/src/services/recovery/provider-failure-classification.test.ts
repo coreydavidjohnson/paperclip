@@ -10,6 +10,16 @@ import { legacyExecutionNeedsReconciliation } from "../legacy-execution-recovery
 import { isConfigurationIncompleteFailedRun } from "../../modules/wake-queue/domain/values.js";
 
 describe("classifyAdapterFailureForRecovery", () => {
+  it.each(["CONNECTION_CLOSED", "CONNECT_TIMEOUT", "25P03"])("retries proven pre-dispatch database failure %s", (code) => {
+    const run = { errorCode: "setup_failed", error: `write ${code} paperclip-db-rw:5432`,
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } } };
+    expect(classifyContinuationFailure(run as never)).toMatchObject({ kind: "transient_infra", maxAttempts: 3 });
+    expect(classifyContinuationFailure({ ...run, resultJson: null } as never).kind).toBe("non_retryable");
+    expect(classifyContinuationFailure({ ...run,
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: true } } } as never).kind)
+      .toBe("non_retryable");
+    expect(classifyContinuationFailure({ ...run, error: "invalid credentials" } as never).kind).toBe("non_retryable");
+  });
   it("waits for model configuration changes instead of retrying a typed native model rejection", () => {
     const run = { errorCode: "native_provider_model_rejected", error: "Fixed model configuration message", resultJson: null };
     expect(classifyAdapterFailureForRecovery(run)).toEqual({ kind: "configuration_incomplete" });

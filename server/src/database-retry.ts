@@ -16,8 +16,12 @@ function hasDbConnectionErrorCode(error: unknown, matches: (code: string) => boo
   return false;
 }
 
+export function isTransientDbConnectionErrorCode(code: string): boolean {
+  return transientDbConnectionCodes.has(code);
+}
+
 export function isTransientDbConnectionError(error: unknown): boolean {
-  return hasDbConnectionErrorCode(error, (code) => transientDbConnectionCodes.has(code));
+  return hasDbConnectionErrorCode(error, isTransientDbConnectionErrorCode);
 }
 
 /**

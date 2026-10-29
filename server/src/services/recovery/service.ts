@@ -3,6 +3,7 @@ import { legacyExecutionWasReleased } from "../legacy-execution-release.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { recoveryRunSelect, retryAccountingRunSelect } from "../recovery-run-query.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
+import { isTransientDbConnectionErrorCode } from "../../database-retry.js";
 import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -213,6 +214,7 @@ type RecoveryWakeupOptions = {
   issueStateGuard?: {
     statuses: string[];
     assigneeAgentId: string;
+    statusVersion?: number;
   };
 };
 
@@ -721,6 +723,11 @@ export function classifyContinuationFailure(
   latestRun: LatestIssueRun,
 ): ContinuationRetryClassification {
   const errorCode = readNonEmptyString(latestRun?.errorCode);
+  const executionRecovery = parseObject(parseObject(latestRun?.resultJson).executionRecovery);
+  const preDispatchDatabaseFailure = errorCode === "setup_failed"
+    && executionRecovery.kind === "bootstrap"
+    && executionRecovery.providerWorkStarted === false
+    && (latestRun?.error?.match(/\b[A-Z0-9_]+\b/g) ?? []).some(isTransientDbConnectionErrorCode);
   if (errorCode === CONTINUATION_WAITING_ON_REVIEW_ERROR_CODE) {
     return {
       kind: "deliberate_wait_without_target",
@@ -729,7 +736,7 @@ export function classifyContinuationFailure(
       errorCode,
     };
   }
-  if (isAiAuthenticationBlocked(latestRun) || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
+  if (isAiAuthenticationBlocked(latestRun) || (!preDispatchDatabaseFailure && errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
     return {
       kind: "non_retryable",
       maxAttempts: 0,
@@ -737,7 +744,7 @@ export function classifyContinuationFailure(
       errorCode,
     };
   }
-  if (errorCode && TRANSIENT_INFRA_CONTINUATION_ERROR_CODES.has(errorCode)) {
+  if (preDispatchDatabaseFailure || (errorCode && TRANSIENT_INFRA_CONTINUATION_ERROR_CODES.has(errorCode))) {
     return {
       kind: "transient_infra",
       maxAttempts: CONTINUATION_RECOVERY_TRANSIENT_MAX_ATTEMPTS,
@@ -2132,7 +2139,7 @@ export function recoveryService(
     return queued;
   }
 
-  async function enqueueInitialAssignedTodoDispatch(
+  async function enqueueInitialAssignedDispatch(
     issue: typeof issues.$inferSelect,
     agentId: string,
   ) {
@@ -2140,10 +2147,11 @@ export function recoveryService(
       source: "assignment",
       triggerDetail: "system",
       reason: "issue_assigned",
+      issueStateGuard: { statuses: [issue.status], assigneeAgentId: agentId, statusVersion: issue.statusVersion },
       payload: withRecoveryContext(
         {
           issueId: issue.id,
-          mutation: "assigned_todo_liveness_dispatch",
+          mutation: `assigned_${issue.status}_liveness_dispatch`,
         },
         "normal_model",
       ),
@@ -2154,7 +2162,7 @@ export function recoveryService(
           issueId: issue.id,
           taskId: issue.id,
           wakeReason: "issue_assigned",
-          source: "issue.assigned_todo_liveness_dispatch",
+          source: `issue.assigned_${issue.status}_liveness_dispatch`,
         },
         "normal_model",
       ),
@@ -4599,6 +4607,7 @@ export function recoveryService(
       }
 
       let latestRun = await getLatestIssueRun(issue.companyId, issue.id);
+      let releasedExecution = false;
       // Terminal run/wake rows survive a restart even if finalization never
       // reached the escalation transaction. Retry that idempotent disposition
       // before the participant-only review branch can skip pathless reviews.
@@ -4794,6 +4803,7 @@ export function recoveryService(
           );
         if (source && await legacyExecutionWasReleased(db, issue, source)) {
           latestRun = null;
+          releasedExecution = true;
         } else if (source && await legacyExecutionNeedsReconciliationWithEvidence(db, source)) {
           await terminalizeLegacyExecution({
             db,
@@ -5290,7 +5300,7 @@ export function recoveryService(
         continue;
       }
 
-      if (issue.status === "todo") {
+      if (issue.status === "todo" || releasedExecution) {
         if (!latestRun) {
           // The onboarding first task is deliberately created without a wake:
           // nothing runs and no token is spent until the user types. It is not
@@ -5313,7 +5323,7 @@ export function recoveryService(
             continue;
           }
 
-          const queued = await enqueueInitialAssignedTodoDispatch(
+          const queued = await enqueueInitialAssignedDispatch(
             issue,
             agentId,
           );
@@ -5413,7 +5423,7 @@ export function recoveryService(
         result.skipped += 1;
         continue;
       }
-      if (readDispositionRepairAttempt(latestRun)) {
+      if (readDispositionRepairAttempt(latestRun) && !isUnsuccessfulTerminalIssueRun(latestRun)) {
         const outcome = await reconcileDispositionRepair(issue, latestRun);
         if (outcome === "queued") {
           result.continuationRequeued += 1;
