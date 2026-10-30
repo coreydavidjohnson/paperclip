@@ -104,6 +104,18 @@ heartbeat.ts.
   No schema migration, per-agent configuration or separate scheduler is added.
 - Retire when upstream provides the same issue-level admission limit and reset.
 
+## PER-1061 monitor times with a UTC offset
+
+- Monitor `nextCheckAt` and `timeoutAt` accept ISO times with an offset and
+  are normalized to UTC `Z` when the policy is normalized. A stored offset time
+  (for example `2026-10-29T18:35:00-05:00`) made every later update of that
+  issue fail with 422 `Invalid execution policy`, including clearing the
+  monitor, because each update re-validates the stored policy first.
+- Non-ISO values are still rejected. The image-gated
+  `issue-execution-policy.test.ts` covers both cases and idempotence.
+- Upstream master 417db14e7 still uses `z.string().datetime()` for these fields.
+  Retire this carry when upstream accepts offsets.
+
 ## PER-477 bounded API readiness during live-event reconnects
 
 - Keep raw transport state fail closed for UI WebSockets. After the first

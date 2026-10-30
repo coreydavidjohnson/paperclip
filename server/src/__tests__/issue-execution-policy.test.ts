@@ -150,6 +150,27 @@ describe("normalizeIssueExecutionPolicy", () => {
       },
     });
   });
+
+  it("accepts stored monitor times with a UTC offset and normalizes them to Z", () => {
+    const result = normalizeIssueExecutionPolicy({
+      monitor: {
+        nextCheckAt: "2026-10-29T18:35:00-05:00",
+        timeoutAt: "2026-10-29T20:00:00+01:00",
+        notes: "Stored with an offset",
+      },
+      stages: [],
+    });
+    expect(result?.monitor?.nextCheckAt).toBe("2026-10-29T23:35:00.000Z");
+    expect(result?.monitor?.timeoutAt).toBe("2026-10-29T19:00:00.000Z");
+    expect(normalizeIssueExecutionPolicy(result)).toEqual(result);
+  });
+
+  it("still rejects monitor times that are not ISO datetimes", () => {
+    expect(() => normalizeIssueExecutionPolicy({
+      monitor: { nextCheckAt: "tomorrow", notes: "bad" },
+      stages: [],
+    })).toThrow("Invalid execution policy");
+  });
 });
 
 describe("parseIssueExecutionState", () => {
