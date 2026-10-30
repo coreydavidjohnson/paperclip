@@ -249,6 +249,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/services/conversation-continuation.test.ts \
     src/services/native-runtime/native-safe-replacement.test.ts \
   && chown -R root:root /app
+RUN chown -R node:node /app && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run --hookTimeout=120000 --testTimeout=60000 src/__tests__/run-list-context-db.test.ts src/__tests__/run-secret-redaction.test.ts src/__tests__/heartbeat-run-privacy-routes.test.ts && chown -R root:root /app
 
 # Remote OpenCode and ACPX runs require a controller-owned provider pack to
 # verify the sandbox installation or stage matching assets. Ship it in the

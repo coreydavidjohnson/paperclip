@@ -22,6 +22,40 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-218 compact run-list context and released recovery-action index
+
+- Compact projection candidate, ported narrowly to fork base
+  `dd92b424dbb05ec735b5aa1c0cac658aa89d62f3`: the compact sidecar and same-transaction
+  trigger move small list/feed context reads off retained snapshots. Missing or
+  foreign-company projections use the original JSON. Current native issue binding,
+  task-key semantics, read retries, authorization, redaction, response fields and
+  recovery snapshots remain unchanged. Include queued-comment source wake IDs,
+  which were added since the old reviewed candidate. No generated columns, run
+  rewrite, pruning or data deletion. Historical copy is bounded to 100 PK IDs and
+  skips existing projections before reading their snapshots; conflicts never
+  replace newer trigger values. See `doc/DATABASE.md` for the cutover contract.
+- Checked upstream master `145214201d36070c89ce49211fa91ae28354157c` and latest
+  stable release `v2026.1023.0` (`1b4c803816e82b0265c8422e1a804327a7ed8c54`)
+  on October 30, 2026. Neither has this context sidecar. Upstream
+  `ebeac833a63c2bdd19f9df757d982925b0f7fbd9` bounds history and extracts context
+  once, already present in the fork; it still reads retained JSON. Upstream
+  `b7dc594bfaec15c8c87eb97a61931faf2d0aa518` narrows saved-message recovery reads,
+  not these list/feed projections. A database index cannot avoid decompressing
+  selected context values. Retire the compact carry when a shipped upstream
+  implementation provides equivalent lossless projections, transactional upkeep,
+  company fencing and missing-row fallback. No broad rebase or upstream post.
+- Separately delivered database-only Home Lab PostSync index:
+  `heartbeat_runs_company_recovery_action_created_idx` on
+  `(company_id, (context_snapshot->>'recoveryActionId'), created_at DESC, id DESC)`.
+  This is not a fork migration. Source tested `8944ef02`, infrastructure main
+  `bfe32111`. Parent-verified exact rare matching lookup: 4768 to 5099 ms before,
+  5.110 to 7.852 ms after; missing lookup: 5036 to 5658 ms before, 0.169 to
+  0.206 ms after. Full matched projection hash unchanged. Six shards, isolated
+  PostgreSQL 17.9 fixture/canary, production 17.11 index valid and ready, second
+  full sync with no rebuild. These index results do not validate or deploy the
+  compact candidate. Remove its PostSync ownership only when an equivalent
+  upstream index is actually shipped, not when proposed or merely merged.
+
 ## PER-477 bounded API readiness during live-event reconnects
 
 - Keep raw transport state fail closed for UI WebSockets. After the first

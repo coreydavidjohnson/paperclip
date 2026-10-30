@@ -1,4 +1,5 @@
 import { deriveTaskKey } from "./run-preparation.js";
+import { compactRunContext } from "../run-history-query.js";
 import { retryIdempotentDatabaseOperation } from "../../database-retry.js";
 import { isConversation } from "../agent-conversations.js";
 import fs from "node:fs/promises";
@@ -132,8 +133,7 @@ const heartbeatRunSummaryListColumns = {
 } as const;
 
 const heartbeatRunListContextRecord = sql`lateral jsonb_to_record(
-  case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
-    then ${heartbeatRuns.contextSnapshot} else '{}'::jsonb end
+  ${compactRunContext}
 ) as run_context("issueId" text, "taskId" text, "taskKey" text,
   "commentId" text, "wakeCommentId" text, "wakeReason" text,
   "wakeSource" text, "wakeTriggerDetail" text)`;
@@ -354,16 +354,16 @@ const heartbeatRunIssueSummaryColumns = {
   id: heartbeatRuns.id,
   runtimeMode: heartbeatRuns.runtimeMode,
   wakeupRequestId: heartbeatRuns.wakeupRequestId,
-  queuedCommentSourceWakeIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'queuedCommentSourceWakeIds'`.as("queuedCommentSourceWakeIds"),
+  queuedCommentSourceWakeIds: sql<string[] | null>`${compactRunContext} -> 'queuedCommentSourceWakeIds'`.as("queuedCommentSourceWakeIds"),
   status: heartbeatRuns.status,
   invocationSource: heartbeatRuns.invocationSource,
   triggerDetail: heartbeatRuns.triggerDetail,
   contextCommentId: sql<
     string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'commentId'`.as("contextCommentId"),
+  >`${compactRunContext} ->> 'commentId'`.as("contextCommentId"),
   contextWakeCommentId: sql<
     string | null
-  >`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`.as(
+  >`${compactRunContext} ->> 'wakeCommentId'`.as(
     "contextWakeCommentId",
   ),
   startedAt: heartbeatRuns.startedAt,

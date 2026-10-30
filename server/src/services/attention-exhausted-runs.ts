@@ -1,3 +1,4 @@
+import { compactRunContext } from "./run-history-query.js";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import { agents, heartbeatRunEvents, heartbeatRuns, type Db } from "@paperclipai/db";
 
@@ -21,12 +22,12 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
 
   // Match the legacy raw-JSON candidate fallback, not newer-run text coercion.
   const issueKey = sql`(case when jsonb_typeof(case
-    when ${heartbeatRuns.contextSnapshot} -> 'issueId' is null
-      or ${heartbeatRuns.contextSnapshot} -> 'issueId' = 'null'::jsonb
-    then ${heartbeatRuns.contextSnapshot} -> 'taskId'
-    else ${heartbeatRuns.contextSnapshot} -> 'issueId' end) = 'string'
-    then coalesce(${heartbeatRuns.contextSnapshot} ->> 'issueId',
-        ${heartbeatRuns.contextSnapshot} ->> 'taskId', '')
+    when ${compactRunContext} -> 'issueId' is null
+      or ${compactRunContext} -> 'issueId' = 'null'::jsonb
+    then ${compactRunContext} -> 'taskId'
+    else ${compactRunContext} -> 'issueId' end) = 'string'
+    then coalesce(${compactRunContext} ->> 'issueId',
+        ${compactRunContext} ->> 'taskId', '')
     else '' end)`;
 
   return db
@@ -41,8 +42,8 @@ export function listAttentionExhaustedRuns(db: Db, companyId: string) {
       // Preserve JSON types and issueId/taskId fallback semantics without
       // transferring prompts, transcripts, or the rest of the run context.
       contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
-        'issueId', ${heartbeatRuns.contextSnapshot} -> 'issueId',
-        'taskId', ${heartbeatRuns.contextSnapshot} -> 'taskId'
+        'issueId', ${compactRunContext} -> 'issueId',
+        'taskId', ${compactRunContext} -> 'taskId'
       )`,
       createdAt: heartbeatRuns.createdAt,
       updatedAt: heartbeatRuns.updatedAt,

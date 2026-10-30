@@ -1,6 +1,13 @@
 import { sql } from "drizzle-orm";
 import { heartbeatRuns } from "@paperclipai/db";
 
+export const compactRunContext = sql`coalesce(
+  (select c.context from public.heartbeat_run_list_context c
+    where c.run_id = "heartbeat_runs"."id" and c.company_id = "heartbeat_runs"."company_id"),
+  case when jsonb_typeof(${heartbeatRuns.contextSnapshot}) = 'object'
+    then ${heartbeatRuns.contextSnapshot} else '{}'::jsonb end
+)`;
+
 // Task run membership: the first-class issue binding OR company-scoped issue
 // activity. A UNION of two indexed lookups replaces the correlated OR-EXISTS,
 // which forced a scan of every company run. IN removes duplicates.

@@ -4,6 +4,41 @@ Paperclip uses PostgreSQL via [Drizzle ORM](https://orm.drizzle.team/). There ar
 
 ### Task query performance
 
+Migration `0356_run_list_context.sql` adds an internal, SQL-owned
+`heartbeat_run_list_context` read sidecar. It is not an authorization source or
+a replacement for `heartbeat_runs.context_snapshot`. Insert and context/company
+update triggers maintain a compact key whitelist in the same transaction. The
+history list, issue feed, execution summary and Attention candidate projections
+read it by run and company, falling back to the original JSON when it is absent.
+First-class issue binding, legacy task-key precedence, JSON coercion, response
+fields, redaction and indexed newer-run Attention predicates are unchanged.
+Wake, continuation and recovery snapshots remain intact, including distinct
+top-level and nested continuations. This reduces hot-read work, not stored data.
+
+Startup creates only the empty sidecar and trigger. It does not rewrite the
+run table, add generated columns or scan historical snapshots. This is a
+trigger-backed read model, represented in the Drizzle schema and exports without
+changing any response contract. Preserve executable migration history and retain
+only the five newest generated schema snapshots.
+
+Historical copy is separate: execute `scripts/backfill-run-list-context.sql`
+once per transaction with a validated UUID `cursor`, initially empty. The returned
+UUID is the next cursor; stop on the empty result. Each call visits at most 100
+primary-key IDs. Materialized missing-row selection skips retained snapshots
+already projected, and conflict-do-nothing cannot overwrite a concurrent trigger
+value. Set short session lock and statement timeouts in the owning runner, persist
+the cursor only after commit, and restart from empty safely for a verification
+pass. Do not run an unbounded loop inside a migration or transaction. Ordinary
+status/output updates do not recompute context. A context update still projects
+the full source once on the write path; benchmark that cost before release.
+
+This migration must precede the new readers. Before promotion, test existing-row
+upgrade, trigger/backfill concurrency, complete endpoint response equivalence,
+private-task denial and registered-secret redaction on the exact packaged source.
+Use disposable staging for this database change, then verify reconciliation and
+repeat-sync behavior. No backfill runner, live latency improvement, payload split
+or storage reclamation is implied by this source patch.
+
 Run-context lookups use expression indexes for both `context_snapshot.issueId`
 and `context_snapshot.paperclipIssue.id`. Task creation provenance has its own
 company-scoped expression index that follows the query's native issue ID and
