@@ -392,7 +392,7 @@ export const issueExecutionStageSchema = z.object({
 });
 
 export const issueExecutionMonitorPolicySchema = z.object({
-  nextCheckAt: z.string().datetime(),
+  nextCheckAt: z.string().datetime({ offset: true }),
   notes: z.string().max(500).optional().nullable().default(null),
   scheduledBy: z
     .enum(ISSUE_MONITOR_SCHEDULED_BY)
@@ -419,7 +419,7 @@ export const issueExecutionMonitorPolicySchema = z.object({
     .optional()
     .nullable()
     .default(null),
-  timeoutAt: z.string().datetime().optional().nullable().default(null),
+  timeoutAt: z.string().datetime({ offset: true }).optional().nullable().default(null),
   maxAttempts: z
     .number()
     .int()

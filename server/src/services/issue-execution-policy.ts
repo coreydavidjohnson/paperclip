@@ -347,6 +347,10 @@ export function setIssueExecutionPolicyMonitorScheduledBy(
   };
 }
 
+function normalizeMonitorTimestamp(value: string): string {
+  return value.endsWith("Z") ? value : new Date(value).toISOString();
+}
+
 export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPolicy | null {
   if (input == null) return null;
   const parsed = issueExecutionPolicySchema.safeParse(input);
@@ -386,13 +390,13 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
 
   const monitor = parsed.data.monitor
     ? {
-      nextCheckAt: parsed.data.monitor.nextCheckAt,
+      nextCheckAt: normalizeMonitorTimestamp(parsed.data.monitor.nextCheckAt),
       notes: normalizeMonitorNotes(parsed.data.monitor.notes),
       scheduledBy: parsed.data.monitor.scheduledBy,
       kind: parsed.data.monitor.kind ?? null,
       serviceName: normalizeMonitorText(parsed.data.monitor.serviceName),
       externalRef: redactIssueMonitorExternalRef(parsed.data.monitor.externalRef),
-      timeoutAt: parsed.data.monitor.timeoutAt ?? null,
+      timeoutAt: parsed.data.monitor.timeoutAt ? normalizeMonitorTimestamp(parsed.data.monitor.timeoutAt) : null,
       maxAttempts: parsed.data.monitor.maxAttempts ?? null,
       recoveryPolicy: parsed.data.monitor.recoveryPolicy ?? null,
     }

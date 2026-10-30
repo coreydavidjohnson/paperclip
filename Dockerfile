@@ -215,6 +215,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/heartbeat-list.test.ts \
     src/__tests__/attention-service.test.ts \
     src/__tests__/issue-blocker-attention.test.ts \
+    src/__tests__/issue-execution-policy.test.ts \
     src/__tests__/issue-review-attention.test.ts \
     src/__tests__/decision-queues-routes.test.ts \
     src/__tests__/authorization-service.test.ts \
