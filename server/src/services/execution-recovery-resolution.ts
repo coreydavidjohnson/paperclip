@@ -396,6 +396,11 @@ export async function deliverReconciledExecutions(
         sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
       ),
     )
+    .orderBy(
+      sql`${issueRecoveryActions.lastAttemptAt} asc nulls first`,
+      sql`${issueRecoveryActions.resolvedAt} asc nulls first`,
+      issueRecoveryActions.id,
+    )
     .limit(25);
   for (const action of pending) {
     try {
@@ -507,6 +512,15 @@ export async function deliverReconciledExecutions(
         { recoveryActionId: action.id },
         "Reconciled execution continuation remains pending for retry",
       );
+    } finally {
+      await db.update(issueRecoveryActions).set({ lastAttemptAt: new Date() }).where(and(
+        eq(issueRecoveryActions.companyId, action.companyId),
+        eq(issueRecoveryActions.id, action.id),
+        eq(issueRecoveryActions.status, "resolved"),
+        sql`${issueRecoveryActions.evidence}->>'continuationDelivery' = 'pending'`,
+        sql`${issueRecoveryActions.evidence}->'executionReconciliation' =
+            ${JSON.stringify(action.evidence.executionReconciliation ?? null)}::jsonb`,
+      ));
     }
   }
 }

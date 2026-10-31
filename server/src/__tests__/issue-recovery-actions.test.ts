@@ -1889,6 +1889,73 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     });
   });
 
+  it("reconciled deliveries behind a blocked batch receive exactly one admission", async () => {
+    const { companyId, coderId, sourceIssueId, prefix } = await seedCompany();
+    const responsibleUserId = randomUUID();
+    await db.insert(authUsers).values({
+      id: responsibleUserId, name: "Recovery operator", email: responsibleUserId + "@example.test",
+      emailVerified: true, createdAt: new Date(), updatedAt: new Date(),
+    });
+    await db.update(companies).set({ defaultResponsibleUserId: responsibleUserId }).where(eq(companies.id, companyId));
+    await db.update(agents).set({ runtimeConfig: { heartbeat: { maxConcurrentRuns: 1 } } }).where(eq(agents.id, coderId));
+    await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), status: "running" });
+    const blockedIssueIds: string[] = [];
+    let eligibleIssueId = "";
+    let eligibleActionId = "";
+    for (let index = 0; index < 26; index++) {
+      const issueId = randomUUID();
+      const runId = randomUUID();
+      const actionId = randomUUID();
+      const stamp = new Date(Date.now() - 120_000 + index);
+      await db.insert(issues).values({
+        id: issueId, companyId, title: `Pending delivery ${index}`, status: "todo",
+        priority: "medium", assigneeAgentId: coderId, issueNumber: index + 2,
+        identifier: `${prefix}-${index + 2}`,
+      });
+      await seedHeartbeatRun({ companyId, agentId: coderId, runId, issueId, status: "failed" });
+      await db.update(heartbeatRuns).set({
+        runtimeMode: "legacy", scopeKind: "issue", issueId, errorCode: "process_lost",
+        createdAt: stamp, finishedAt: stamp,
+      }).where(eq(heartbeatRuns.id, runId));
+      await db.insert(issueRecoveryActions).values({
+        id: actionId, companyId, sourceIssueId: issueId, kind: "active_run_watchdog",
+        status: "resolved", ownerType: "board", returnOwnerAgentId: coderId,
+        cause: "legacy_execution_requires_reconciliation", fingerprint: runId,
+        outcome: "handed_back", nextAction: "Continue after verified reconciliation.",
+        resolvedAt: stamp, createdAt: stamp, updatedAt: stamp,
+        evidence: {
+          runId, continuationDelivery: "pending",
+          executionReconciliation: {
+            runId, providerStopped: true, actionOutcome: "not_performed",
+            outcomeEvidence: "The stopped provider submitted no action; operator verified its retained records.",
+          },
+        },
+      });
+      if (index < 25) {
+        blockedIssueIds.push(issueId);
+        await db.insert(issueRelations).values({
+          companyId, issueId: sourceIssueId, relatedIssueId: issueId, type: "blocks",
+        });
+      } else {
+        eligibleIssueId = issueId;
+        eligibleActionId = actionId;
+      }
+    }
+    const heartbeat = heartbeatService(db, { runtimeEnv: {} });
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    await deliverReconciledExecutions(db, heartbeat.wakeup);
+    const successors = await db.select().from(agentWakeupRequests).where(eq(
+      agentWakeupRequests.idempotencyKey, `execution-reconciliation:${eligibleActionId}`,
+    ));
+    expect(successors).toHaveLength(1);
+    expect(successors[0]!.runId).toBeTruthy();
+    expect(successors[0]!.payload?.issueId).toBe(eligibleIssueId);
+    const rows = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(rows.filter(row => row.contextSnapshot?.source === "execution.reconciled"
+      && blockedIssueIds.includes(String(row.contextSnapshot?.issueId)))).toHaveLength(0);
+  });
+
   it.each(["resolved", "cancelled"])("omits %s recovery instructions when the original worker resumes", async (status) => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const action = await issueRecoveryActionService(db).upsertSourceScoped({
