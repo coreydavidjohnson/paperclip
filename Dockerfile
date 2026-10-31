@@ -160,9 +160,10 @@ RUN rm -rf packages/paperclip-runner/runner/target
 # the single local target that runs the whole gate.
 FROM build AS luma-gate-static
 RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && node --test scripts/pnpm-resource-budget.test.mjs packages/paperclip-runner/scripts/materialize-cursor-distribution.test.mjs packages/paperclip-runner/scripts/candidate-provider-pack.test.mjs
-# Gate pods reserve 10 GiB: two packages at a time, each Go heap bounded at
-# 3 GiB, using the pod's six CPUs.
-RUN GOMEMLIMIT=3GiB GOMAXPROCS=3 pnpm -r --workspace-concurrency=2 typecheck
+# Gate pods have 6 CPUs and a 10 GiB limit: three packages at a time, each
+# tsc (TypeScript 7, Go) free to use every CPU with its heap bounded at
+# 2.5 GiB, so the worst case stays under the pod limit.
+RUN GOMEMLIMIT=2560MiB pnpm -r --workspace-concurrency=3 typecheck
 RUN pnpm check:token-gates
 # Retained production checks use the same Node 24 runtime as the image.
 RUN node --experimental-vm-modules --test scripts/comment-read-receipts.test.mjs \

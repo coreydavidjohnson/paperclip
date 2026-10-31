@@ -388,8 +388,9 @@ heartbeat.ts.
   the same exact source, beside the image Job, and prints `PAPERCLIP_IMAGE_CI_OK`
   only when the image and every gate pass. A pushed tag without that receipt is
   never promoted.
-- Typecheck runs two packages at a time (`--workspace-concurrency=2`,
-  `GOMAXPROCS=3`) within the gate pod's 6 CPUs and 10 GiB.
+- Typecheck runs three packages at a time (`--workspace-concurrency=3`,
+  `GOMEMLIMIT=2560MiB`, no `GOMAXPROCS` cap) within the gate pod's 6 CPUs and
+  10 GiB.
 - Measured on image 20261030.12325: the gate took 52 minutes of a 2-hour serial
   build (typecheck 17 minutes, server suites 24 minutes).
 - Remove when: the fork carries no patches.
