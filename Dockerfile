@@ -153,11 +153,16 @@ RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" &
 RUN rm -rf packages/paperclip-runner/runner/target
 
 # Luma fork gate (PATCHES.md): every carried patch's regression suite and the
-# full workspace typecheck must pass before the production image is assembled.
-FROM build AS luma-patch-tests
+# full workspace typecheck must pass before a release is promoted. The gate is
+# not part of `production`: image CI builds `production` and the three
+# independent gate targets below as parallel Jobs from the same exact source,
+# and reports success only when all of them pass. `luma-patch-tests` remains
+# the single local target that runs the whole gate.
+FROM build AS luma-gate-static
 RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && node --test scripts/pnpm-resource-budget.test.mjs packages/paperclip-runner/scripts/materialize-cursor-distribution.test.mjs packages/paperclip-runner/scripts/candidate-provider-pack.test.mjs
-# BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
-RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
+# Gate pods reserve 10 GiB: two packages at a time, each Go heap bounded at
+# 3 GiB, using the pod's six CPUs.
+RUN GOMEMLIMIT=3GiB GOMAXPROCS=3 pnpm -r --workspace-concurrency=2 typecheck
 RUN pnpm check:token-gates
 # Retained production checks use the same Node 24 runtime as the image.
 RUN node --experimental-vm-modules --test scripts/comment-read-receipts.test.mjs \
@@ -175,10 +180,20 @@ RUN pnpm --filter @paperclipai/ui exec vitest run \
     src/pages/IssueDetail.test.tsx \
     src/hooks/useTaskBrowsers.test.ts \
     src/components/WorkspaceFileMarkdownBody.availability.test.tsx
-RUN pnpm --filter @paperclipai/adapter-utils exec vitest run src/server-utils.test.ts
+RUN pnpm --filter @paperclipai/adapter-utils exec vitest run src/server-utils.test.ts \
+  && touch /luma-gate-passed
+
+# Server regression suites in two shards of about 15 minutes each, balanced
+# by measured file durations from image build 20261030.12325.
+FROM build AS luma-gate-server-1
 RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home \
   && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
     --hookTimeout=120000 --testTimeout=60000 \
+    src/__tests__/heartbeat-process-recovery.test.ts \
+    src/__tests__/company-skills-service.test.ts \
+    src/services/explicit-native-continuation.test.ts \
+    src/__tests__/issue-recovery-actions.test.ts \
+    src/__tests__/authorization-service.test.ts \
     src/controller-drain.test.ts \
     src/__tests__/db-errors.test.ts \
     src/__tests__/health-readiness-db.test.ts \
@@ -199,6 +214,12 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/heartbeat-stale-liveness-recovery.test.ts \
     src/services/heartbeat/run-completion.test.ts \
     src/services/heartbeat/run-lifecycle.test.ts \
+  && touch /luma-gate-passed
+
+FROM build AS luma-gate-server-2
+RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home \
+  && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
+    --hookTimeout=120000 --testTimeout=60000 \
     src/services/legacy-controller-lease.test.ts \
     src/services/legacy-execution-recovery.test.ts \
     src/__tests__/legacy-released-failure.test.ts \
@@ -208,7 +229,6 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/services/heartbeat/runtime-execution.test.ts \
     src/__tests__/heartbeat-run-output.test.ts \
     src/__tests__/heartbeat-stranded-wakes-db.test.ts \
-    src/__tests__/heartbeat-process-recovery.test.ts \
     src/__tests__/live-events-transport.test.ts \
     src/__tests__/live-events-ws.test.ts \
     src/__tests__/home-lab-delegation.test.ts \
@@ -222,12 +242,9 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/issue-blocker-attention.test.ts \
     src/__tests__/issue-review-attention.test.ts \
     src/__tests__/decision-queues-routes.test.ts \
-    src/__tests__/authorization-service.test.ts \
     src/__tests__/decision-retention-service.test.ts \
     src/__tests__/recovery-run-query-db.test.ts \
-    src/__tests__/issue-recovery-actions.test.ts \
     src/__tests__/heartbeat-session-preparation.test.ts \
-    src/services/explicit-native-continuation.test.ts \
     src/services/execution-continuation.test.ts \
     src/__tests__/issue-list-metadata-routes.test.ts \
     src/__tests__/private-json-etag.test.ts \
@@ -236,7 +253,6 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/company-skills-routes.test.ts \
     src/__tests__/adapter-model-refresh-routes.test.ts \
     src/__tests__/attention-failure-history-db.test.ts \
-    src/__tests__/company-skills-service.test.ts \
     src/__tests__/dashboard-service.test.ts \
     src/__tests__/heartbeat-context-summary.test.ts \
     src/__tests__/heartbeat-dependency-scheduling.test.ts \
@@ -253,7 +269,12 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/run-context-keys-db.test.ts \
     src/services/conversation-continuation.test.ts \
     src/services/native-runtime/native-safe-replacement.test.ts \
-  && chown -R root:root /app
+  && touch /luma-gate-passed
+
+FROM build AS luma-patch-tests
+COPY --from=luma-gate-static /luma-gate-passed /luma-gate/static
+COPY --from=luma-gate-server-1 /luma-gate-passed /luma-gate/server-1
+COPY --from=luma-gate-server-2 /luma-gate-passed /luma-gate/server-2
 
 # Remote OpenCode and ACPX runs require a controller-owned provider pack to
 # verify the sandbox installation or stage matching assets. Ship it in the
@@ -300,7 +321,7 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-COPY --chown=node:node --from=luma-patch-tests /app /app
+COPY --chown=node:node --from=build /app /app
 
 COPY --from=runner-provider-pack /provider-pack /opt/paperclip-runner/provider-pack
 # Managed deployments can remap node's UID at startup. This immutable pack
