@@ -35,6 +35,12 @@ heartbeat.ts.
   verifies release and exactly one execution of the work callback. Before the
   backport it fails with CONNECTION_CLOSED at the database timeout.
 - Retire when the fork base includes upstream 0b266bd08.
+- The skill version cache lock (`skill_version_cache:<company>`) is held on the
+  same dedicated connection while run preparation snapshots skill files. It
+  uses the same keepalive. Production on 2026-10-31 showed it idle in
+  transaction for 60 seconds and terminated, failing `configuration_skills`
+  setup with CONNECTION_CLOSED. A real-Postgres regression holds it past a
+  one-second idle timeout.
 - Reuse the existing bounded retry budget for known database disconnects before
   provider dispatch. Preserve the actual dispatch flag in recovery evidence;
   never retry provider work, permanent failures or unknown setup errors.

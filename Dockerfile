@@ -203,6 +203,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/services/legacy-execution-recovery.test.ts \
     src/__tests__/legacy-released-failure.test.ts \
     src/__tests__/isolated-source-lock-keepalive.test.ts \
+    src/__tests__/skill-cache-lock-keepalive.test.ts \
     src/__tests__/heartbeat-long-setup.test.ts \
     src/services/heartbeat/preparation-slow-phase.test.ts \
     src/services/heartbeat/runtime-execution.test.ts \

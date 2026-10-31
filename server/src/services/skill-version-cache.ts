@@ -8,6 +8,7 @@ import { companySkillVersions, companySkillRepositorySnapshots, heartbeatRuns,
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { assertSkillSnapshotPath } from "./skill-snapshot.js";
 import { repositorySkillFrontmatter } from "./skill-repository-package.js";
+import { withWorkspaceLockKeepalive } from "./native-runtime/native-workspace-lock-keepalive.js";
 import type { CompanySkillVersionFileInventoryEntry } from "@paperclipai/shared";
 
 export const SKILL_VERSION_CACHE_IDLE_MS = 60 * 60 * 1000;
@@ -27,11 +28,14 @@ export async function withSkillVersionCacheLock<T>(db: Db, companyId: string, ac
   // connection for this lock would deadlock installations with a one-slot pool.
   return withDedicatedDbConnection(db, connection => connection.transaction(async tx => {
     const key = `skill_version_cache:${companyId}`;
-    if (tryOnly) {
-      const rows = await tx.execute<{ acquired: boolean }>(sql`select pg_try_advisory_xact_lock(hashtextextended(${key}, 0)) as acquired`);
-      if (!rows[0]?.acquired) throw new SkillCacheBusy();
-    } else await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
-    return locks.run([...held, { db, companyId }], action);
+    const acquire = tryOnly
+      ? sql`pg_try_advisory_xact_lock(hashtextextended(${key}, 0))`
+      : sql`pg_advisory_xact_lock(hashtextextended(${key}, 0))`;
+    const rows = await tx.execute<{ acquired: boolean | string; idle_timeout_ms: string | number | null }>(sql`select ${acquire} as acquired,
+      (select setting::bigint from pg_settings where name = 'idle_in_transaction_session_timeout') as idle_timeout_ms`);
+    if (tryOnly && !rows[0]?.acquired) throw new SkillCacheBusy();
+    return withWorkspaceLockKeepalive(tx, Number(rows[0]?.idle_timeout_ms),
+      () => locks.run([...held, { db, companyId }], action));
   }));
 }
 
