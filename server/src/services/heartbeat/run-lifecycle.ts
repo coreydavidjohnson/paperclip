@@ -1,3 +1,4 @@
+import { apiMetrics } from "../../api-metrics.js";
 import { preserveQueuedSteeringAcknowledgements } from "../legacy-execution-recovery.js";
 import {
   DEFERRED_WAKE_CONTEXT_KEY,
@@ -1201,6 +1202,12 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
             });
 
     if (updated) {
+      // Count only committed adapter-reported failures. Losing a finalization
+      // CAS or replaying a terminal status is not a disposition failure.
+      if (updated.status === "failed" && updated.errorCode === "paperclip_disposition_failed"
+        && !isHeartbeatRunTerminalStatus(previousStatus?.status)) {
+        apiMetrics.failure("disposition_failure");
+      }
       publishLiveEvent({
         companyId: updated.companyId,
         type: "heartbeat.run.status",

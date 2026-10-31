@@ -144,6 +144,24 @@ heartbeat.ts.
 - Retire this carry when upstream supplies the same lossless per-record delta,
   withdrawal, trust and full-snapshot fallback contract. No OmniGenT/Codex patch,
   limit increase or genuine provider-recovery acceptance is implied.
+## PER-316 queued-interrupt restart carry
+
+- Why: a server exit after saving a queued interrupt but before cancellation
+  left the original running. Recovery also missed the current indexed issue
+  identity and historical `taskId` identity when guarding successor runs.
+- Contract: record the original run in the existing durable queue transaction.
+  Recovery revalidates company, issue, assignee, actor, current queue and task
+  eligibility before retrying only that target through native cancellation.
+  Indexed issue identity wins over conflicting legacy context. Targetless old
+  receipts cannot gain stop authority. Existing process-stop and admission
+  fences remain required; never wait for provider cancellation under issue locks.
+- Files: `server/src/routes/issues.ts`, `services/operator-interrupt.ts`, and
+  `services/heartbeat/run-control.ts`. Real-database/process regressions live in
+  `issue-queued-comments-routes.test.ts`, already part of the image gate.
+- Scope: this is not the normal comment-POST replay repair. Automatic resend
+  remains disabled until whole-operation replay and staging qualify it.
+- Remove when upstream saves original queue interrupt authority and recovers it
+  with equivalent indexed/legacy identity and successor safety.
 
 ## PER-1009 production carry and recovery conflict corrections
 
@@ -443,6 +461,39 @@ heartbeat.ts.
 
 - Owned terminal completion transfers cleanup-event authority before fallible post-terminal effects; the real-database cleanup regression preserves the warning after a completion exception without granting stale observers a new epoch.
 
+## Delivered comment revisions before questions (PER-316)
+
+- Why: the current question guard reads only the initial run snapshot. An
+  authenticated external comment delivery records a durable acknowledgement,
+  but a later question still receives `newer_comment_not_delivered`.
+- Scope: reread the source run under the issue/run fence and accept only its
+  server-owned acknowledged receipt for the exact current comment revision.
+  Delivery and ordered native steering record that revision. A fresh delivery
+  can refresh an old versionless receipt; a question write cannot.
+- Preserve unread/later/edited direction, foreign-run, pending/failed and invalid
+  receipt rejection; do not mutate the launch snapshot or approve anything.
+- Regression: real delivery-to-question route plus receipt negative controls in
+  the complete interaction service suite, both retained in the image gate.
+  Current-base red proof and limits are in
+  `docs/incidents/2026-10-25-paperclip-comment-delivery.md`.
+- Remove when upstream delivers the same revision-bound acknowledgement guard.
+
+## Bounded delivery and control-failure telemetry (PER-316)
+
+- Why: verify the comment latency target and distinguish an observed lease loss
+  from an adapter-reported disposition failure without exposing task data.
+- Contract: middleware starts before idle admission, parsing and authorization.
+  Histograms use fixed methods, registered route templates and status only,
+  with a 300 ms bucket and bounded overflow. Scrapes do not observe themselves.
+  Process-local counters record one controller abort or one committed
+  `paperclip_disposition_failed` terminal transition, not refused CAS writes.
+- Regression: metrics and real comment-router response/error tests, controller
+  lease expiry and lifecycle stale/replayed failure tests in the image gate.
+- This adds the private scrape surface only. Production ingress exclusion,
+  monitoring configuration and live verification must land together.
+- Remove when equivalent upstream telemetry supplies these exact acceptance
+  measurements and bounded, non-sensitive labels.
+
 ## Homelab-owned settings (not fork patches)
 
 - Database indexes in `luma-homelab` `k8s/paperclip/70-db-indexes.yaml`
@@ -513,3 +564,55 @@ heartbeat.ts.
 - Upstream checked at 1fbbef45a on 2026-10-26: its queue still ranks in-progress
   status ahead of priority. Remove when upstream provides strict priority-first
   ordering among ready issue runs and these regression cases pass unchanged.
+## PER-316 normal comment POST operation replay
+
+- Why: the normal issue-comment route performed interrupt and transition side effects before `addComment` applied its client-request-key dedupe. A replay could therefore stop a successor even when the response was 201 or 409.
+- Contract: keyed human comments use the issue-row lock to bind company, issue, user, request key, body, attachments, presentation/metadata, and reopen/resume/interrupt flags. The supported plain/attachment path commits the comment, immutable receipt, audit row, fast-response request, and exact original-target interrupt wake together. Exact replay returns the saved comment. Conflicting input returns 409 before any new side effect. Interrupt delivery reuses the existing run-control and process-identity gates.
+- Compatibility: legacy comments without a durable receipt can return only the exact existing content and attachment set; their control flags are never replayed. Unsupported transition, review/auto-approval, closed-workspace, Paperclip Runner interrupt, and unassigned variants keep their first-request route behavior but receive a fingerprinted retry-disabled receipt where the issue has an assignee. A receipt left in `started` state after an uncertain result rejects replay rather than granting fresh stop authority. Unassigned requests cannot use the existing wake receipt table and remain unqualified.
+- Files: `server/src/routes/issues.ts` and `server/src/__tests__/issue-queued-comments-routes.test.ts`.
+- Verification: real-database/process replay, conflicting-control/attachment, concurrency, original-target, and rollback checks are being run on this branch. No image, deployment, or production acceptance is implied.
+- Remove when upstream provides equivalent whole-operation request receipts and successor-safe interrupt recovery.
+
+## PER-316 bounded saved-direction fairness
+
+- Why: the stranded deferred-wake sweep repeatedly chose the oldest fifty
+  requests. A safely Stop-held batch could permanently hide a runnable later
+  receipt. Stamping only after comment/interaction checks also missed generic,
+  duplicate-task and missing-interaction early returns.
+- Contract: retain the existing eligibility predicate and fifty-row bound. In a
+  short transaction, select by persisted `updatedAt`, requested time and ID,
+  skip locked wake rows, and stamp every selected row using database time.
+  Commit before ordinary admission. This is an attempt cursor, not a delivery
+  claim, a new retry permission or a substitute for admission deduplication.
+- Keep Stop, owner, company, input, budget, approval, dependency, active-work and
+  process-stop guards unchanged. No receipt deletion, cap increase, live saved
+  work replay, or stopped-task reassignment repair is included.
+- Upstream checked at `1fbbef45a8d399771add7a27a04b12f3a20e264c` on
+  2026-10-26. Its updated-time ordering is useful precedent, but its stamp is
+  still after an early missing-interaction return; the fork's generic path
+  requires all-selected rotation too. Unrelated upstream admission changes are
+  not imported by this carry.
+- Regression: `server/src/services/heartbeat/queue.test.ts` uses real PostgreSQL
+  and real release admission for fifty acknowledged Stops followed by one valid
+  task message, including concurrent sweep instances and session preservation.
+  Stable ties, generic and missing-interaction returns, queue recreation, and
+  locked-receipt/joined-task isolation are separate controls.
+- Remove when upstream supplies bounded persisted rotation for every selected
+  path with equivalent concurrency and unchanged admission protections.
+
+## PER-316 / PER-1199 release composition
+
+- Compose replay-safe comment source through `5e558ed96` with the recovery,
+  keepalive and priority fixes at `4b80d2e2`. Port the separate string route
+  registrations from `2d3b63cee` so private metrics retain both route templates.
+- Preserve the existing stale-release, exact Stop, concurrency and run-budget
+  regressions. Do not import the later PER-626 status-projection policy into
+  this release. Its failed broad composition is retained in the task evidence.
+- Honor `retry_exhausted` when setup releases execution. Generic immediate
+  recovery must not grant temporary database or workspace setup a second
+  automatic retry budget. Unknown provider outcomes remain held.
+- Regression: `heartbeat/run-completion.test.ts` reproduces the exhausted
+  pre-dispatch database case. The nine-file focused gate passes 238 tests,
+  including the complete comment-route, metrics, readiness and recovery suites.
+- Remove these carries when upstream provides equivalent replay-safe route
+  receipts, attributed metrics and setup retry-exhaustion enforcement.

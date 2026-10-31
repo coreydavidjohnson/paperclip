@@ -1466,6 +1466,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           );
         });
       }
+      let setupRetryExhausted = false;
       const failedAgent =
         setupFailureAgent ??
         (await getAgent(run.agentId).catch(() => null));
@@ -1488,7 +1489,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         const retryableDatabaseSetupFailure = !providerDispatchStarted
           && setupFailureErrorCode === "setup_failed"
           && isTransientDbConnectionError(outerErr);
-        await (isTransientWorkspaceGitScanCode(livenessRun.errorCode) || retryableDatabaseSetupFailure
+        const setupRetryDecision = await (isTransientWorkspaceGitScanCode(livenessRun.errorCode) || retryableDatabaseSetupFailure
           ? scheduleBoundedRetryForRun(livenessRun, failedAgent)
           : scheduleInteractionContinuationInfrastructureRetryIfEligible(livenessRun, failedAgent)
         ).catch((retryError) => {
@@ -1496,10 +1497,13 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
             { err: retryError, runId: livenessRun.id },
             "failed to schedule interaction continuation retry after setup failure",
           );
+          return null;
         });
+        setupRetryExhausted = setupRetryDecision?.outcome === "retry_exhausted";
       }
       await releaseIssueExecutionAndPromote(livenessRun, {
         suppressImmediateRecovery:
+          setupRetryExhausted ||
           readNonEmptyString(
             parseObject(livenessRun.contextSnapshot).goalControlRequestId,
           ) !== null ||

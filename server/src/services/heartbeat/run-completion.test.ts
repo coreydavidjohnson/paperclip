@@ -392,6 +392,19 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
       fixtureState.deps.releaseIssueExecutionAndPromote.mock.invocationCallOrder[0]!);
   });
 
+  it("does not grant generic recovery a second budget after database setup retries are exhausted", async () => {
+    const fixtureState = await fixture();
+    fixtureState.deps.scheduleBoundedRetryForRun.mockResolvedValue({
+      outcome: "retry_exhausted", attempt: 3, maxAttempts: 2,
+    });
+    await fixtureState.completion.failRunSetup(fixtureState.setup(
+      Object.assign(new Error("write CONNECTION_CLOSED database:5432"), { code: "CONNECTION_CLOSED" })));
+    expect(fixtureState.deps.scheduleBoundedRetryForRun).toHaveBeenCalledOnce();
+    expect(fixtureState.deps.scheduleInteractionContinuationInfrastructureRetryIfEligible).not.toHaveBeenCalled();
+    expect(fixtureState.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledWith(
+      expect.objectContaining({ id: fixtureState.run.id }), { suppressImmediateRecovery: true });
+  });
+
   it.each([
     Object.assign(new Error("permission denied"), { code: "42501" }),
     Object.assign(new Error("password authentication failed"), { code: "28P01" }),

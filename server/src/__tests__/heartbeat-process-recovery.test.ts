@@ -6195,7 +6195,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const workspaceId = randomUUID();
     const heartbeat = heartbeatService(db);
     const previousSettings = await instanceSettingsService(db).getExperimental();
+    const previousGitDiscovery = process.env.GIT_DISCOVERY_ACROSS_FILESYSTEM;
     try {
+      // This case requires Git's proven ordinary-directory diagnostic. A
+      // disposable /tmp mount must not change it to an unknown boundary error.
+      process.env.GIT_DISCOVERY_ACROSS_FILESYSTEM = "1";
       await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: true });
       await db.insert(projects).values({ id: projectId, companyId, name: "Local documents", status: "in_progress" });
       await db.insert(projectWorkspaces).values({
@@ -6232,6 +6236,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       expect(comments.some((comment) => comment.body.includes("workspace failed validation"))).toBe(true);
       expect(mockCaptureRunFailure.mock.calls.filter(([event]) => event.runId === runId)).toEqual([]);
     } finally {
+      if (previousGitDiscovery === undefined) delete process.env.GIT_DISCOVERY_ACROSS_FILESYSTEM;
+      else process.env.GIT_DISCOVERY_ACROSS_FILESYSTEM = previousGitDiscovery;
       await heartbeat.waitForRunExecutionDrain(runId);
       await instanceSettingsService(db).updateExperimental({ enableIsolatedWorkspaces: previousSettings.enableIsolatedWorkspaces });
       await fs.rm(cwd, { recursive: true, force: true });
@@ -8566,10 +8572,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       executionCancellation: { state: "acknowledged" },
       conversationContinuation: "continue_conversation_v1",
     } }).where(eq(heartbeatRuns.id, runId));
-    const failedPromotion = vi.spyOn(db, "transaction").mockRejectedValueOnce(new Error("temporary queue promotion outage"));
+    // The fair scan now has its own transaction before release admission.
+    // Fail promotion, not that unrelated cursor update.
+    const transaction = db.transaction.bind(db);
+    const failedPromotion = vi.spyOn(db, "transaction")
+      .mockImplementationOnce(transaction)
+      .mockRejectedValueOnce(new Error("temporary queue promotion outage"));
     try {
       await heartbeatService(db).resumeQueuedRuns();
-      expect(failedPromotion).toHaveBeenCalled();
+      expect(failedPromotion).toHaveBeenCalledTimes(2);
       expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake!.id)))[0]!.status).toBe("deferred_issue_execution");
     } finally {
       failedPromotion.mockRestore();
