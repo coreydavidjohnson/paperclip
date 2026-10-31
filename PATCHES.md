@@ -9,8 +9,8 @@ No upstream issue or PR links, by Corey's instruction.
 The PER-980 audit (drop/carry per old commit) is in the PER-980 ticket. Every
 carried patch below has a regression suite run by the `luma-patch-tests`
 Dockerfile stage, which also runs `pnpm -r typecheck` and `pnpm check:token-gates`.
-The production stage copies from that stage, so an image cannot exist unless
-the gate passed.
+Image CI builds that gate as three parallel targets beside the package-only
+`production` image, and reports a release candidate only when all of them pass.
 
 Not carried any more (upstream covers them, or the PER-966 lifecycle replaces
 them): create-task dialog overrides (upstream dialog uses the task composer),
@@ -380,7 +380,19 @@ heartbeat.ts.
 ## 16. Image gate
 
 - `Dockerfile` stage `luma-patch-tests` (after `build`): full typecheck, token
-  gates and every suite named above. `production` copies `/app` from it.
+  gates and every suite named above. It aggregates three independent targets:
+  `luma-gate-static` (typecheck, token gates, node, UI and adapter-utils suites)
+  and `luma-gate-server-1`/`-2` (the server suites, balanced by measured duration).
+- `production` copies `/app` from `build` and runs no tests. Luma image CI
+  (`scripts/ci/paperclip-image.py`) builds each gate target in its own Job from
+  the same exact source, beside the image Job, and prints `PAPERCLIP_IMAGE_CI_OK`
+  only when the image and every gate pass. A pushed tag without that receipt is
+  never promoted.
+- Typecheck runs two packages at a time (`--workspace-concurrency=2`,
+  `GOMAXPROCS=3`) within the gate pod's 6 CPUs and 10 GiB.
+- Measured on image 20261030.12325: the gate took 52 minutes of a 2-hour serial
+  build (typecheck 17 minutes, server suites 24 minutes).
+- Remove when: the fork carries no patches.
 - Remove when: the fork carries no patches.
 
 ## 17. Core external-run liveness (PER-966)
