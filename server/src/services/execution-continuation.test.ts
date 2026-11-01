@@ -390,10 +390,11 @@ const support = await getEmbeddedPostgresTestSupport();
       const stableId = randomUUID(), changedId = randomUUID(), withdrawnId = randomUUID();
       const agentResultId = randomUUID(), baselineRunId = randomUUID();
       const answer = (text: string): AskUserQuestionsResult => ({ version: 1, answers: [{ questionId: "scope", optionIds: [], otherText: text }] });
+      const unchangedDecision = "Unchanged decision. ".repeat(250);
       await db.insert(issueThreadInteractions).values([stableId, changedId, withdrawnId].map((id): typeof issueThreadInteractions.$inferInsert => ({
         id, companyId, issueId, kind: "ask_user_questions", status: "answered",
         resolvedByUserId: "local-board", resolvedAt: new Date("2026-09-08T10:03:00Z"),
-        payload: { version: 1, questions: [] }, result: answer(id === stableId ? "Unchanged decision. ".repeat(5000) : "Original decision."),
+        payload: { version: 1, questions: [] }, result: answer(id === stableId ? unchangedDecision : "Original decision."),
       })));
       const resume = () => buildExecutionContinuation({ db, companyId, issueId, agentId,
         previousContextRunId: baselineRunId, context: { interactionId }, summary: null, exposeLowTrustRaw: false });
@@ -426,7 +427,7 @@ const support = await getEmbeddedPostgresTestSupport();
         const deltaPrompt = renderPaperclipWakePrompt(wake, { resumedSession: true });
         const snapshotPrompt = renderPaperclipWakePrompt(wake, { resumedSession: false });
         expect(deltaPrompt).not.toContain("Unchanged decision.");
-        expect(Buffer.byteLength(snapshotPrompt) - Buffer.byteLength(deltaPrompt)).toBeGreaterThan(180_000);
+        expect(Buffer.byteLength(snapshotPrompt) - Buffer.byteLength(deltaPrompt)).toBeGreaterThan(Buffer.byteLength(unchangedDecision));
 
         // The persisted envelope remains full, even after a delta-rendered wake.
         await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, executionContinuation: current } })
@@ -436,7 +437,7 @@ const support = await getEmbeddedPostgresTestSupport();
         expect(next.resumeDelta?.interactionOutcomes).toEqual({ updated: [], removedIds: [] });
         expect(next.humanResponses).toEqual(current.humanResponses);
         // Legacy/unknown component baselines fall back independently to snapshots.
-        const { humanResponses, interactionOutcomes, ...legacy } = delivered;
+        const { humanResponses, interactionOutcomes, promptProjection, ...legacy } = delivered;
         await db.update(heartbeatRuns).set({ contextSnapshot: { issueId, executionContinuation: legacy } })
           .where(eq(heartbeatRuns.id, baselineRunId));
         const unknown = await resume();
@@ -448,6 +449,39 @@ const support = await getEmbeddedPostgresTestSupport();
         for (const id of [stableId, changedId, withdrawnId, agentResultId])
           await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, id));
         await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, baselineRunId));
+      }
+    });
+    it("uses a fresh snapshot after a reference-only wake withdraws an approval", async () => {
+      const oversizedId = randomUUID(), withdrawnId = randomUUID(), baselineId = randomUUID();
+      const answer = (text: string): AskUserQuestionsResult => ({ version: 1, answers: [{ questionId: "scope", optionIds: [], otherText: text }] });
+      await db.insert(issueThreadInteractions).values([
+        { id: oversizedId, companyId, issueId, kind: "ask_user_questions", status: "answered",
+          resolvedByUserId: "local-board", resolvedAt: new Date(), payload: { version: 1, questions: [] },
+          result: answer("Large decision. ".repeat(2000)) },
+        { id: withdrawnId, companyId, issueId, kind: "request_confirmation", status: "accepted",
+          resolvedByUserId: "local-board", resolvedAt: new Date(), payload: { version: 1, prompt: "May this fixture publish?" },
+          result: { version: 1, outcome: "accepted" } },
+      ]);
+      try {
+        const baseline = await build();
+        expect(baseline.promptProjection?.coverage.requiresThreadFetch).toBe(true);
+        await db.insert(heartbeatRuns).values({ id: baselineId, companyId, agentId, status: "succeeded",
+          contextSnapshot: { issueId, executionContinuation: baseline } });
+        await db.update(issueThreadInteractions).set({ result: answer("Small decision.") })
+          .where(eq(issueThreadInteractions.id, oversizedId));
+        await db.update(issueThreadInteractions).set({ status: "pending" })
+          .where(eq(issueThreadInteractions.id, withdrawnId));
+        const current = await buildExecutionContinuation({ db, companyId, issueId, agentId,
+          previousContextRunId: baselineId, context: { interactionId }, summary: null, exposeLowTrustRaw: false });
+        expect(current.resumeDelta).toBeUndefined();
+        expect(current.promptProjection?.coverage.requiresThreadFetch).not.toBe(true);
+        expect(current.promptProjection?.humanResponses?.map(row => row.id)).toEqual([oversizedId]);
+        const prompt = renderPaperclipWakePrompt({ executionContinuation: current }, { resumedSession: true });
+        expect(prompt).toContain('"humanResponsesCoverage":{"kind":"snapshot"}');
+      } finally {
+        for (const id of [oversizedId, withdrawnId])
+          await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, id));
+        await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, baselineId));
       }
     });
     it("carries rejection and resolver changes without retaining withdrawn human authority", async () => {
@@ -476,8 +510,9 @@ const support = await getEmbeddedPostgresTestSupport();
         expect(current.resumeDelta?.humanResponses?.removedIds).toEqual([taintedId]);
         expect(current.resumeDelta?.interactionOutcomes?.updated.map(row => row.id)).toEqual([rejectedId]);
         // An invalid legacy record cannot prove a per-component baseline.
+        const { promptProjection, ...legacy } = current;
         await db.update(heartbeatRuns).set({ contextSnapshot: { issueId,
-          executionContinuation: { ...current, humanResponses: [null] } } }).where(eq(heartbeatRuns.id, baselineId));
+          executionContinuation: { ...legacy, humanResponses: [null] } } }).where(eq(heartbeatRuns.id, baselineId));
         expect((await resume()).resumeDelta?.humanResponses).toBeUndefined();
         // A foreign task's envelope is not a baseline, even with the same run ID.
         await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: randomUUID(), executionContinuation: current } })

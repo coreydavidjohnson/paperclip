@@ -294,7 +294,7 @@ export async function buildExecutionContinuation(input: {
     : null;
   const priorSnapshot = object(previousRun?.context?.executionContinuation);
   const priorEnvelope = object(priorSnapshot.promptProjection ?? priorSnapshot);
-  const deliveredMessages = Array.isArray(priorEnvelope.messages)
+  const deliveredMessages = object(priorEnvelope.coverage).requiresThreadFetch !== true && Array.isArray(priorEnvelope.messages)
     ? priorEnvelope.messages.map(object)
     : null;
   const humanResponses = interactions.flatMap(row => {
