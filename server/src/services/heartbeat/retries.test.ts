@@ -92,6 +92,22 @@ describe("heartbeat retry module callbacks", () => {
     expect(database.access).not.toHaveBeenCalled();
   });
 
+  it("does not create a transient retry while its dependency is open", async () => {
+    const database = guardedDatabase();
+    const deps = callbacks();
+    deps.runDispatch.evaluateScheduledRetryGate.mockResolvedValue({ allowed: false,
+      errorCode: "issue_dependencies_blocked", issueId: "issue", reason: "Waiting for blocker",
+      details: { unresolvedBlockerIssueIds: ["blocker"], unresolvedBlockerCount: 1 },
+    });
+    const result = await extracted.createHeartbeatRetries(database.db, deps).scheduleBoundedRetryForRun(
+      unitRun(), { adapterType: "codex_local" } as Agent,
+    );
+    expect(result).toMatchObject({ outcome: "not_scheduled", errorCode: "issue_dependencies_blocked" });
+    expect(deps.runDispatch.evaluateScheduledRetryGate).toHaveBeenCalledOnce();
+    expect(deps.resolveSessionBeforeForWakeup).not.toHaveBeenCalled();
+    expect(database.access).not.toHaveBeenCalled();
+  });
+
   it("records exhaustion before escalating a plan-resume failure", async () => {
     const database = guardedDatabase();
     const deps = callbacks();

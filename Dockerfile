@@ -162,6 +162,7 @@ RUN pnpm check:token-gates
 # Retained production checks use the same Node 24 runtime as the image.
 RUN node --experimental-vm-modules --test scripts/comment-read-receipts.test.mjs \
     scripts/health-readiness.test.mjs scripts/managed-compression-block.test.mjs \
+    scripts/continuation-budget.test.mjs \
     server/test/completion-timing.node.ts server/test/completion-timing-semantic.node.cjs
 RUN pnpm --filter @paperclipai/ui exec vitest run \
     src/components/task-chat/composer-run-settings.test.ts \
@@ -229,6 +230,9 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/heartbeat-session-preparation.test.ts \
     src/services/explicit-native-continuation.test.ts \
     src/services/execution-continuation.test.ts \
+    src/services/heartbeat/retries.test.ts \
+    src/modules/run-dispatch/domain/policy.test.ts \
+    src/modules/run-dispatch/adapters/postgres.test.ts \
     src/__tests__/issue-list-metadata-routes.test.ts \
     src/__tests__/private-json-etag.test.ts \
     src/lib/async-ttl-cache.test.ts \

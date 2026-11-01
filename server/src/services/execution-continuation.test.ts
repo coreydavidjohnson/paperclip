@@ -280,6 +280,32 @@ const support = await getEmbeddedPostgresTestSupport();
         await db.delete(issueComments).where(eq(issueComments.id, id));
       }
     });
+    it("persists full history but renders a fresh long wake below 40 KiB", async () => {
+      const added = Array.from({ length: 162 }, (_, index) => ({
+        id: randomUUID(), companyId, issueId, authorType: "agent" as const, authorAgentId: agentId,
+        body: `Agent history ${index}: ${"unchanged status ".repeat(90)}`,
+        createdAt: new Date(Date.UTC(2026, 9, 28, 18, 0, index)),
+      }));
+      await db.insert(issueComments).values(added);
+      try {
+        const context = await build();
+        expect(context.messages).toHaveLength(165);
+        expect(context.promptProjection?.messages).toHaveLength(8);
+        expect(context.promptProjection?.coverage.kind).toBe("bounded_task_history");
+        const prompt = renderPaperclipWakePrompt({
+          issue: { id: issueId, title: "Continue saved work", description: "Preserve approval gates." },
+          executionContinuation: context,
+        }, { resumedSession: false });
+        expect(Buffer.byteLength(prompt, "utf8")).toBeLessThan(40 * 1024);
+        expect(prompt).not.toContain("Agent history 0:");
+        expect(prompt).toContain("Agent history 161:");
+        expect(prompt).toContain("Now summarize my recent Gmail emails.");
+        expect(prompt).toContain("Notion read completed.");
+        expect(prompt).toContain("bounded_task_history");
+      } finally {
+        for (const row of added) await db.delete(issueComments).where(eq(issueComments.id, row.id));
+      }
+    });
     it("retains delivered Gmail origin and later direction after Notion completion", async () => {
       const context = await build();
       expect(context.originCommentIds).toContain(gmailId);
