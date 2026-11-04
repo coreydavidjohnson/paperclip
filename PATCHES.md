@@ -636,3 +636,17 @@ heartbeat.ts.
   including the complete comment-route, metrics, readiness and recovery suites.
 - Remove these carries when upstream provides equivalent replay-safe route
   receipts, attributed metrics and setup retry-exhaustion enforcement.
+
+## Routine coalescing against open idle issues (PER-1310)
+
+- Upstream paperclipai/paperclip#7926 (open); fix PR #4770 was closed
+  unmerged. `coalesce_if_active` treated a routine issue as active only while
+  a heartbeat run was live, so a blocked issue whose run had finished was
+  invisible and every fire created a duplicate (22 open "Alert digest"
+  issues on 2026-11-03). `findLiveExecutionIssue` and
+  `listLiveIssueByRoutineIds` now treat any open, visible execution issue as
+  active.
+- Regression: routines-service "coalesces into an open but idle routine issue
+  instead of duplicating it"; routines-service plus routine-status-reconciliation
+  pass 94/94.
+- Remove when upstream ships equivalent open-issue coalescing.
