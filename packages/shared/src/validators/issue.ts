@@ -604,9 +604,10 @@ export const resolveIssueRecoveryActionSchema = z
   })
   .strict()
   .superRefine((value, ctx) => {
-    if (value.statusRepair && (!value.actionId || value.outcome !== "restored" || value.sourceIssueStatus !== "todo" ||
+    const guardedCancellation = value.statusRepair && value.outcome === "cancelled" && value.sourceIssueStatus === "cancelled";
+    if (value.statusRepair && (!value.actionId || (!guardedCancellation && (value.outcome !== "restored" || value.sourceIssueStatus !== "todo")) ||
         value.workspaceBaseRef || value.executionReconciliation || !value.resolutionNote?.trim() || value.resolutionNote.length > 2000)) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["statusRepair"], message: "Status repair must restore the exact action to todo with a short normal-continuation note" });
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["statusRepair"], message: "Status repair must restore the exact action to todo or cancel it with a short disposition note" });
     }
     if (value.workspaceBaseRef && (!value.actionId || value.outcome !== "restored" || value.sourceIssueStatus !== "todo" || value.executionReconciliation)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["workspaceBaseRef"], message: "Branch repair must retry the exact recovery action" });
@@ -643,6 +644,7 @@ export const resolveIssueRecoveryActionSchema = z
     }
 
     if (value.outcome === "false_positive" || value.outcome === "cancelled") {
+      if (guardedCancellation) return;
       if (
         value.sourceIssueStatus !== "done" &&
         value.sourceIssueStatus !== "in_review"

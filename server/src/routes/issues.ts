@@ -9604,11 +9604,12 @@ export function issueRoutes(
         workspaceBaseRef,
         statusRepair,
       } = req.body;
-      if (outcome === "false_positive" || outcome === "cancelled") {
+      const guardedCancellation = Boolean(statusRepair && outcome === "cancelled" && sourceIssueStatus === "cancelled");
+      if (outcome === "false_positive" || (outcome === "cancelled" && !guardedCancellation)) {
         assertBoard(req);
       }
 
-      if (statusRepair) assertBoard(req);
+      if (statusRepair && !guardedCancellation) assertBoard(req);
       if (workspaceBaseRef) {
         assertBoard(req);
         const decision = await access.decide({ actor: req.actor, action: "runtime:manage", resource: { type: "company", companyId: existing.companyId } });
@@ -9646,17 +9647,21 @@ export function issueRoutes(
         )).limit(1).for("update");
         if (statusRepair) {
           const action = workspaceRepairAction;
+          if (guardedCancellation && req.actor.type === "agent" && req.actor.agentId !== lockedIssue.assigneeAgentId) {
+            throw forbidden("Only the current task owner can cancel an exhausted duplicate through its native run.");
+          }
           const stale = () => conflict("The task or recovery action changed. Refresh before repairing its status.", { code: "recovery_status_repair_stale" });
           if (!action || action.id !== actionId || action.kind !== "deliberate_wait_without_target" || action.ownerType !== "board" ||
               action.wakePolicy?.type !== "board_escalation" || action.evidence.terminalReason !== "unchanged_source_state_exhausted" ||
               action.returnOwnerAgentId !== statusRepair.assigneeAgentId || lockedIssue.assigneeAgentId !== statusRepair.assigneeAgentId ||
               lockedIssue.assigneeUserId || !["blocked", "in_progress", "todo"].includes(statusRepair.sourceStatus)) throw stale();
           const receipt = parseObject(action.evidence.guardedStatusRepair);
-          if (action.status === "resolved") {
+          if (action.status === "resolved" || action.status === "cancelled") {
             // Check before the generic settled-action/late-note replay path.
-            if (action.outcome !== "handed_back" || !isDeepStrictEqual(receipt.request, statusRepair) ||
-                receipt.actorId !== actor.actorId || action.resolutionNote !== resolutionNote ||
-                lockedIssue.status !== "todo" || lockedIssue.updatedAt.toISOString() !== receipt.sourceUpdatedAt ||
+            if (action.status !== (guardedCancellation ? "cancelled" : "resolved") ||
+                action.outcome !== (guardedCancellation ? "cancelled" : "handed_back") || !isDeepStrictEqual(receipt.request, statusRepair) ||
+                receipt.actorType !== actor.actorType || receipt.actorId !== actor.actorId || action.resolutionNote !== resolutionNote ||
+                lockedIssue.status !== sourceIssueStatus || lockedIssue.updatedAt.toISOString() !== receipt.sourceUpdatedAt ||
                 lockedIssue.statusVersion !== receipt.sourceStatusVersion) throw stale();
             const newerAction = await recoveryActionsSvc.getActiveForIssue(lockedIssue.companyId, lockedIssue.id, tx);
             if (newerAction) throw stale();
@@ -9673,6 +9678,9 @@ export function issueRoutes(
             inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
           )).limit(1);
           if (liveRun) throw conflict("An execution already owns this task. Preserve its current recovery path.");
+          if (await getExecutionBlocker(tx as unknown as Db, lockedIssue.companyId, lockedIssue.id)) {
+            throw conflict("Reconcile the existing execution or retained-workspace hold before repairing this task.");
+          }
           await assertSafeRecoveryHandBackGates({ req, issue: lockedIssue, recoveryAction: issueRecoveryActionReadModel(action) });
         }
 
@@ -9878,8 +9886,8 @@ export function issueRoutes(
         // silently retry a new assignee from an old notice. All admission gates
         // below still apply, even for a board operator.
         if (
-          outcome === "restored" &&
-          sourceIssueStatus === "todo" &&
+          (outcome === "restored" || guardedCancellation) &&
+          (sourceIssueStatus === "todo" || guardedCancellation) &&
           (activeRecoveryAction.kind === "deliberate_wait_without_target" || workspaceBaseRef)
         ) {
           // A bounded owner repair is the recorded owner's own lane: the owner
@@ -10210,7 +10218,8 @@ export function issueRoutes(
 
         if (statusRepair) {
           const receipt = { request: statusRepair, actorType: actor.actorType, actorId: actor.actorId,
-            sourceUpdatedAt: issue.updatedAt.toISOString(), sourceStatusVersion: issue.statusVersion, delivery: "pending" };
+            sourceUpdatedAt: issue.updatedAt.toISOString(), sourceStatusVersion: issue.statusVersion,
+            delivery: guardedCancellation ? "not_requested" : "pending" };
           await tx.update(issueRecoveryActions).set({ evidence: { ...recoveryAction.evidence, guardedStatusRepair: receipt } })
             .where(eq(issueRecoveryActions.id, recoveryAction.id));
         }
@@ -10279,7 +10288,7 @@ export function issueRoutes(
 
 
 
-      if (statusRepair) {
+      if (statusRepair && !guardedCancellation) {
         await deliverGuardedStatusRepairs(db, enqueueRecoveryActionWakeup, result.recoveryAction.id);
       } else if (result.chatRetry) {
         // The intent is committed with recovery resolution. A lost immediate

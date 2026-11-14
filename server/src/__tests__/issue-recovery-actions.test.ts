@@ -2999,6 +2999,64 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(before);
   });
 
+  async function seedBacklogCleanupRun(companyId: string, agentId: string) {
+    const [cleanup] = await db.insert(issues).values({ companyId, title: "Reconcile this owner's backlog",
+      status: "in_progress", assigneeAgentId: agentId }).returning();
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId, issueId: cleanup.id, runId });
+    await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, cleanup.id));
+    return runId;
+  }
+
+  it.each(["board", "owner"])("PER-1507 %s cancels an exact exhausted duplicate once without continuation", async (actorType) => {
+    const { companyId, coderId, sourceIssueId, action, repair } = await seedTrappedDisposition();
+    const runId = await seedBacklogCleanupRun(companyId, coderId);
+    const actor = actorType === "owner"
+      ? { type: "agent", companyId, agentId: coderId, runId, source: "agent_key" }
+      : { type: "board", source: "local_implicit" };
+    const wake = vi.fn(async () => null);
+    const app = createApp(actor, { recoveryActionEnqueueWakeup: wake });
+    const body = { actionId: action.id, outcome: "cancelled", sourceIssueStatus: "cancelled", statusRepair: repair,
+      resolutionNote: "Confirmed duplicate. The surviving task retains the work and all approvals." };
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    const stored = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
+    const source = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    expect(source[0]).toMatchObject({ status: "cancelled", assigneeAgentId: coderId });
+    expect(stored[0]).toMatchObject({ status: "cancelled", outcome: "cancelled", evidence: {
+      terminalReason: "unchanged_source_state_exhausted", guardedStatusRepair: { delivery: "not_requested" },
+    } });
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(200);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(source);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(stored);
+    const logs = await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId));
+    expect(logs.filter(entry => entry.action === "issue.recovery_action_resolved")).toHaveLength(1);
+    expect(wake).not.toHaveBeenCalled();
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId))).toHaveLength(0);
+    const otherActor = actorType === "owner" ? { type: "board", source: "local_implicit" }
+      : { type: "agent", companyId, agentId: coderId, runId, source: "agent_key" };
+    await request(createApp(otherActor)).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+    await db.update(issues).set({ updatedAt: new Date(Date.now() + 1000) }).where(eq(issues.id, sourceIssueId));
+    await request(app).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`).send(body).expect(409);
+  });
+
+  it.each(["foreign_owner", "missing_run"])("PER-1507 refuses %s terminal repair without partial source or action writes", async (gate) => {
+    const { companyId, coderId, managerId, sourceIssueId, sourceIssue, action, repair } = await seedTrappedDisposition();
+    const runId = gate === "foreign_owner" ? await seedBacklogCleanupRun(companyId, managerId) : undefined;
+    const actor = { type: "agent", companyId, agentId: gate === "foreign_owner" ? managerId : coderId,
+      ...(runId ? { runId } : {}), source: "agent_key" };
+    await request(createApp(actor)).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "cancelled", sourceIssueStatus: "cancelled", statusRepair: repair,
+        resolutionNote: "Confirmed duplicate. Cancellation still requires current owner authority." }).expect(gate === "foreign_owner" ? 403 : 401);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual([action]);
+    // Failed cross-issue attempts still consume the existing safety cap.
+    expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toEqual(
+      gate === "foreign_owner" ? [expect.objectContaining({
+        action: "issue.cross_issue_influence_observed", actorId: managerId, runId,
+      })] : [],
+    );
+  });
+
   it("PER-968 repairs the third trap once with a normal same-session continuation", async () => {
     const { sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
     const wake = vi.fn(async (_agentId: string, _opts: any) => ({ id: randomUUID() }));
@@ -3030,9 +3088,14 @@ describeEmbeddedPostgres("issue recovery actions", () => {
         resolutionNote: "Continue the task normally." }).expect(409);
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
     expect(await issueRecoveryActionService(db).getActiveForIssue(sourceIssue.companyId, sourceIssueId)).toMatchObject({ id: action.id });
+    await request(createApp()).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "cancelled", sourceIssueStatus: "cancelled", statusRepair: stale,
+        resolutionNote: "Confirmed duplicate. Do not launch another execution." }).expect(409);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
+    expect(await issueRecoveryActionService(db).getActiveForIssue(sourceIssue.companyId, sourceIssueId)).toMatchObject({ id: action.id });
   });
 
-  it.each(["dependency", "interaction", "execution", "paused", "unrelated"])("PER-968 preserves a %s hold during guarded repair", async (hold) => {
+  it.each(["dependency", "interaction", "execution", "paused", "unrelated", "retained_execution", "governed_stage"])("PER-968 preserves a %s hold during guarded repair", async (hold) => {
     const { companyId, sourceIssueId, coderId, action, repair } = await seedTrappedDisposition();
     if (hold === "dependency") {
       const [blocker] = await db.insert(issues).values({ companyId, title: "Real prerequisite", status: "todo" }).returning();
@@ -3043,12 +3106,27 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     if (hold === "execution") await seedHeartbeatRun({ companyId, agentId: coderId, runId: randomUUID(), issueId: sourceIssueId });
     if (hold === "paused") await db.update(agents).set({ status: "paused" }).where(eq(agents.id, coderId));
     if (hold === "unrelated") await db.update(issueRecoveryActions).set({ kind: "active_run_watchdog" }).where(eq(issueRecoveryActions.id, action.id));
+    if (hold === "retained_execution") await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId,
+      kind: "active_run_watchdog", status: "resolved", outcome: "blocked", ownerType: "board", returnOwnerAgentId: coderId,
+      cause: "uncertain_external_action", fingerprint: randomUUID(), nextAction: "Reconcile the original execution.",
+      evidence: { automaticRecovery: { replay: "blocked" } } });
+    if (hold === "governed_stage") await db.update(issues).set({ executionState: { status: "pending",
+      currentStageId: randomUUID(), currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: coderId, userId: null },
+      returnAssignee: { type: "agent", agentId: coderId, userId: null }, reviewRequest: null,
+      completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null } }).where(eq(issues.id, sourceIssueId));
     const before = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
     const actions = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
     const wake = vi.fn(async () => null);
     await request(createApp(undefined, { recoveryActionEnqueueWakeup: wake })).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
       .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", statusRepair: repair,
         resolutionNote: "Continue only after all existing gates pass." }).expect(409);
+    expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(before);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(actions);
+    expect(wake).not.toHaveBeenCalled();
+    await request(createApp(undefined, { recoveryActionEnqueueWakeup: wake })).post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "cancelled", sourceIssueStatus: "cancelled", statusRepair: repair,
+        resolutionNote: "Confirmed duplicate. Existing gates must remain intact." }).expect(409);
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual(before);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(actions);
     expect(wake).not.toHaveBeenCalled();

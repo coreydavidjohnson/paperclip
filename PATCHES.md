@@ -22,6 +22,23 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-1507 guarded terminal duplicate cancellation
+
+- Extend the existing exact exhausted-disposition status repair to cancelled.
+  Preserve the source/action transaction, original owner and terminal evidence.
+  Current owning agents use their native run; board-only todo repair is unchanged.
+  Management authority alone cannot cancel through this path.
+- Preserve ordinary source policy, company access, audit attribution, cross-issue
+  limits and every unrelated approval, dependency, budget, execution and retained
+  workspace hold. Cancellation never certifies provider termination or launches
+  continuation. Its receipt records delivery not_requested.
+- Real-Postgres API regressions reproduce the deployed validator's HTTP 400
+  refusal, then check exact cancellation, same-actor read-only replay, stale
+  snapshots, owner/run authority and atomic hold refusals with zero wakes.
+  These protect an observed missing native contract, not a configuration mirror.
+- Retire when upstream provides equivalent guarded terminal disposition without
+  replay or hold release. No migration, broad bypass or new scheduler is added.
+
 ## PER-1199 isolated source lock keepalive
 
 - Backport upstream 0b266bd08 (PR 16956), which uses the existing workspace
