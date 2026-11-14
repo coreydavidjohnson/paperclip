@@ -148,7 +148,9 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 # same ARG again for the runtime fallback; an ARG goes out of scope at the
 # end of its stage. Empty for local `docker build`, which then writes no stamp.
 ENV NODE_OPTIONS=--max-old-space-size=4096
-RUN pnpm --filter @paperclipai/server build
+# The server's Go-based compiler needs the same aggregate budget as typecheck.
+# NODE_OPTIONS alone does not bound it inside the 6 GiB BuildKit daemon.
+RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
 

@@ -667,3 +667,16 @@ heartbeat.ts.
   instead of duplicating it"; routines-service plus routine-status-reconciliation
   pass 94/94.
 - Remove when upstream ships equivalent open-issue coalescing.
+
+## Bound the server build compiler (PER-1507)
+
+- The exact-source production build reached the server compilation step, then
+  the 6 GiB BuildKit daemon was OOMKilled. Node's heap setting does not constrain
+  the Go-based TypeScript compiler. Keep the failed build and live termination
+  receipt in the ticket evidence.
+- Apply the existing typecheck budget, `GOMEMLIMIT=3GiB GOMAXPROCS=2`, to the
+  server build command too. Keep every production build and regression gate;
+  do not raise daemon limits or turn off checks.
+- Verification is the full exact-source production target, not an overlay test.
+  Its replacement build must pass before release. No runtime setting changes.
+- Remove when the standard server build enforces an equivalent compiler budget.
