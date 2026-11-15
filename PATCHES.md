@@ -131,6 +131,20 @@ heartbeat.ts.
   read the weeks-old record and raise no alert.
 - Retire when upstream provides the same issue-level admission limit and reset.
 
+## Runtime-execution admission test waited for the wrong moment (PER-1524)
+
+- `runtime-execution.test.ts`, "ends admission timing without losing later
+  provider spans", asserted that the adapter had been entered as soon as the
+  admission span finished. The legacy path records its dispatch deadline in
+  the database before it enters the adapter, and the test's stand-in gate does
+  not wait for that, so the span can finish first. The image gate failed on it
+  once (non-native case, "called 0 times") with source and test unchanged.
+- Reproduced on the serving image: a 300 ms wait before the adapter entry
+  fails the old test with that exact message; the corrected test passes.
+- The test now waits for the adapter entry with a five-second bound. No
+  assertion is removed and no product code changes.
+- Retire when upstream's test no longer assumes that ordering.
+
 ## PER-477 bounded API readiness during live-event reconnects
 
 - Keep raw transport state fail closed for UI WebSockets. After the first

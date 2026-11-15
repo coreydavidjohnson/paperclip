@@ -318,7 +318,11 @@ describe.skipIf(!support.supported)("heartbeat runtime execution boundary", () =
       await vi.waitFor(() => {
         expect(exporter.getFinishedSpans().filter(span => span.name === "execution.dispatch_admission")).toHaveLength(1);
       }, { timeout: 5_000 });
-      expect(native ? executePaperclipNativeSession : adapter.execute).toHaveBeenCalledOnce();
+      // The legacy path records its dispatch deadline before it enters the adapter,
+      // so the admission span can finish first. Wait for the entry; do not assume it.
+      await vi.waitFor(() => {
+        expect(native ? executePaperclipNativeSession : adapter.execute).toHaveBeenCalledOnce();
+      }, { timeout: 5_000 });
       expect(exporter.getFinishedSpans().find(span => span.name === "task.execution_attempt")).toBeUndefined();
       expect(await finalizations()).toHaveLength(0);
       release({ exitCode: 0, signal: null, timedOut: false });
