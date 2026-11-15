@@ -73,7 +73,8 @@ describe("isolated chat approval with native authentication and persistence", ()
   async function seed() {
     const companyId = randomUUID(), issueId = randomUUID(), agentId = randomUUID(), runId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Synthetic approval", issuePrefix: companyId.slice(0, 8) });
-    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: userId, status: "active", membershipRole: "member" });
+    // A fresh login must not need a broader company grant to answer the one test.
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "local-board", status: "active", membershipRole: "owner" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Synthetic coordinator", adapterType: "paperclip_runner", runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } } });
     const [issue] = await db.insert(issues).values({ id: issueId, companyId, title: "Synthetic no-op approval", status: "in_progress", assigneeAgentId: agentId }).returning();
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, nativeIssueId: issueId, status: "running", runtimeMode: "native", responsibleUserId: userId, contextSnapshot: { issueId } });
