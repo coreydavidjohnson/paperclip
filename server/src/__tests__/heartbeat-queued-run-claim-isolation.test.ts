@@ -14,6 +14,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
+import { logger } from "../middleware/logger.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -241,6 +242,95 @@ describeEmbeddedPostgres("heartbeat queued-run claim isolation", () => {
 
     expect(await runStatus(rejectedRunId)).toMatchObject({ status: "cancelled" });
     expect(await runStatus(healthyRunId)).toMatchObject({ status: "succeeded" });
+  });
+
+  it.each(["23505", "XX000"])("isolates a database claim failure (%s) and can retry it later", async (code) => {
+    const first = await insertAgent();
+    const second = await insertAgent();
+    const { runId: failedRunId, wakeupRequestId } = await insertClaimableRun(first.companyId, first.agentId, new Date(Date.now() - 2_000));
+    const { runId: sameAgentRunId } = await insertClaimableRun(first.companyId, first.agentId);
+    const { runId: otherAgentRunId } = await insertClaimableRun(second.companyId, second.agentId);
+    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => {});
+
+    // A real driver error aborts the claim transaction, unlike an HTTP rejection.
+    await db.execute(sql.raw(`
+      CREATE FUNCTION reject_test_claim() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.id = '${failedRunId}'::uuid AND OLD.status = 'queued' AND NEW.status = 'running' THEN
+          RAISE EXCEPTION 'test claim failure, secret-sentinel'
+            USING ERRCODE = '${code}', CONSTRAINT = 'issues_open_routine_execution_uq';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER reject_test_claim BEFORE UPDATE ON heartbeat_runs
+        FOR EACH ROW EXECUTE FUNCTION reject_test_claim();
+    `));
+    try {
+      await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
+      await heartbeat.drainActiveRunExecutions();
+      expect(await runStatus(failedRunId)).toMatchObject({ status: "queued", errorCode: null });
+      const [wakeup] = await db.select({ status: agentWakeupRequests.status })
+        .from(agentWakeupRequests).where(sql`${agentWakeupRequests.id} = ${wakeupRequestId}`);
+      expect(wakeup.status).toBe("queued");
+      expect(await runStatus(sameAgentRunId)).toMatchObject({ status: "succeeded" });
+      expect(await runStatus(otherAgentRunId)).toMatchObject({ status: "succeeded" });
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+      expect(errorLog).toHaveBeenCalledWith({
+        errorKind: code === "23505" ? "routine_execution_conflict" : "queued_run_claim_failure",
+        sqlState: code, claimState: "queued",
+        runId: failedRunId, agentId: first.agentId, companyId: first.companyId,
+      }, "queued heartbeat run claim failed; continuing recovery with later runs");
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain("secret-sentinel");
+    } finally {
+      await db.execute(sql.raw("DROP TRIGGER reject_test_claim ON heartbeat_runs; DROP FUNCTION reject_test_claim();"));
+      errorLog.mockRestore();
+    }
+
+    await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
+    await heartbeat.drainActiveRunExecutions();
+    expect(await runStatus(failedRunId)).toMatchObject({ status: "succeeded" });
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not dispatch or release a claim when post-commit bookkeeping fails", async () => {
+    const first = await insertAgent();
+    const second = await insertAgent();
+    const { runId: failedRunId, wakeupRequestId } = await insertClaimableRun(first.companyId, first.agentId, new Date(Date.now() - 2_000));
+    const { runId: sameAgentRunId } = await insertClaimableRun(first.companyId, first.agentId);
+    const { runId: otherAgentRunId } = await insertClaimableRun(second.companyId, second.agentId);
+    const errorLog = vi.spyOn(logger, "error").mockImplementation(() => {});
+    // Wake bookkeeping follows the committed run claim. Failure must not be
+    // mistaken for a rollback or authorize a second execution of that run.
+    await db.execute(sql.raw(`
+      CREATE FUNCTION reject_test_wake() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.id = '${wakeupRequestId}'::uuid AND NEW.status = 'claimed' THEN
+          RAISE EXCEPTION 'post-commit secret-sentinel' USING ERRCODE = 'XX000';
+        END IF;
+        RETURN NEW;
+      END $$;
+      CREATE TRIGGER reject_test_wake BEFORE UPDATE ON agent_wakeup_requests
+        FOR EACH ROW EXECUTE FUNCTION reject_test_wake();
+    `));
+    try {
+      await expect(heartbeat.resumeQueuedRuns()).resolves.toBeUndefined();
+      await heartbeat.drainActiveRunExecutions();
+      expect(await runStatus(failedRunId)).toMatchObject({ status: "running" });
+      expect(await runStatus(sameAgentRunId)).toMatchObject({ status: "queued" });
+      expect(await runStatus(otherAgentRunId)).toMatchObject({ status: "succeeded" });
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+      expect(errorLog).toHaveBeenCalledWith({
+        errorKind: "queued_run_claim_failure", sqlState: "XX000", claimState: "not_queued",
+        runId: failedRunId, agentId: first.agentId, companyId: first.companyId,
+      }, "queued heartbeat run claim failed; continuing recovery with later runs");
+      expect(JSON.stringify(errorLog.mock.calls)).not.toContain("secret-sentinel");
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.drainActiveRunExecutions();
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally {
+      await db.execute(sql.raw("DROP TRIGGER reject_test_wake ON agent_wakeup_requests; DROP FUNCTION reject_test_wake();"));
+      errorLog.mockRestore();
+    }
   });
 
   it("starts non-issue runs in queue order", async () => {

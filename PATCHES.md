@@ -104,22 +104,46 @@ heartbeat.ts.
   with no provider turn. A resolved recovery action is not reopened or rewritten.
 - Retire when upstream settles terminal queued-comment receipts before enqueue.
 
-## Per-issue ten-run budget
+## Per-issue run budget (25 runs)
 
 - Upstream master b7261aa4, checked October 29, has agent daily run/cost caps and
   billed-cents company, agent and project policies, but no issue run cap.
-- Count durable run identities per company and issue. After ten runs, refuse
+- Count durable run identities per company and issue. After 25 runs, refuse
   new wake admission and queued dispatch, move the issue to blocked and write
   one `needs judging: N runs` system note. Stop due monitor wakes. Preserve
   already-started work, saved user input, board status repairs and all holds.
 - A board user's audited blocked-to-todo/in-progress release grants the next
-  ten-run allowance. This includes board-sweep operations recorded as a user.
+  25-run allowance. This includes board-sweep operations recorded as a user.
   An agent release or a comment alone does not reset it. Existing queued work
   that starts after release counts in the new allowance.
-- Real-Postgres queue tests cover the tenth/eleventh boundary, automatic sources,
+- Real-Postgres queue tests cover the 25th/26th boundary, automatic sources,
   retry dispatch, reset authority, equal timestamps and guarded board repairs.
   No schema migration, per-agent configuration or separate scheduler is added.
+- The limit was ten until 2026-11-15. PER-1524 raised it to 25 (`ISSUE_RUN_LIMIT`
+  in `issue-run-budget.ts`) on the owner's decision: healthy tickets reached ten
+  runs within a day, and status-repair runs and failed starts count too. What
+  counts as a run is unchanged. The board sweep still releases a healthy window
+  at most twice in 24 hours and reads the limit from the stop record.
+- A stop note written under the old limit does not suppress the note for a
+  stop at the new one: the lookup requires a recorded run count at or above
+  the current limit. Without this a ticket held at ten, woken again and
+  stopped at 25 would get no note and no stop record, and the sweep would
+  read the weeks-old record and raise no alert.
 - Retire when upstream provides the same issue-level admission limit and reset.
+
+## Runtime-execution admission test waited for the wrong moment (PER-1524)
+
+- `runtime-execution.test.ts`, "ends admission timing without losing later
+  provider spans", asserted that the adapter had been entered as soon as the
+  admission span finished. The legacy path records its dispatch deadline in
+  the database before it enters the adapter, and the test's stand-in gate does
+  not wait for that, so the span can finish first. The image gate failed on it
+  once (non-native case, "called 0 times") with source and test unchanged.
+- Reproduced on the serving image: a 300 ms wait before the adapter entry
+  fails the old test with that exact message; the corrected test passes.
+- The test now waits for the adapter entry with a five-second bound. No
+  assertion is removed and no product code changes.
+- Retire when upstream's test no longer assumes that ordering.
 
 ## PER-477 bounded API readiness during live-event reconnects
 
@@ -680,3 +704,34 @@ heartbeat.ts.
 - Verification is the full exact-source production target, not an overlay test.
   Its replacement build must pass before release. No runtime setting changes.
 - Remove when the standard server build enforces an equivalent compiler budget.
+
+## Isolate queued claim database failures (PER-1310)
+
+- A non-HTTP exception from one queued claim previously escaped the recovery
+  loop and prevented later agents from being processed. Preserve the existing
+  permanent 403 cancellation and recoverable HTTP rejection paths. Log other
+  failures with bounded SQLSTATE, safe IDs and a constant error category, never
+  raw query text, parameters or driver messages. Failed queued rows remain
+  retryable.
+- Claims include post-commit bookkeeping. Re-read the run after an exception;
+  only a verified queued row permits scanning later rows for that agent. A
+  committed or unreadable claim stops that agent scan without resetting or
+  dispatching uncertain work. Other agents continue. Existing transactional
+  run admission and orphan recovery retain concurrency and recovery authority.
+- Real-Postgres trigger regressions cover SQLSTATE 23505 and XX000 before
+  commit, continued same-agent and other-agent execution, queued wake retention,
+  exactly-once dispatch after the trigger is removed, safe logs, and a
+  post-commit wake-bookkeeping failure that is not replayed. The two original
+  cases fail on the deployed base; the reviewed candidate passes 102/102 with
+  the existing routine coalescing and status-reconciliation suites.
+- Cross-provider Fable 5.2 review identified uncertain post-commit claims and
+  insufficient diagnostics. The state check, post-commit regression, error-level
+  log and bounded SQLSTATE address those findings. Retry exhaustion was not
+  added: the task requires recoverable rows to remain available, and this
+  change must not cancel admitted work on an unknown failure.
+- Add these three suites to the production image gate. Reuse the existing
+  open-idle-issue coalescing carry above rather than duplicating it.
+- Remove when upstream isolates queued claim failures with equivalent
+  uncertain-outcome safety. Upstream master and v2026.1106.0 still rethrow
+  non-HTTP claim errors at inspection. The required 24-hour live routine
+  observation is a separate acceptance gate, not established by these tests.

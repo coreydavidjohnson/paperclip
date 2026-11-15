@@ -3,6 +3,10 @@ import { and, desc, eq, ne, sql } from "drizzle-orm";
 import { logActivity, type ActivityPublication } from "../activity-log.js";
 import { assertRecoveryStatusWriteAllowed } from "../guarded-status-repair.js";
 
+// Runs one issue may start before a board release is needed. Ten until
+// 2026-11-15 (PER-1524): healthy long work reached ten within a day.
+const ISSUE_RUN_LIMIT = 25;
+
 export async function enforceIssueRunBudget(
   db: Db,
   companyId: string,
@@ -32,14 +36,16 @@ export async function enforceIssueRunBudget(
     epochStart ? sql`greatest(${heartbeatRuns.createdAt}, ${heartbeatRuns.startedAt}) >= ${epochStart}` : undefined,
     excludeRunId ? ne(heartbeatRuns.id, excludeRunId) : undefined,
   ));
-  if (usage.observed < 10) return null;
-  const block = { reason: "issue.run_budget_exhausted", observed: usage.observed, limit: 10,
+  if (usage.observed < ISSUE_RUN_LIMIT) return null;
+  const block = { reason: "issue.run_budget_exhausted", observed: usage.observed, limit: ISSUE_RUN_LIMIT,
     message: `needs judging: ${usage.observed} runs. A person or board sweep must release this issue from blocked to todo or in_progress to reset its run budget.` };
   if (usage.running > 0) return block;
   const [notice] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
     eq(activityLog.companyId, companyId), eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId),
     eq(activityLog.action, "issue.updated"), eq(activityLog.actorType, "system"),
     sql`${activityLog.details}->>'reason' = 'issue.run_budget_exhausted'`,
+    // A note written under a lower limit does not describe this stop.
+    sql`coalesce((${activityLog.details}->>'runCount')::int, 0) >= ${ISSUE_RUN_LIMIT}`,
     epochStart ? sql`${activityLog.createdAt} >= ${epochStart}` : undefined,
   )).limit(1);
   const statusChanged = issue.status !== "blocked" || issue.monitorNextCheckAt !== null || issue.monitorWakeRequestedAt !== null;

@@ -101,6 +101,7 @@ import {
   notFound,
 } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
+import { isUniqueViolation } from "../../db-errors.js";
 import { publishLiveEvent } from "../live-events.js";
 import { allocateHeartbeatRunEventSeq } from "../heartbeat-run-events.js";
 import {
@@ -2115,7 +2116,40 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             rejectedClaims.push({ run: queuedRun, err });
             continue;
           }
-          if (!isDeferrableClaimRejection(err)) throw err;
+          if (!isDeferrableClaimRejection(err)) {
+            // A failure may follow COMMIT. Never replay or release an uncertain
+            // claim here; leave non-queued claims to the existing orphan reaper.
+            let claimState = "unverified";
+            try {
+              const [current] = await db.select({ status: heartbeatRuns.status })
+                .from(heartbeatRuns).where(and(
+                  eq(heartbeatRuns.id, queuedRun.id), eq(heartbeatRuns.companyId, queuedRun.companyId),
+                ));
+              claimState = current?.status === "queued" ? "queued" : "not_queued";
+            } catch { /* A lost database connection must not authorize another claim. */ }
+            // Only a bounded SQLSTATE is safe to retain from a driver error.
+            let sqlState: string | null = null;
+            let cause: unknown = err;
+            for (let depth = 0; depth < 4 && cause && typeof cause === "object"; depth += 1) {
+              const candidate = cause as { code?: unknown; cause?: unknown };
+              if (typeof candidate.code === "string" && /^[0-9A-Z]{5}$/.test(candidate.code)) {
+                sqlState = candidate.code;
+                break;
+              }
+              cause = candidate.cause;
+            }
+            logger.error(
+              {
+                errorKind: isUniqueViolation(err, "issues_open_routine_execution_uq")
+                  ? "routine_execution_conflict" : "queued_run_claim_failure",
+                sqlState, claimState,
+                runId: queuedRun.id, agentId: queuedRun.agentId, companyId: queuedRun.companyId,
+              },
+              "queued heartbeat run claim failed; continuing recovery with later runs",
+            );
+            if (claimState !== "queued") break;
+            continue;
+          }
           logger.warn(
             { err, runId: queuedRun.id, agentId: queuedRun.agentId, companyId: queuedRun.companyId },
             "queued heartbeat run claim was rejected; leaving it queued for the next recovery pass",
