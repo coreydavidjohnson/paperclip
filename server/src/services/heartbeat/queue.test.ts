@@ -245,6 +245,23 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     expect(deps.executeRun).not.toHaveBeenCalled();
   });
 
+  it("writes a new judging note when the only earlier note is from a lower limit", async () => {
+    const { issue, agent, company, queue } = await runBudgetFixture(25);
+    await db.insert(activityLog).values({ companyId: company.id, actorType: "system", actorId: "issue-run-budget",
+      action: "issue.updated", entityType: "issue", entityId: issue.id,
+      details: { status: "blocked", _previous: { status: "todo" }, reason: "issue.run_budget_exhausted", runCount: 10, limit: 10 } });
+    const opts = { source: "assignment" as const, reason: "issue_assigned", requestedByActorType: "system" as const,
+      payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id } };
+    expect(await queue.enqueueWakeup(agent.id, opts)).toBeNull();
+    expect(await queue.enqueueWakeup(agent.id, opts)).toBeNull();
+    const notes = await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id));
+    expect(notes).toHaveLength(1);
+    expect(notes[0].body).toContain("needs judging: 25 runs");
+    const stops = (await db.select().from(activityLog).where(eq(activityLog.entityId, issue.id)))
+      .filter((row) => (row.details as { reason?: string } | null)?.reason === "issue.run_budget_exhausted");
+    expect(stops.map((row) => (row.details as { runCount?: number }).runCount).sort((a, b) => a! - b!)).toEqual([10, 25]);
+  });
+
   it.each(["issueId", "taskId"] as const)("stops a queued retry with %s from starting the twenty-sixth issue run", async (binding) => {
     const { issue, agent, company, queue, deps } = await runBudgetFixture(25);
     const [retry] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,

@@ -44,6 +44,8 @@ export async function enforceIssueRunBudget(
     eq(activityLog.companyId, companyId), eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId),
     eq(activityLog.action, "issue.updated"), eq(activityLog.actorType, "system"),
     sql`${activityLog.details}->>'reason' = 'issue.run_budget_exhausted'`,
+    // A note written under a lower limit does not describe this stop.
+    sql`coalesce((${activityLog.details}->>'runCount')::int, 0) >= ${ISSUE_RUN_LIMIT}`,
     epochStart ? sql`${activityLog.createdAt} >= ${epochStart}` : undefined,
   )).limit(1);
   const statusChanged = issue.status !== "blocked" || issue.monitorNextCheckAt !== null || issue.monitorWakeRequestedAt !== null;

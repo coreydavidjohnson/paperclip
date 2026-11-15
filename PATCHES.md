@@ -124,6 +124,11 @@ heartbeat.ts.
   runs within a day, and status-repair runs and failed starts count too. What
   counts as a run is unchanged. The board sweep still releases a healthy window
   at most twice in 24 hours and reads the limit from the stop record.
+- A stop note written under the old limit does not suppress the note for a
+  stop at the new one: the lookup requires a recorded run count at or above
+  the current limit. Without this a ticket held at ten, woken again and
+  stopped at 25 would get no note and no stop record, and the sweep would
+  read the weeks-old record and raise no alert.
 - Retire when upstream provides the same issue-level admission limit and reset.
 
 ## PER-477 bounded API readiness during live-event reconnects
