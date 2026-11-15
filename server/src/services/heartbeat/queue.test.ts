@@ -203,8 +203,8 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     return { ...seeded, deps, queue: createHeartbeatQueue(db, deps) };
   }
 
-  it("allows the tenth issue run", async () => {
-    const { issue, agent, queue } = await runBudgetFixture(9);
+  it("allows the twenty-fifth issue run", async () => {
+    const { issue, agent, queue } = await runBudgetFixture(24);
     const result = await queue.enqueueWakeup(agent.id, { source: "assignment", reason: "issue_assigned",
       requestedByActorType: "system", payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id } });
     expect(result?.id).toBeTruthy();
@@ -212,22 +212,22 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
   });
 
   it("does not charge another company or issue against this issue", async () => {
-    const { issue, agent, company, queue } = await runBudgetFixture(9);
+    const { issue, agent, company, queue } = await runBudgetFixture(24);
     const [otherCompany] = await db.insert(companies).values({ name: "Other budget", issuePrefix: "OB" }).returning();
     const [otherAgent] = await db.insert(agents).values({ companyId: otherCompany.id, name: "Other agent", role: "engineer" }).returning();
     const [otherIssue] = await db.insert(issues).values({ companyId: company.id, title: "Other task" }).returning();
-    await db.insert(heartbeatRuns).values(Array.from({ length: 10 }, () => ({
+    await db.insert(heartbeatRuns).values(Array.from({ length: 25 }, () => ({
       companyId: otherCompany.id, agentId: otherAgent.id, nativeIssueId: issue.id, status: "succeeded",
     })));
-    await db.insert(heartbeatRuns).values(Array.from({ length: 10 }, () => ({
+    await db.insert(heartbeatRuns).values(Array.from({ length: 25 }, () => ({
       companyId: company.id, agentId: agent.id, issueId: otherIssue.id, scopeKind: "issue" as const, status: "succeeded",
     })));
     expect((await queue.enqueueWakeup(agent.id, { source: "assignment", reason: "issue_assigned",
       requestedByActorType: "system", payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id } }))?.id).toBeTruthy();
   });
 
-  it.each(["assignment", "automation", "on_demand"] as const)("stops %s wakes after ten issue runs with one judging note", async (source) => {
-    const { issue, agent, queue, deps } = await runBudgetFixture(10);
+  it.each(["assignment", "automation", "on_demand"] as const)("stops %s wakes after twenty-five issue runs with one judging note", async (source) => {
+    const { issue, agent, queue, deps } = await runBudgetFixture(25);
     await db.update(issues).set({ monitorNextCheckAt: new Date(), monitorWakeRequestedAt: new Date() })
       .where(eq(issues.id, issue.id));
     const opts = { source, reason: source === "automation" ? "issue_monitor" : "issue_continuation_needed",
@@ -240,13 +240,13 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
         monitorNextCheckAt: null, monitorWakeRequestedAt: null });
     const notes = await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id));
     expect(notes).toHaveLength(1);
-    expect(notes[0].body).toContain("needs judging: 10 runs");
-    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, issue.companyId))).toHaveLength(10);
+    expect(notes[0].body).toContain("needs judging: 25 runs");
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, issue.companyId))).toHaveLength(25);
     expect(deps.executeRun).not.toHaveBeenCalled();
   });
 
-  it.each(["issueId", "taskId"] as const)("stops a queued retry with %s from starting the eleventh issue run", async (binding) => {
-    const { issue, agent, company, queue, deps } = await runBudgetFixture(10);
+  it.each(["issueId", "taskId"] as const)("stops a queued retry with %s from starting the twenty-sixth issue run", async (binding) => {
+    const { issue, agent, company, queue, deps } = await runBudgetFixture(25);
     const [retry] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: agent.id,
       status: "queued", responsibleUserId: "queue-test-user", invocationSource: "automation",
       issueId: binding === "issueId" ? issue.id : null, scopeKind: "issue", contextSnapshot: { [binding]: issue.id } }).returning();
@@ -258,21 +258,21 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
   });
 
   it("counts new runs at exactly the trusted release timestamp", async () => {
-    const { issue, agent, company, queue } = await runBudgetFixture(10);
+    const { issue, agent, company, queue } = await runBudgetFixture(25);
     const releasedAt = new Date();
     await db.insert(activityLog).values({ companyId: company.id, actorType: "user", actorId: "board-reviewer",
       action: "issue.updated", entityType: "issue", entityId: issue.id, createdAt: releasedAt,
       details: { status: "todo", _previous: { status: "blocked" } } });
-    await db.insert(heartbeatRuns).values(Array.from({ length: 10 }, () => ({ companyId: company.id,
+    await db.insert(heartbeatRuns).values(Array.from({ length: 25 }, () => ({ companyId: company.id,
       agentId: agent.id, issueId: issue.id, scopeKind: "issue" as const, status: "succeeded", createdAt: releasedAt })));
     expect(await queue.enqueueWakeup(agent.id, { source: "assignment", reason: "issue_assigned",
       requestedByActorType: "system", payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id } })).toBeNull();
     expect((await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id)))[0].body)
-      .toContain("needs judging: 10 runs");
+      .toContain("needs judging: 25 runs");
   });
 
   it("counts runs queued before a reset when they start after the reset", async () => {
-    const { issue, agent, company, queue } = await runBudgetFixture(10);
+    const { issue, agent, company, queue } = await runBudgetFixture(25);
     const releasedAt = new Date();
     await db.insert(activityLog).values({ companyId: company.id, actorType: "user", actorId: "board-reviewer",
       action: "issue.updated", entityType: "issue", entityId: issue.id, createdAt: releasedAt,
@@ -282,11 +282,11 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     expect(await queue.enqueueWakeup(agent.id, { source: "assignment", reason: "issue_assigned",
       requestedByActorType: "system", payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id } })).toBeNull();
     expect((await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id)))[0].body)
-      .toContain("needs judging: 10 runs");
+      .toContain("needs judging: 25 runs");
   });
 
   it("preserves a guarded board status repair when the queued run budget is exhausted", async () => {
-    const { issue, agent, company, queue } = await runBudgetFixture(10);
+    const { issue, agent, company, queue } = await runBudgetFixture(25);
     await db.insert(issueRecoveryActions).values({ companyId: company.id, sourceIssueId: issue.id,
       kind: "deliberate_wait_without_target", cause: "deliberate_wait_without_target", ownerType: "board",
       fingerprint: "run-budget-board-hold", nextAction: "A board decision is required",
@@ -299,8 +299,8 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     expect(await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id))).toHaveLength(0);
   });
 
-  it("resets ten-run allowance only when a board user releases the judging hold", async () => {
-    const { issue, agent, queue } = await runBudgetFixture(10);
+  it("resets the run allowance only when a board user releases the judging hold", async () => {
+    const { issue, agent, queue } = await runBudgetFixture(25);
     const opts = { source: "assignment" as const, reason: "issue_assigned", requestedByActorType: "system" as const,
       payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id } };
     expect(await queue.enqueueWakeup(agent.id, opts)).toBeNull();

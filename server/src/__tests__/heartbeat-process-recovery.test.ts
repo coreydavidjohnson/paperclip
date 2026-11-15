@@ -11863,7 +11863,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   it.each([
     { withLegacyReview: false, cancelledRuns: 0 },
     { withLegacyReview: true, cancelledRuns: 0 },
-    { withLegacyReview: true, cancelledRuns: 10 },
+    { withLegacyReview: true, cancelledRuns: 25 },
   ])("bounds plan-only continuation with legacy review $withLegacyReview and $cancelledRuns cancelled runs", async ({ withLegacyReview, cancelledRuns }) => {
     const { companyId, agentId, issueId, runId } = await seedStrandedIssueFixture({
       status: "in_progress",
@@ -11923,7 +11923,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         && row.payload?.retryOfRunId === planOnlyRunId);
       return matching;
     };
-    if (cancelledRuns >= 10) {
+    if (cancelledRuns >= 25) {
       expect(await readLivenessWakes()).toHaveLength(0);
       expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe("blocked");
       expect((await db.select().from(issueComments).where(eq(issueComments.issueId, issueId)))

@@ -104,21 +104,26 @@ heartbeat.ts.
   with no provider turn. A resolved recovery action is not reopened or rewritten.
 - Retire when upstream settles terminal queued-comment receipts before enqueue.
 
-## Per-issue ten-run budget
+## Per-issue run budget (25 runs)
 
 - Upstream master b7261aa4, checked October 29, has agent daily run/cost caps and
   billed-cents company, agent and project policies, but no issue run cap.
-- Count durable run identities per company and issue. After ten runs, refuse
+- Count durable run identities per company and issue. After 25 runs, refuse
   new wake admission and queued dispatch, move the issue to blocked and write
   one `needs judging: N runs` system note. Stop due monitor wakes. Preserve
   already-started work, saved user input, board status repairs and all holds.
 - A board user's audited blocked-to-todo/in-progress release grants the next
-  ten-run allowance. This includes board-sweep operations recorded as a user.
+  25-run allowance. This includes board-sweep operations recorded as a user.
   An agent release or a comment alone does not reset it. Existing queued work
   that starts after release counts in the new allowance.
-- Real-Postgres queue tests cover the tenth/eleventh boundary, automatic sources,
+- Real-Postgres queue tests cover the 25th/26th boundary, automatic sources,
   retry dispatch, reset authority, equal timestamps and guarded board repairs.
   No schema migration, per-agent configuration or separate scheduler is added.
+- The limit was ten until 2026-11-15. PER-1524 raised it to 25 (`ISSUE_RUN_LIMIT`
+  in `issue-run-budget.ts`) on the owner's decision: healthy tickets reached ten
+  runs within a day, and status-repair runs and failed starts count too. What
+  counts as a run is unchanged. The board sweep still releases a healthy window
+  at most twice in 24 hours and reads the limit from the stop record.
 - Retire when upstream provides the same issue-level admission limit and reset.
 
 ## PER-477 bounded API readiness during live-event reconnects
