@@ -1,9 +1,10 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
-export type HumanSession = { type: string; source?: string; userId?: string; sessionId?: string | null; chatApprovalSession?: boolean; agentId?: string; runId?: string };
+export type HumanSession = { type: string; source?: string; userId?: string; sessionId?: string | null; chatApprovalSession?: boolean; chatApprovalAccountId?: string; agentId?: string; runId?: string };
 export type Enrollment = {
   companyId: string; issueId: string; interactionId: string; userId: string;
   chatId: string; submittingAgentId: string; revision: string;
+  loginAccountId: string; designationId: string; designationHash: string; expiresAt: string;
   action: string; target: string; scope: string; undo: string;
   effect: "synthetic_test_only";
 };
@@ -36,18 +37,19 @@ export function readChatApprovalConfig(env: NodeJS.ProcessEnv = process.env): Ch
   if (url.origin !== origin || url.protocol !== "https:" || key.length < 32 || raw.length > 16384) refuse("Invalid chat approval configuration");
   const enrollments: unknown = JSON.parse(raw);
   if (!Array.isArray(enrollments) || enrollments.length > 20) refuse("Invalid enrollments");
-  const fields = ["companyId", "issueId", "interactionId", "userId", "chatId", "submittingAgentId", "revision", "action", "target", "scope", "undo", "effect"].sort();
+  const fields = ["companyId", "issueId", "interactionId", "userId", "chatId", "submittingAgentId", "revision", "action", "target", "scope", "undo", "effect", "loginAccountId", "designationId", "designationHash", "expiresAt"].sort();
   for (const e of enrollments) {
     if (!e || typeof e !== "object" || Object.keys(e).sort().join() !== fields.join()
       || fields.some(f => typeof e[f] !== "string" || !e[f] || e[f].length > 2000)
-      || e.effect !== "synthetic_test_only") refuse("Only explicitly enrolled synthetic tests are supported");
+      || e.effect !== "synthetic_test_only" || !/^[a-f0-9]{64}$/.test(e.designationHash)
+      || !Number.isFinite(Date.parse(e.expiresAt))) refuse("Only explicitly enrolled synthetic tests are supported");
   }
   if (new Set(enrollments.map(e => e.interactionId)).size !== enrollments.length) refuse("Duplicate enrollment");
   return { origin, key, enrollments: enrollments as Enrollment[] };
 }
 export function requireEnrollment(config: ChatApprovalConfig, issueId: string, interactionId: string, actor: HumanSession) {
   requireHuman(actor);
-  const enrollment = config.enrollments.find(e => e.issueId === issueId && e.interactionId === interactionId && e.userId === actor.userId);
+  const enrollment = config.enrollments.find(e => e.issueId === issueId && e.interactionId === interactionId && e.userId === actor.userId && e.loginAccountId === actor.chatApprovalAccountId);
   if (!enrollment) refuse("This card is not enrolled for this human");
   return enrollment;
 }

@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { ApprovalProofError, readChatApprovalConfig, requireHuman, requireEnrollment, assertSimpleTestCard, present, verify, parseAnswer, renderPrompt } from '../server/src/services/chat-approval-proof.ts';
-const e = { companyId:'company', issueId:'issue', interactionId:'card', userId:'human', chatId:'chief-chat', submittingAgentId:'chief', revision:'test-1', action:'Run synthetic no-op', target:'Disposable fixture', scope:'Synthetic data only', undo:'Delete the fixture', effect:'synthetic_test_only' };
+const e = { companyId:'company', issueId:'issue', interactionId:'card', userId:'human', chatId:'chief-chat', submittingAgentId:'chief', revision:'test-1', action:'Run synthetic no-op', target:'Disposable fixture', scope:'Synthetic data only', undo:'Delete the fixture', effect:'synthetic_test_only', loginAccountId:'account', designationId:'designation', designationHash:'a'.repeat(64), expiresAt:'2099-01-01T00:00:00.000Z' };
 const config = { origin:'https://approval.example.test', key:randomBytes(32).toString('hex'), enrollments:[e] };
-const human = { type:'board', source:'session', chatApprovalSession:true, userId:'human', sessionId:'human-login' };
+const human = { type:'board', source:'session', chatApprovalSession:true, userId:'human', chatApprovalAccountId:'account', sessionId:'human-login' };
 const snapshot = { question:'Approve this synthetic test?', target:'fixture-v1' };
 const card = { id:'card', companyId:'company', issueId:'issue', kind:'request_confirmation', createdByAgentId:'chief', payload:{version:1,prompt:snapshot.question} };
 test('off by default and refuses malformed or broad configuration', () => {

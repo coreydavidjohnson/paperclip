@@ -15,6 +15,7 @@ declare global {
         companyIds?: string[];
         sessionId?: string | null;
         chatApprovalSession?: boolean;
+        chatApprovalAccountId?: string;
         memberships?: Array<{
           companyId: string;
           membershipRole?: string | null;

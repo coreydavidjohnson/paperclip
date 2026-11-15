@@ -5,11 +5,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { activityLog, agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues, issueThreadInteractions } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createChatApprovalAuth } from "../auth/chat-approval-auth.js";
-import { readChatApprovalConfig } from "../services/chat-approval-proof.js";
+import { digest, readChatApprovalConfig } from "../services/chat-approval-proof.js";
+import { designationSnapshot } from "../services/chat-approval-resolution.js";
 import { createApp } from "../app.js";
 import { createLocalDiskStorageProvider } from "../storage/local-disk-provider.js";
 import { createStorageService } from "../storage/service.js";
@@ -70,6 +71,10 @@ describe("isolated chat approval with native authentication and persistence", ()
     if (root) await rm(root, { recursive: true, force: true });
     for (const name of envNames) { if (oldEnv[name] === undefined) delete process.env[name]; else process.env[name] = oldEnv[name]; }
   });
+  beforeEach(() => {
+    enrollments = [];
+    process.env.PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS = "[]";
+  });
   async function seed() {
     const companyId = randomUUID(), issueId = randomUUID(), agentId = randomUUID(), runId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Synthetic approval", issuePrefix: companyId.slice(0, 8) });
@@ -77,15 +82,18 @@ describe("isolated chat approval with native authentication and persistence", ()
     await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "local-board", status: "active", membershipRole: "owner" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Synthetic coordinator", adapterType: "paperclip_runner", runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: false } } });
     const [issue] = await db.insert(issues).values({ id: issueId, companyId, title: "Synthetic no-op approval", status: "in_progress", assigneeAgentId: agentId }).returning();
-    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, nativeIssueId: issueId, status: "running", runtimeMode: "native", responsibleUserId: userId, contextSnapshot: { issueId } });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, nativeIssueId: issueId, status: "running", runtimeMode: "native", responsibleUserId: "local-board", contextSnapshot: { issueId } });
     await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
-    const card = await issueThreadInteractionService(db).create(issue!, { kind: "request_confirmation", resolverPolicy: "human_only", payload: { version: 1, prompt: "Approve the disposable marker test?", detailsMarkdown: "Synthetic data. No outside effects." } }, { agentId });
-    const e: Enrollment = { companyId, issueId, interactionId: card.id, userId, chatId: `synthetic-chat-${randomUUID()}`, submittingAgentId: agentId,
+    const card = await issueThreadInteractionService(db).create(issue!, { kind: "request_confirmation", resolverPolicy: "human_only", addresseeUserId: "local-board", payload: { version: 1, prompt: "Approve the disposable marker test?", detailsMarkdown: "Synthetic data. No outside effects." } }, { agentId });
+    const designation = await issueThreadInteractionService(db).create(issue!, { kind: "ask_user_questions", resolverPolicy: "human_only", addresseeUserId: "local-board", payload: { version: 1, supersedeOnUserComment: false, questions: [{ id: "designate-test-account", prompt: "Which account did you sign in to for this one marker test?", helpText: `Designate only your own login for test ${card.id}. No other access.`, selectionMode: "single", required: true, allowOther: false, options: [{ id: "bind-this-account", label: "Bind my account", freeText: true }] }] } }, { agentId });
+    // Synthetic designation fixture, not evidence of Corey approval.
+    const [designationRow] = await db.update(issueThreadInteractions).set({ status: "answered", resolvedByUserId: "local-board", resolvedAt: new Date(), updatedAt: new Date(), result: { version: 1, answers: [{ questionId: "designate-test-account", optionIds: ["bind-this-account"], otherText: userId }] } }).where(eq(issueThreadInteractions.id, designation.id)).returning();
+    const e: Enrollment = { companyId, issueId, interactionId: card.id, userId: "local-board", loginAccountId: userId, designationId: designation.id, designationHash: digest(designationSnapshot(designationRow!)), expiresAt: new Date(Date.now() + 3_600_000).toISOString(), chatId: `synthetic-chat-${randomUUID()}`, submittingAgentId: agentId,
       revision: "disposable-v1", action: "Write a synthetic marker", target: "Disposable test directory", scope: "Synthetic data only. No production access.", undo: "Remove the synthetic marker", effect: "synthetic_test_only" };
     enrollments.push(e);
     process.env.PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS = JSON.stringify(enrollments);
     const path = `/api/issues/${issueId}/interactions/${card.id}/chat-approval`;
-    const token = createLocalAgentJwt(agentId, companyId, "paperclip_runner", runId, userId);
+    const token = createLocalAgentJwt(agentId, companyId, "paperclip_runner", runId, "local-board");
     return { e, path, token, card, issueId };
   }
   async function prompt(f: Awaited<ReturnType<typeof seed>>) {
@@ -110,7 +118,7 @@ describe("isolated chat approval with native authentication and persistence", ()
       expect(profile.body.user.id).toBe("local-board");
     }
     const f = await seed();
-    expect((await testRequest().get(f.path)).status).not.toBe(200);
+    expect((await testRequest().get(f.path)).status).toBe(403);
     expect((await read(f.card.id)).status).toBe("pending");
     expect(await audit(f.issueId)).toHaveLength(0);
   });
@@ -159,11 +167,11 @@ describe("isolated chat approval with native authentication and persistence", ()
     const proof = await prompt(f);
     expect((await post(f.path, proof)).status).toBe(200);
     const card = await read(f.card.id);
-    expect(card).toMatchObject({ status: "accepted", resolvedByUserId: userId, resolvedByAgentId: null, resolvedByRunId: null });
+    expect(card).toMatchObject({ status: "accepted", resolvedByUserId: "local-board", resolvedByAgentId: null, resolvedByRunId: null });
     expect((await post(f.path, proof)).status).toBe(200);
     const records = await audit(f.issueId);
     expect(records).toHaveLength(1);
-    expect(records[0]?.details).toMatchObject({ humanUserId: userId, submittingAgentId: f.e.submittingAgentId, chatId: f.e.chatId, exactAnswer: "Approve", decision: "accept", question: "Approve the disposable marker test?" });
+    expect(records[0]?.details).toMatchObject({ humanUserId: "local-board", loginAccountId: userId, designationId: f.e.designationId, submittingAgentId: f.e.submittingAgentId, chatId: f.e.chatId, exactAnswer: "Approve", decision: "accept", question: "Approve the disposable marker test?" });
     const receipt = await testRequest().get(f.path).set("Authorization", `Bearer ${f.token}`);
     expect(receipt.body.receipt.responseId).toBe(records[0]!.details!.responseId);
     const marker = join(root, `${f.card.id}.marker`);
@@ -213,6 +221,23 @@ describe("isolated chat approval with native authentication and persistence", ()
     expect((await post(revoked.path, oldProof)).status).not.toBe(200);
     expect((await read(revoked.card.id)).status).toBe("pending");
     expect(await audit(revoked.issueId)).toHaveLength(0);
+  });
+  it("requires the exact current human designation without granting the login account membership", async () => {
+    expect(await db.select().from(companyMemberships).where(eq(companyMemberships.principalId, userId))).toHaveLength(0);
+    for (const mode of ["changed-answer", "cancelled", "expired", "wrong-account", "foreign-designation", "missing-native-rights"]) {
+      const f = await seed(), proof = await prompt(f);
+      if (mode === "changed-answer") await db.update(issueThreadInteractions).set({ result: { version: 1, answers: [{ questionId: "designate-test-account", optionIds: ["bind-this-account"], otherText: "some-other-account" }] } }).where(eq(issueThreadInteractions.id, f.e.designationId));
+      if (mode === "cancelled") await db.update(issueThreadInteractions).set({ status: "cancelled" }).where(eq(issueThreadInteractions.id, f.e.designationId));
+      if (mode === "expired") f.e.expiresAt = new Date(Date.now() - 1).toISOString();
+      if (mode === "wrong-account") f.e.loginAccountId = "some-other-account";
+      if (mode === "foreign-designation") f.e.designationId = (await seed()).e.designationId;
+      if (mode === "missing-native-rights") await db.delete(companyMemberships).where(eq(companyMemberships.companyId, f.e.companyId));
+      process.env.PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS = JSON.stringify(enrollments);
+      expect([403, 404]).toContain((await testRequest().get(f.path).set("Cookie", cookie)).status);
+      expect([403, 404]).toContain((await post(f.path, proof)).status);
+      expect((await read(f.card.id)).status).toBe("pending");
+      expect(await audit(f.issueId)).toHaveLength(0);
+    }
   });
   it("rolls back the native answer and all audit on a real database audit failure", async () => {
     const f = await seed(), proof = await prompt(f);

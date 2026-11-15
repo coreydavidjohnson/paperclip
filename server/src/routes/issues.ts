@@ -23,7 +23,7 @@ import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
 import { urlencoded } from "express";
 import { ApprovalProofError, readChatApprovalConfig, renderPrompt, escapeHtml, requireHuman } from "../services/chat-approval-proof.js";
-import { presentChatApproval, resolveChatApproval, chatApprovalReceipt } from "../services/chat-approval-resolution.js";
+import { presentChatApproval, resolveChatApproval, chatApprovalReceipt, designatedChatApprovalActor } from "../services/chat-approval-resolution.js";
 import { createIssueReadTiming } from "../services/issue-read-timing.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
 import { resumeNativeWorkspaceAfterOwnerStop } from "../services/native-runtime/native-workspace-owner-recovery.js";
@@ -17129,11 +17129,12 @@ export function issueRoutes(
   router.get(chatApprovalPath, async (req, res) => {
     const config = chatApprovalConfig();
     if (!config) throw notFound("Chat approval is disabled");
+    const enrollment = config.enrollments.find(e => e.issueId === req.params.id && e.interactionId === req.params.interactionId);
+    if (!enrollment) throw notFound("This card is not enrolled");
+    if (req.actor.type !== "agent") req.actor = await designatedChatApprovalActor(db, enrollment, req.actor);
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
     if (!issue) return;
-    const enrollment = config.enrollments.find(e => e.companyId === issue.companyId && e.issueId === issue.id
-      && e.interactionId === req.params.interactionId);
-    if (!enrollment) throw notFound("This card is not enrolled");
+    if (issue.companyId !== enrollment.companyId) throw notFound("Issue not found");
     res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
       "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" });
     if (req.actor.type === "agent") {
@@ -17161,11 +17162,12 @@ export function issueRoutes(
     try { requireHuman(req.actor); } catch { throw forbidden("A separate human login session is required"); }
     if (!req.is("application/x-www-form-urlencoded") || !req.body || typeof req.body !== "object"
       || Object.keys(req.body).some(k => !["proof", "choice", "answer"].includes(k))) throw forbidden("Invalid approval response");
+    const enrollment = config.enrollments.find(e => e.issueId === req.params.id && e.interactionId === req.params.interactionId);
+    if (!enrollment) throw notFound("This card is not enrolled");
+    req.actor = await designatedChatApprovalActor(db, enrollment, req.actor);
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
     if (!issue) return;
-    const enrollment = config.enrollments.find(e => e.companyId === issue.companyId && e.issueId === issue.id
-      && e.interactionId === req.params.interactionId && e.userId === req.actor.userId);
-    if (!enrollment) throw notFound("This card is not enrolled");
+    if (issue.companyId !== enrollment.companyId) throw notFound("Issue not found");
     const authorization = await getIssueThreadInteractionResolutionAuthorization(req, res, issue, enrollment.interactionId);
     if (!authorization) return;
     const result = await resolveChatApproval(db, { config, enrollment, actor: req.actor, proof: req.body.proof,
