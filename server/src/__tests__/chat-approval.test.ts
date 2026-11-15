@@ -53,7 +53,7 @@ describe("isolated chat approval with native authentication and persistence", ()
     });
     const signup = await request(app).post("/api/auth/sign-up/email").set("Origin", ORIGIN)
       .send({ email: "synthetic-human@fixture.invalid", password: randomBytes(24).toString("hex"), name: "Synthetic human" });
-    expect(signup.status).toBe(200);
+    expect(signup.status, signup.text).toBe(200);
     userId = signup.body.user.id;
     const cookies = signup.headers["set-cookie"];
     cookie = (Array.isArray(cookies) ? cookies : [cookies]).map(value => value.split(";")[0]).join("; ");
