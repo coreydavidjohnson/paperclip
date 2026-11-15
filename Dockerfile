@@ -148,9 +148,9 @@ RUN pnpm --filter @paperclipai/plugin-sdk build
 # same ARG again for the runtime fallback; an ARG goes out of scope at the
 # end of its stage. Empty for local `docker build`, which then writes no stamp.
 ENV NODE_OPTIONS=--max-old-space-size=4096
-# The server's Go-based compiler needs the same aggregate budget as typecheck.
-# NODE_OPTIONS alone does not bound it inside the 6 GiB BuildKit daemon.
-RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm --filter @paperclipai/server build
+# The server graph peaked at 7.3 GiB with this Go budget. Use the normal
+# isolated image-CI job (10 GiB), not the shared 6 GiB BuildKit daemon.
+RUN GOMEMLIMIT=6GiB GOMAXPROCS=2 pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
 
@@ -158,8 +158,8 @@ RUN rm -rf packages/paperclip-runner/runner/target
 # full workspace typecheck must pass before the production image is assembled.
 FROM build AS luma-patch-tests
 RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && node --test scripts/pnpm-resource-budget.test.mjs packages/paperclip-runner/scripts/materialize-cursor-distribution.test.mjs packages/paperclip-runner/scripts/candidate-provider-pack.test.mjs
-# BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
-RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
+# Keep the measured compiler allowance, one workspace package at a time.
+RUN GOMEMLIMIT=6GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
 RUN pnpm check:token-gates
 RUN node --experimental-strip-types --test scripts/test-chat-approval-proof.mjs
 # Retained production checks use the same Node 24 runtime as the image.

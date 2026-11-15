@@ -735,3 +735,21 @@ heartbeat.ts.
   uncertain-outcome safety. Upstream master and v2026.1106.0 still rethrow
   non-HTTP claim errors at inspection. The required 24-hour live routine
   observation is a separate acceptance gate, not established by these tests.
+
+## Measured server compiler budget (PER-1498)
+
+The previous 3 GiB Go soft limit did not make the server graph fit a 6 GiB
+builder. A baseline-only disposable typecheck also reached OOM, and disabling
+declaration emission did not repair it. The candidate full server compilation
+passed with a 6 GiB Go budget in a 12 GiB disposable container. Its cgroup peak
+was 7,790,120,960 bytes. Keep Node and Go limits separate.
+
+Server build and serial workspace typecheck now use the same 6 GiB Go budget.
+Publish through the existing isolated image-CI job with its 10 GiB container
+limit. Do not use the shared 6 GiB daemon for this image. The complete image
+gate remains mandatory. No runtime authorization changes or test removals are
+part of this build correction. This supersedes the earlier PER-1507 budget.
+
+Verification: exact candidate server compilation with extended diagnostics,
+including declaration emission, exit 0. The isolated namespace was removed and
+its absence verified. Full image acceptance remains separate.
