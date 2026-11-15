@@ -161,6 +161,7 @@ RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && n
 # BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
 RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm -r --workspace-concurrency=1 typecheck
 RUN pnpm check:token-gates
+RUN node --experimental-strip-types --test scripts/test-chat-approval-proof.mjs
 # Retained production checks use the same Node 24 runtime as the image.
 RUN node --experimental-vm-modules --test scripts/comment-read-receipts.test.mjs \
     scripts/health-readiness.test.mjs scripts/managed-compression-block.test.mjs \
@@ -190,6 +191,9 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/health-readiness-db.test.ts \
     src/__tests__/live-events-readiness-db.test.ts \
     src/__tests__/issue-interactions-read-only-contract.test.ts \
+    src/__tests__/chat-approval.test.ts \
+    src/__tests__/confirmation-comment-resolution.test.ts \
+    src/__tests__/better-auth-credential-signup.integration.test.ts \
     src/__tests__/heartbeat-wake-pool-starvation.test.ts \
     src/services/heartbeat/queue.test.ts \
     src/services/heartbeat/external-run-state.test.ts \
