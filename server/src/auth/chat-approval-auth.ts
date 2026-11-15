@@ -3,12 +3,16 @@ import type { Request, RequestHandler } from "express";
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { authAccounts, authSessions, authUsers, authVerifications, type Db } from "@paperclipai/db";
-import { createBetterAuthHandler, resolveBetterAuthSession } from "./better-auth.js";
+import { createBetterAuthHandler, resolveBetterAuthSession, type BetterAuthSessionResult } from "./better-auth.js";
 import { readChatApprovalConfig, type ChatApprovalConfig } from "../services/chat-approval-proof.js";
 
 const basePath = "/api/chat-approval-auth";
 // Separate cookie and signing domain. Normal board and agent authentication stays unchanged.
-export function createChatApprovalAuth(db: Db, config: ChatApprovalConfig) {
+export type ChatApprovalAuth = {
+  handler: RequestHandler;
+  resolveSession: (req: Request) => Promise<BetterAuthSessionResult | null>;
+};
+export function createChatApprovalAuth(db: Db, config: ChatApprovalConfig): ChatApprovalAuth {
   const auth = betterAuth({
     baseURL: config.origin,
     basePath,
@@ -60,5 +64,3 @@ export function createChatApprovalAuth(db: Db, config: ChatApprovalConfig) {
   };
   return { handler, resolveSession: (req: Request) => activeConfig() ? resolveBetterAuthSession(auth, req) : Promise.resolve(null) };
 }
-
-export type ChatApprovalAuth = ReturnType<typeof createChatApprovalAuth>;
