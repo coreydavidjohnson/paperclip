@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { randomBytes } from 'node:crypto';
-import { readChatApprovalConfig, requireHuman, requireEnrollment, assertSimpleTestCard, present, verify, parseAnswer, renderPrompt } from '../server/src/services/chat-approval-proof.ts';
+import { ApprovalProofError, readChatApprovalConfig, requireHuman, requireEnrollment, assertSimpleTestCard, present, verify, parseAnswer, renderPrompt } from '../server/src/services/chat-approval-proof.ts';
 const e = { companyId:'company', issueId:'issue', interactionId:'card', userId:'human', chatId:'chief-chat', submittingAgentId:'chief', revision:'test-1', action:'Run synthetic no-op', target:'Disposable fixture', scope:'Synthetic data only', undo:'Delete the fixture', effect:'synthetic_test_only' };
 const config = { origin:'https://approval.example.test', key:randomBytes(32).toString('hex'), enrollments:[e] };
-const human = { type:'board', source:'session', userId:'human', sessionId:'human-login' };
+const human = { type:'board', source:'chat_approval_session', userId:'human', sessionId:'human-login' };
 const snapshot = { question:'Approve this synthetic test?', target:'fixture-v1' };
 const card = { id:'card', companyId:'company', issueId:'issue', kind:'request_confirmation', createdByAgentId:'chief', payload:{version:1,prompt:snapshot.question} };
 test('off by default and refuses malformed or broad configuration', () => {
@@ -13,7 +13,7 @@ test('off by default and refuses malformed or broad configuration', () => {
   assert.deepEqual(readChatApprovalConfig(env), config);
   for (const override of [ {PAPERCLIP_CHAT_APPROVAL_ORIGIN:'http://approval.example.test'}, {PAPERCLIP_CHAT_APPROVAL_ORIGIN:config.origin+'/'}, {PAPERCLIP_CHAT_APPROVAL_HMAC_KEY:'short'}, {PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS:JSON.stringify([{...e,effect:'production'}])}, {PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS:JSON.stringify([e,e])} ]) assert.throws(() => readChatApprovalConfig({...env,...override}));
 });
-for (const source of ['local_implicit','board_key','agent_key','agent_jwt','mcp_oauth','cloud_tenant','none']) test(`rejects ${source} even with a copied human id`, () => assert.throws(() => requireHuman({...human,source})));
+for (const source of ['local_implicit','session','board_key','agent_key','agent_jwt','mcp_oauth','cloud_tenant','none']) test(`rejects ${source} even with a copied human id`, () => assert.throws(() => requireHuman({...human,source})));
 test('rejects owner tokens, session editors, actor/run claims and another login', () => {
   for (const actor of [{...human,type:'agent'}, {...human,userId:'editor'}, {...human,sessionId:null}, {...human,agentId:'chief'}, {...human,runId:'run'}]) assert.throws(() => requireEnrollment(config,'issue','card',actor));
   const {token} = present(config,e,human,snapshot,1000);
@@ -27,6 +27,8 @@ test('binds exact human, chat, card, scope, target display, origin and expiry', 
   assert.throws(() => verify(config,e,human,token,config.origin,601000));
   assert.throws(() => verify(config,e,human,token,config.origin,999));
   assert.throws(() => verify(config,e,human,token+'x',config.origin,1001));
+  // Equal character counts must not let a multibyte signature reach timingSafeEqual.
+  assert.throws(() => verify(config,e,human,token.split('.')[0]+'.'+'é'.repeat(43),config.origin,1001), ApprovalProofError);
   assert.throws(() => verify({...config,key:randomBytes(32).toString('hex')},e,human,token,config.origin,1001));
 });
 test('governed, mixed, foreign and unknown cards are never enabled by a test label', () => {
@@ -48,4 +50,7 @@ test('renders complete question and scope, escapes hostile content and provides 
   assert.ok(!html.includes('<script>') && !html.includes('<img'));
   for (const value of ['All help text',e.scope,e.action,e.undo,'signed-proof']) assert.ok(html.includes(value));
   assert.ok(!html.includes('checked') && !html.includes('autofocus'));
+  // Browsers use the first submit control for Enter. An empty field must not approve.
+  const implicitChoice = html.match(/<button name="choice" value="([^"]*)"/)[1];
+  assert.throws(() => parseAnswer(implicitChoice,''), ApprovalProofError);
 });

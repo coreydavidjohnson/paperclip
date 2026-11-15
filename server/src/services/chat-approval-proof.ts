@@ -24,7 +24,7 @@ export function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 export function requireHuman(actor: HumanSession): asserts actor is HumanSession & { userId: string; sessionId: string } {
-  if (actor.type !== "board" || actor.source !== "session" || !actor.userId || !actor.sessionId
+  if (actor.type !== "board" || actor.source !== "chat_approval_session" || !actor.userId || !actor.sessionId
     || actor.agentId || actor.runId) refuse("A separate human login session is required");
 }
 export function readChatApprovalConfig(env: NodeJS.ProcessEnv = process.env): ChatApprovalConfig | null {
@@ -79,7 +79,7 @@ export function verify(config: ChatApprovalConfig, enrollment: Enrollment, actor
   if (origin !== config.origin || typeof token !== "string" || token.length > 4096) refuse("Invalid approval origin or proof");
   const [body, signature, extra] = token.split(".");
   const expected = sign(config.key, body ?? "");
-  if (!body || !signature || extra !== undefined || signature.length !== expected.length
+  if (!body || !signature || extra !== undefined || Buffer.byteLength(signature) !== Buffer.byteLength(expected)
     || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) refuse("Invalid approval proof");
   const p = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as Presentation;
   if (p.version !== 1 || typeof p.responseId !== "string" || p.userId !== actor.userId || p.sessionTag !== sessionTag(config.key, actor)
@@ -109,6 +109,6 @@ export function renderPrompt(enrollment: Enrollment, prompt: string, helpText: s
 <p>This prompt expires in 10 minutes. You can also type Approve or Deny. A typed answer must match any button you select.</p>
 <form method="post" action="${e(path)}"><input type="hidden" name="proof" value="${e(token)}">
 <label for="answer">Your answer</label><input id="answer" name="answer" maxlength="256" autocomplete="off">
-<button name="choice" value="accept">Approve</button><button name="choice" value="reject">Deny</button><button name="choice" value="">Send typed answer</button><button name="choice" value="revoke">Stop chat approval</button></form>
+<button name="choice" value="">Send typed answer</button><button name="choice" value="accept">Approve</button><button name="choice" value="reject">Deny</button><button name="choice" value="revoke">Stop chat approval</button></form>
 </main></body></html>`;
 }

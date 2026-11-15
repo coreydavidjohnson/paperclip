@@ -713,6 +713,9 @@ async function startServerWithDatabaseTeardown(
   let authReady = config.deploymentMode === "local_trusted";
   const { readChatApprovalConfig } = await import("./services/chat-approval-proof.js");
   const chatApprovalConfig = readChatApprovalConfig();
+  if (chatApprovalConfig && config.deploymentMode !== "local_trusted") {
+    throw new Error("The chat approval pilot requires local_trusted mode and its separate login path");
+  }
   const chatApprovalAuth = chatApprovalConfig
     ? (await import("./auth/chat-approval-auth.js")).createChatApprovalAuth(db as any, chatApprovalConfig)
     : undefined;

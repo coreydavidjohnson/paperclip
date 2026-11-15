@@ -323,7 +323,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             memberships,
             isInstanceAdmin: Boolean(roleRow),
             runId: runIdHeader ?? undefined,
-            source: "session",
+            source: approvalSession ? "chat_approval_session" : "session",
           };
           next();
           return;
