@@ -17135,7 +17135,7 @@ export function issueRoutes(
     const issue = await getAccessibleResource(req, res, svc.getById(req.params.id as string), "Issue not found");
     if (!issue) return;
     if (issue.companyId !== enrollment.companyId) throw notFound("Issue not found");
-    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY",
       "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'" });
     if (req.actor.type === "agent") {
       if (req.actor.agentId !== enrollment.submittingAgentId) throw forbidden("This chat agent is not enrolled");
@@ -17181,7 +17181,7 @@ export function issueRoutes(
       await queueResolvedInteractionContinuationWakeup({ db, heartbeat, issue, interaction: result.interaction,
         actor: getActorInfo(req), source: "issue.interaction.chat_approval" });
     }
-    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY",
       "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'" });
     res.type("html").send(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Test approval result</title><main><h1>Answer recorded</h1><p>${escapeHtml(result.receipt?.question as string ?? "Chat approval stopped. The original card stays open.")}</p><p>${escapeHtml(result.receipt?.exactAnswer as string ?? "This chat path is disabled for this card.")}</p><p>This record is an answer, not proof that the test ran.</p></main></html>`);
   });

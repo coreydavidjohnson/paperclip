@@ -19,7 +19,7 @@ import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 import type { Enrollment } from "../services/chat-approval-proof.js";
 
 const ORIGIN = "https://approval.example.test";
-const envNames = ["BETTER_AUTH_SECRET", "PAPERCLIP_AUTH_RATE_LIMIT_ENABLED", "PAPERCLIP_AGENT_JWT_SECRET", "PAPERCLIP_CHAT_APPROVAL_ENABLED", "PAPERCLIP_CHAT_APPROVAL_ORIGIN", "PAPERCLIP_CHAT_APPROVAL_HMAC_KEY", "PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS"] as const;
+const envNames = ["BETTER_AUTH_SECRET", "PAPERCLIP_AUTH_RATE_LIMIT_ENABLED", "PAPERCLIP_AGENT_JWT_SECRET", "PAPERCLIP_CHAT_APPROVAL_ENABLED", "PAPERCLIP_CHAT_APPROVAL_ORIGIN", "PAPERCLIP_CHAT_APPROVAL_HMAC_KEY", "PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS", "PAPERCLIP_CHAT_APPROVAL_SIGNUP_ENABLED"] as const;
 const oldEnv = Object.fromEntries(envNames.map(name => [name, process.env[name]]));
 // No support-based skip: this proof needs real Postgres and real human login.
 describe("isolated chat approval with native authentication and persistence", () => {
@@ -55,9 +55,11 @@ describe("isolated chat approval with native authentication and persistence", ()
       chatApprovalAuth: auth,
     });
     password = randomBytes(24).toString("hex");
+    process.env.PAPERCLIP_CHAT_APPROVAL_SIGNUP_ENABLED = "1";
     const signup = await testRequest().post("/api/chat-approval-auth/sign-up/email").set("Origin", ORIGIN)
       .send({ email: "synthetic-human@fixture.invalid", password, name: "Synthetic human" });
     expect(signup.status, signup.text).toBe(200);
+    process.env.PAPERCLIP_CHAT_APPROVAL_SIGNUP_ENABLED = "0";
     userId = signup.body.user.id;
     const cookies = signup.headers["set-cookie"];
     cookie = (Array.isArray(cookies) ? cookies : [cookies]).map(value => value.split(";")[0]).join("; ");
@@ -88,8 +90,10 @@ describe("isolated chat approval with native authentication and persistence", ()
     const binding = { companyId, issueId, interactionId: card.id, userId: "local-board", chatId: `synthetic-chat-${randomUUID()}`, submittingAgentId: agentId,
       revision: "disposable-v1", action: "Write a synthetic marker", target: "Disposable test directory", scope: "Synthetic data only. No production access.", undo: "Remove the synthetic marker", effect: "synthetic_test_only" as const };
     const designation = await issueThreadInteractionService(db).create(issue!, { kind: "ask_user_questions", resolverPolicy: "human_only", addresseeUserId: "local-board", payload: { version: 1, supersedeOnUserComment: false, questions: [designationQuestion(binding)] } }, { agentId });
-    // Synthetic designation fixture, not evidence of Corey approval.
-    const [designationRow] = await db.update(issueThreadInteractions).set({ status: "answered", resolvedByUserId: "local-board", resolvedAt: new Date(), updatedAt: new Date(), result: { version: 1, answers: [{ questionId: "designate-test-account", optionIds: ["bind-this-account"], otherText: userId }] } }).where(eq(issueThreadInteractions.id, designation.id)).returning();
+    // Synthetic native answer, not evidence of Corey approval. Exercise the real
+    // free-text normalization rather than manufacturing a result in the database.
+    await issueThreadInteractionService(db).answerQuestions(issue!, designation.id, { answers: [{ questionId: "designate-test-account", optionIds: ["bind-this-account"], otherText: userId }] }, { userId: "local-board" });
+    const [designationRow] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, designation.id));
     const e: Enrollment = { ...binding, loginAccountId: userId, designationId: designation.id, designationHash: digest(designationSnapshot(designationRow!)), expiresAt: new Date(Date.now() + 3_600_000).toISOString() };
     enrollments.push(e);
     process.env.PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS = JSON.stringify(enrollments);
@@ -101,6 +105,7 @@ describe("isolated chat approval with native authentication and persistence", ()
     const page = await testRequest().get(f.path).set("Cookie", cookie);
     expect(page.status, page.text).toBe(200);
     expect(page.headers["cache-control"]).toBe("no-store");
+    expect(page.headers["referrer-policy"]).toBe("same-origin");
     expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(page.text).toContain(f.e.scope);
     expect(page.text).toContain("Synthetic data. No outside effects.");
@@ -124,6 +129,8 @@ describe("isolated chat approval with native authentication and persistence", ()
     expect(await audit(f.issueId)).toHaveLength(0);
   });
   it("limits sign-in to the human origin and closes registration after enrollment", async () => {
+    // The empty-enrollment state alone must not open public registration.
+    expect((await testRequest().post("/api/chat-approval-auth/sign-up/email").set("Origin", ORIGIN).send({ email: "closed@fixture.invalid", password, name: "Other" })).status).toBe(403);
     const f = await seed();
     const page = await testRequest().get("/api/chat-approval-auth/login");
     expect(page.status).toBe(200);
@@ -219,7 +226,11 @@ describe("isolated chat approval with native authentication and persistence", ()
     expect(await audit(f.issueId)).toHaveLength(1);
     const revoked = await seed(), oldProof = await prompt(revoked);
     expect((await post(revoked.path, oldProof, "revoke")).status).toBe(200);
-    expect((await post(revoked.path, oldProof)).status).not.toBe(200);
+    // Stopping this card survives harmless enrollment serialization/revision changes.
+    revoked.e.expiresAt = new Date(Date.now() + 1_800_000).toISOString();
+    process.env.PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS = JSON.stringify(enrollments);
+    expect((await testRequest().get(revoked.path).set("Cookie", cookie)).status).toBe(403);
+    expect((await post(revoked.path, oldProof)).status).toBe(403);
     expect((await read(revoked.card.id)).status).toBe("pending");
     expect(await audit(revoked.issueId)).toHaveLength(0);
   });
@@ -257,8 +268,10 @@ describe("isolated chat approval with native authentication and persistence", ()
     // Internal service boundary fixture. This is not proof of a real user's identity.
     const actor = await designatedChatApprovalActor(db, f.e, { type: "board", source: "session", chatApprovalSession: true, userId, sessionId: "synthetic-service-session" });
     const page = await presentChatApproval(db, config, f.e, actor);
-    await db.delete(companyMemberships).where(eq(companyMemberships.companyId, f.e.companyId));
+    await db.update(companyMemberships).set({ membershipRole: "member" }).where(eq(companyMemberships.companyId, f.e.companyId));
     await expect(presentChatApproval(db, config, f.e, actor)).rejects.toMatchObject({ status: 403 });
+    await expect(resolveChatApproval(db, { config, enrollment: f.e, actor, proof: page.token, origin: ORIGIN, choice: "accept", answer: "" })).rejects.toMatchObject({ status: 403 });
+    await db.delete(companyMemberships).where(eq(companyMemberships.companyId, f.e.companyId));
     await expect(resolveChatApproval(db, { config, enrollment: f.e, actor, proof: page.token, origin: ORIGIN, choice: "accept", answer: "" })).rejects.toMatchObject({ status: 403 });
     expect((await read(f.card.id)).status).toBe("pending");
     expect(await audit(f.issueId)).toHaveLength(0);

@@ -65,7 +65,7 @@ async function assertDesignation(db: Db, e: Enrollment) {
     throw forbidden("A current human designation for this exact test account is required");
   }
 }
-async function nativeApprovalIdentity(db: Db, e: Enrollment) {
+async function nativeApprovalIdentity(db: Db, e: Enrollment, actor?: HumanSession) {
   // Lock existing native rights through the answer commit. A completed revocation
   // must win over an earlier route-local alias. No instance-admin bypass here.
   const [user] = await db.select().from(authUsers).where(eq(authUsers.id, e.userId)).for("update");
@@ -74,6 +74,10 @@ async function nativeApprovalIdentity(db: Db, e: Enrollment) {
       eq(companyMemberships.principalType, "user"), eq(companyMemberships.principalId, e.userId),
       eq(companyMemberships.status, "active"))).for("update");
   if (!user || !membership) throw forbidden("The designated human has no current company access");
+  if (actor && !actor.memberships?.some(row => row.companyId === e.companyId
+    && row.status === "active" && row.membershipRole === membership.membershipRole)) {
+    throw forbidden("The designated human's company rights changed. Open a new prompt");
+  }
   return { user, membership };
 }
 export async function designatedChatApprovalActor(db: Db, e: Enrollment, actor: Request["actor"]): Promise<Request["actor"]> {
@@ -101,7 +105,6 @@ async function assertNotRevoked(db: Db, e: Enrollment) {
   const [revoked] = await db.select({ id: activityLog.id }).from(activityLog).where(and(
     eq(activityLog.companyId, e.companyId), eq(activityLog.entityId, e.issueId), eq(activityLog.action, "issue.chat_approval_revoked"),
     sql`${activityLog.details}->>'interactionId' = ${e.interactionId}`,
-    sql`${activityLog.details}->>'enrollmentHash' = ${digest(e)}`,
   )).limit(1);
   if (revoked) throw forbidden("Chat approval was revoked. Use the original card");
 }
@@ -119,7 +122,7 @@ export async function presentChatApproval(db: Db, config: ChatApprovalConfig, e:
     const { issue, card } = await locked(tx, e);
     assertSimpleTestCard(e, card);
     await assertDesignation(tx, e);
-    await nativeApprovalIdentity(tx, e);
+    await nativeApprovalIdentity(tx, e, actor);
     await assertNotRevoked(tx, e);
     if (card.status !== "pending") throw conflict("This card already has an answer");
     if (["done", "cancelled"].includes(issue.status)) throw conflict("This issue is closed");
@@ -142,7 +145,7 @@ export async function resolveChatApproval(db: Db, args: {
     const { issue, card } = await locked(tx, e);
     assertSimpleTestCard(e, card);
     await assertDesignation(tx, e);
-    await nativeApprovalIdentity(tx, e);
+    await nativeApprovalIdentity(tx, e, args.actor);
     await assertNotRevoked(tx, e);
     if (card.status !== "pending") {
       const receipt = await chatApprovalReceipt(tx, e);

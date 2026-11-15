@@ -36,7 +36,7 @@ export function createChatApprovalAuth(db: Db, config: ChatApprovalConfig): Chat
     if (!active) {
       res.status(404).end(); return;
     }
-    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY" });
+    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY" });
     if (req.headers.authorization || req.headers["x-paperclip-run-id"]) {
       res.status(403).json({ error: "Agent and run credentials cannot use the human sign-in path" }); return;
     }
@@ -46,7 +46,7 @@ export function createChatApprovalAuth(db: Db, config: ChatApprovalConfig): Chat
       res.type("html").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Test approval sign-in</title><main style="max-width:32rem;margin:2rem auto;padding:1rem;font:1rem sans-serif">
 <h1>Test approval sign-in</h1><p>Use a password that you enter yourself. Do not give it to an agent. This sign-in does not approve a card or give access to a task.</p>
 <form id="login"><p><label>Email <input name="email" type="email" required autocomplete="username"></label></p><p><label>Password <input name="password" type="password" required minlength="8" autocomplete="current-password"></label></p><button value="sign-in">Sign in</button><button value="sign-up">Create account</button></form><p id="result" role="status"></p>
-<p>Create account makes a new account only. It does not prove email ownership. Home Lab must bind the correct account to the one test before it can answer. Account creation is off when a card is enrolled.</p>
+<p>Create account makes a new account only. It does not prove email ownership. Home Lab must bind the correct account to the one test before it can answer. Account creation needs an open setup window. It is off when a card is enrolled.</p>
 <script nonce="${nonce}">document.getElementById('login').addEventListener('submit',async e=>{e.preventDefault();const form=e.currentTarget;const result=document.getElementById('result');const data=new FormData(form);const action=e.submitter?.value;if(!['sign-in','sign-up'].includes(action))return;result.textContent='Please wait.';try{const response=await fetch('${basePath}/'+action+'/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:data.get('email'),password:data.get('password'),...(action==='sign-up'?{name:'Approval test user'}:{})})});const body=await response.json();form.elements.password.value='';result.textContent=response.ok?'Signed in. Return to chat and open the test link. Account: '+body.user.id:(body.message||body.error||'Sign-in failed.');}catch{result.textContent='Sign-in failed. Try again after you check your connection.';}});</script></main></html>`);
       return;
     }
@@ -57,7 +57,7 @@ export function createChatApprovalAuth(db: Db, config: ChatApprovalConfig): Chat
       res.status(403).json({ error: "The human sign-in origin is required" }); return;
     }
     // New accounts have no grants. Never permit registration while a card can be answered.
-    if (req.path === `${basePath}/sign-up/email` && active.enrollments.length) {
+    if (req.path === `${basePath}/sign-up/email` && (process.env.PAPERCLIP_CHAT_APPROVAL_SIGNUP_ENABLED !== "1" || active.enrollments.length)) {
       res.status(403).json({ error: "Account creation is closed for this test" }); return;
     }
     nativeHandler(req, res, next);
