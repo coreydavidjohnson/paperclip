@@ -57,6 +57,7 @@ import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { skillAccessRequestContext } from "./services/skill-access.js";
 import { actorMiddleware } from "./middleware/auth.js";
+import type { ChatApprovalAuth } from "./auth/chat-approval-auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import {
   privateHostnameGuard,
@@ -531,6 +532,7 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     decisionServiceOptions: DecisionServiceOptions;
     betterAuthHandler?: express.RequestHandler;
+    chatApprovalAuth?: ChatApprovalAuth;
     resolveSession?: (
       req: ExpressRequest,
     ) => Promise<BetterAuthSessionResult | null>;
@@ -655,6 +657,7 @@ export async function createApp(
     actorMiddleware(db, {
       deploymentMode: opts.deploymentMode,
       resolveSession: opts.resolveSession,
+      resolveChatApprovalSession: opts.chatApprovalAuth?.resolveSession,
     }),
   );
   // After the actor middleware on purpose: a valid Cloud control assertion
@@ -665,6 +668,9 @@ export async function createApp(
   app.use("/api/auth", authRoutes(db));
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
+  }
+  if (opts.chatApprovalAuth) {
+    app.all("/api/chat-approval-auth/{*authPath}", opts.chatApprovalAuth.handler);
   }
   app.use(llmRoutes(db));
 

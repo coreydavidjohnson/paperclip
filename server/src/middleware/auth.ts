@@ -25,6 +25,7 @@ import { agentRunWritesRevoked } from "../agent-run-cancellation.js";
 import { loadAgentRunAuthentication } from "./agent-run-authentication.js";
 import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
+import { isChatApprovalPath } from "../services/chat-approval-proof.js";
 import { logger } from "./logger.js";
 import { captureRunIdentity } from "../services/run-identity.js";
 import { boardAuthService } from "../services/board-auth.js";
@@ -232,6 +233,7 @@ async function auditAgentKeyMissingResponsibleUser(
 interface ActorMiddlewareOptions {
   deploymentMode: DeploymentMode;
   resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
+  resolveChatApprovalSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
 }
 
 const publicRoutineWebhookPath = /^\/api\/routine-triggers\/public\/[a-f0-9]{24}\/fire\/?$/i;
@@ -241,8 +243,9 @@ const publicMcpGatewayProtocolPath = /^\/mcp\/gateways\/gw_[a-f0-9]{32}\/?$/i;
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
   const authenticate: RequestHandler = async (req, _res, next) => {
+    const approvalSession = isChatApprovalPath(req) ? opts.resolveChatApprovalSession : undefined;
     req.actor =
-      opts.deploymentMode === "local_trusted"
+      opts.deploymentMode === "local_trusted" && !approvalSession
         ? {
             type: "board",
             userId: "local-board",
@@ -279,8 +282,9 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
     }
 
     if (!hasBearerCredentials) {
-      if (opts.deploymentMode === "authenticated" && opts.resolveSession) {
-        const cloudTenantActor = await resolveCloudTenantActor(db, req);
+      const resolveSession = approvalSession ?? (opts.deploymentMode === "authenticated" ? opts.resolveSession : undefined);
+      if (resolveSession) {
+        const cloudTenantActor = approvalSession ? null : await resolveCloudTenantActor(db, req);
         if (cloudTenantActor) {
           req.actor = {
             ...cloudTenantActor,
@@ -292,7 +296,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 
         let session: BetterAuthSessionResult | null = null;
         try {
-          session = await opts.resolveSession(req);
+          session = await resolveSession(req);
         } catch (err) {
           logger.warn(
             { err, method: req.method, url: req.originalUrl },

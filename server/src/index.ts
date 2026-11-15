@@ -711,6 +711,11 @@ async function startServerWithDatabaseTeardown(
   }
   
   let authReady = config.deploymentMode === "local_trusted";
+  const { readChatApprovalConfig } = await import("./services/chat-approval-proof.js");
+  const chatApprovalConfig = readChatApprovalConfig();
+  const chatApprovalAuth = chatApprovalConfig
+    ? (await import("./auth/chat-approval-auth.js")).createChatApprovalAuth(db as any, chatApprovalConfig)
+    : undefined;
   let betterAuthHandler: RequestHandler | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
@@ -955,6 +960,7 @@ async function startServerWithDatabaseTeardown(
     announcements: { enabled: config.announcementsEnabled, feedUrl: config.announcementsFeedUrl },
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
+    chatApprovalAuth,
     resolveSession,
     pluginWorkerManager,
     decisionServiceOptions,

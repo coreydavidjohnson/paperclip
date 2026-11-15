@@ -6,10 +6,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { activityLog, agents, companies, companyMemberships, createDb, heartbeatRuns, issues, issueThreadInteractions } from "@paperclipai/db";
+import { activityLog, agents, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues, issueThreadInteractions } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
-import { createBetterAuthHandler, createBetterAuthInstance, resolveBetterAuthSession } from "../auth/better-auth.js";
-import type { Config } from "../config.js";
+import { createChatApprovalAuth } from "../auth/chat-approval-auth.js";
+import { readChatApprovalConfig } from "../services/chat-approval-proof.js";
 import { createApp } from "../app.js";
 import { createLocalDiskStorageProvider } from "../storage/local-disk-provider.js";
 import { createStorageService } from "../storage/service.js";
@@ -28,6 +28,7 @@ describe("isolated chat approval with native authentication and persistence", ()
   let root: string;
   let cookie: string;
   let userId: string;
+  let password: string;
   let enrollments: Enrollment[] = [];
   // Supertest can choose an IPv6 bind host. Send the same allowed host as the human page.
   const testRequest = () => request.agent(app).set("Host", new URL(ORIGIN).host);
@@ -42,24 +43,26 @@ describe("isolated chat approval with native authentication and persistence", ()
     temporary = await startEmbeddedPostgresTestDatabase("chat-approval-");
     db = createDb(temporary.connectionString);
     root = await mkdtemp(join(tmpdir(), "chat-approval-"));
-    const auth = createBetterAuthInstance(db, { deploymentMode: "authenticated", deploymentExposure: "private",
-      authBaseUrlMode: "explicit", authPublicBaseUrl: ORIGIN, authDisableSignUp: false,
-      allowedHostnames: ["127.0.0.1", "approval.example.test"], port: 0 } as unknown as Config, [ORIGIN]);
+    await db.insert(authUsers).values({ id: "local-board", name: "Local Board", email: "local@fixture.invalid", createdAt: new Date(), updatedAt: new Date() });
+    const auth = createChatApprovalAuth(db, readChatApprovalConfig()!);
     app = await createApp(db, { uiMode: "none", serverPort: 0,
       storageService: createStorageService(createLocalDiskStorageProvider(join(root, "storage"))),
-      deploymentMode: "authenticated", deploymentExposure: "private", allowedHostnames: ["127.0.0.1", "approval.example.test"],
+      deploymentMode: "local_trusted", deploymentExposure: "private", allowedHostnames: ["127.0.0.1", "approval.example.test"],
       bindHost: "127.0.0.1", authPublicBaseUrl: ORIGIN, authReady: true, companyDeletionEnabled: false,
       instanceId: `chat-approval-${randomUUID()}`, localPluginDir: join(root, "plugins"), managedPluginAutoInstall: [],
       decisionServiceOptions: { wakeOriginAgent: async () => undefined },
-      betterAuthHandler: createBetterAuthHandler(auth), resolveSession: req => resolveBetterAuthSession(auth, req),
+      chatApprovalAuth: auth,
     });
-    const signup = await testRequest().post("/api/auth/sign-up/email").set("Origin", ORIGIN)
-      .send({ email: "synthetic-human@fixture.invalid", password: randomBytes(24).toString("hex"), name: "Synthetic human" });
+    password = randomBytes(24).toString("hex");
+    const signup = await testRequest().post("/api/chat-approval-auth/sign-up/email").set("Origin", ORIGIN)
+      .send({ email: "synthetic-human@fixture.invalid", password, name: "Synthetic human" });
     expect(signup.status, signup.text).toBe(200);
     userId = signup.body.user.id;
     const cookies = signup.headers["set-cookie"];
     cookie = (Array.isArray(cookies) ? cookies : [cookies]).map(value => value.split(";")[0]).join("; ");
     expect(cookie).toContain("session_token");
+    expect(cookie).toContain("paperclip-chat-approval");
+    expect((Array.isArray(cookies) ? cookies : [cookies]).some(value => value.includes("Secure"))).toBe(true);
   }, 120_000);
   afterAll(async () => {
     await app?.locals.paperclipShutdown();
@@ -98,6 +101,53 @@ describe("isolated chat approval with native authentication and persistence", ()
   const read = async (id: string) => (await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, id)))[0]!;
   const audit = async (issueId: string) => (await db.select().from(activityLog).where(eq(activityLog.entityId, issueId))).filter(row => row.action === "issue.chat_approval_answered");
   const post = (path: string, proof: string, choice = "accept", answer = "") => testRequest().post(path).set("Cookie", cookie).set("Origin", ORIGIN).type("form").send({ proof, choice, answer });
+
+  it("keeps the human cookie out of ordinary local-board routes and refuses an anonymous approval", async () => {
+    for (const sessionCookie of [cookie, ""]) {
+      const profile = await testRequest().get("/api/auth/get-session").set("Cookie", sessionCookie);
+      expect(profile.status, profile.text).toBe(200);
+      expect(profile.body.user.id).toBe("local-board");
+    }
+    const f = await seed();
+    expect((await testRequest().get(f.path)).status).not.toBe(200);
+    expect((await read(f.card.id)).status).toBe("pending");
+    expect(await audit(f.issueId)).toHaveLength(0);
+  });
+  it("limits sign-in to the human origin and closes registration after enrollment", async () => {
+    const f = await seed();
+    const page = await testRequest().get("/api/chat-approval-auth/login");
+    expect(page.status).toBe(200);
+    expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
+    expect(page.text).not.toContain(password);
+    for (const headers of [{ Authorization: `Bearer ${f.token}` }, { "X-Paperclip-Run-Id": randomUUID() }]) {
+      expect((await testRequest().get("/api/chat-approval-auth/login").set(headers)).status).toBe(403);
+    }
+    expect((await testRequest().post("/api/chat-approval-auth/sign-in/email").send({ email: "synthetic-human@fixture.invalid", password })).status).toBe(403);
+    expect((await testRequest().post("/api/chat-approval-auth/sign-up/email").set("Origin", ORIGIN).send({ email: "other@fixture.invalid", password, name: "Other" })).status).toBe(403);
+    expect((await testRequest().post("/api/chat-approval-auth/change-password").set("Origin", ORIGIN).set("Cookie", cookie).send({})).status).toBe(404);
+    const login = await testRequest().post("/api/chat-approval-auth/sign-in/email").set("Origin", ORIGIN).send({ email: "synthetic-human@fixture.invalid", password });
+    expect(login.status, login.text).toBe(200);
+    expect(login.body.user.id).toBe(userId);
+  });
+  it("turns off only this path and invalidates its old session on key rotation", async () => {
+    const f = await seed();
+    const key = process.env.PAPERCLIP_CHAT_APPROVAL_HMAC_KEY;
+    try {
+      process.env.PAPERCLIP_CHAT_APPROVAL_HMAC_KEY = randomBytes(32).toString("hex");
+      expect((await testRequest().get(f.path).set("Cookie", cookie)).status).not.toBe(200);
+      expect((await testRequest().get("/api/chat-approval-auth/login")).status).toBe(404);
+      process.env.PAPERCLIP_CHAT_APPROVAL_ENABLED = "0";
+      expect((await testRequest().get("/api/chat-approval-auth/login")).status).toBe(404);
+      const profile = await testRequest().get("/api/auth/get-session").set("Cookie", cookie);
+      expect(profile.status).toBe(200);
+      expect(profile.body.user.id).toBe("local-board");
+      expect((await read(f.card.id)).status).toBe("pending");
+    } finally {
+      process.env.PAPERCLIP_CHAT_APPROVAL_HMAC_KEY = key;
+      process.env.PAPERCLIP_CHAT_APPROVAL_ENABLED = "1";
+    }
+    expect((await post(f.path, await prompt(f))).status).toBe(200);
+  });
 
   it("opens one existing card from the agent route, accepts a real login answer, and retries once without a second audit", async () => {
     const f = await seed();

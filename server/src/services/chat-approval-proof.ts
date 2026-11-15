@@ -14,6 +14,10 @@ export type Presentation = {
 };
 
 export class ApprovalProofError extends Error {}
+export function isChatApprovalPath(req: { path: string; method: string }) {
+  return ["GET", "POST"].includes(req.method)
+    && /^\/api\/issues\/[a-f0-9-]{36}\/interactions\/[a-f0-9-]{36}\/chat-approval\/?$/i.test(req.path);
+}
 function refuse(message: string): never { throw new ApprovalProofError(message); }
 export function digest(value: unknown): string {
   // Snapshots are built server-side with a fixed field order, never from client JSON.
