@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
-export type HumanSession = { type: string; source?: string; userId?: string; sessionId?: string | null; chatApprovalSession?: boolean; chatApprovalAccountId?: string; memberships?: Array<{ companyId: string; membershipRole: string; status: string }>; agentId?: string; runId?: string };
+export type HumanSession = { type: string; source?: string; userId?: string; sessionId?: string | null; chatApprovalSession?: boolean; chatApprovalAccountId?: string; memberships?: Array<{ companyId: string; membershipRole?: string | null; status?: string }>; agentId?: string; runId?: string };
 export type Enrollment = {
   companyId: string; issueId: string; interactionId: string; userId: string;
   chatId: string; submittingAgentId: string; revision: string;
