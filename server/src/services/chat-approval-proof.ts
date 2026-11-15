@@ -55,9 +55,9 @@ export function assertSimpleTestCard(enrollment: Enrollment, card: {
   if (card.id !== enrollment.interactionId || card.companyId !== enrollment.companyId || card.issueId !== enrollment.issueId
     || card.createdByAgentId !== enrollment.submittingAgentId || card.kind !== "request_confirmation"
     || !payload || typeof payload.prompt !== "string"
-    || (payload.acceptLabel !== undefined && payload.acceptLabel !== "Approve")
-    || (payload.rejectLabel !== undefined && payload.rejectLabel !== "Deny")
-    || Object.keys(payload).some(k => !["version", "prompt", "helpText", "acceptLabel", "rejectLabel", "supersedeOnUserComment"].includes(k))) {
+    || (payload.acceptLabel != null && payload.acceptLabel !== "Approve")
+    || (payload.rejectLabel != null && payload.rejectLabel !== "Deny")
+    || Object.keys(payload).some(k => !["version", "prompt", "detailsMarkdown", "acceptLabel", "rejectLabel", "allowDeclineReason", "supersedeOnUserComment"].includes(k))) {
     refuse("Only a plain, enrolled test confirmation can use this path");
   }
 }

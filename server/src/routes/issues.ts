@@ -17147,9 +17147,12 @@ export function issueRoutes(
     try { requireHuman(req.actor); } catch { throw forbidden("A separate human login session is required"); }
     const authorization = await getIssueThreadInteractionResolutionAuthorization(req, res, issue, enrollment.interactionId);
     if (!authorization) return;
-    const page = await presentChatApproval(db, config, enrollment, req.actor);
-    const payload = page.card.payload as { prompt: string; helpText?: string };
-    res.type("html").send(renderPrompt(enrollment, payload.prompt, payload.helpText ?? "", page.token,
+    const page = await presentChatApproval(db, config, enrollment, req.actor).catch(error => {
+      if (error instanceof ApprovalProofError) throw forbidden(error.message);
+      throw error;
+    });
+    const payload = page.card.payload as { prompt: string; detailsMarkdown?: string };
+    res.type("html").send(renderPrompt(enrollment, payload.prompt, payload.detailsMarkdown ?? "", page.token,
       `/api/issues/${issue.id}/interactions/${enrollment.interactionId}/chat-approval`));
   });
   router.post(chatApprovalPath, urlencoded({ extended: false, limit: "8kb", parameterLimit: 3 }), async (req, res) => {

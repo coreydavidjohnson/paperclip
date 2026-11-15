@@ -31,6 +31,7 @@ test('binds exact human, chat, card, scope, target display, origin and expiry', 
 });
 test('governed, mixed, foreign and unknown cards are never enabled by a test label', () => {
   assert.doesNotThrow(() => assertSimpleTestCard(e,card));
+  assert.doesNotThrow(() => assertSimpleTestCard(e,{...card,payload:{...card.payload,allowDeclineReason:true,detailsMarkdown:'Synthetic data only',acceptLabel:null}}));
   for (const extra of ['toolAction','secretProposal','connectionAuthorization','target','unknown']) assert.throws(() => assertSimpleTestCard(e,{...card,payload:{...card.payload,[extra]:{}}}));
   for (const override of [{companyId:'foreign'},{createdByAgentId:'foreign'},{kind:'ask_user_questions'}]) assert.throws(() => assertSimpleTestCard(e,{...card,...override}));
   for (const label of [{acceptLabel:'Delete all data'}, {rejectLabel:'Approve'}]) assert.throws(() => assertSimpleTestCard(e,{...card,payload:{...card.payload,...label}}));

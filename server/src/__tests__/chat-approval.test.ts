@@ -75,7 +75,7 @@ describe("isolated chat approval with native authentication and persistence", ()
     const [issue] = await db.insert(issues).values({ id: issueId, companyId, title: "Synthetic no-op approval", status: "in_progress", assigneeAgentId: agentId }).returning();
     await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, nativeIssueId: issueId, status: "running", runtimeMode: "native", responsibleUserId: userId, contextSnapshot: { issueId } });
     await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issueId));
-    const card = await issueThreadInteractionService(db).create(issue!, { kind: "request_confirmation", resolverPolicy: "human_only", payload: { version: 1, prompt: "Approve the disposable marker test?", helpText: "Synthetic data. No outside effects." } }, { agentId });
+    const card = await issueThreadInteractionService(db).create(issue!, { kind: "request_confirmation", resolverPolicy: "human_only", payload: { version: 1, prompt: "Approve the disposable marker test?", detailsMarkdown: "Synthetic data. No outside effects." } }, { agentId });
     const e: Enrollment = { companyId, issueId, interactionId: card.id, userId, chatId: `synthetic-chat-${randomUUID()}`, submittingAgentId: agentId,
       revision: "disposable-v1", action: "Write a synthetic marker", target: "Disposable test directory", scope: "Synthetic data only. No production access.", undo: "Remove the synthetic marker", effect: "synthetic_test_only" };
     enrollments.push(e);
@@ -86,10 +86,11 @@ describe("isolated chat approval with native authentication and persistence", ()
   }
   async function prompt(f: Awaited<ReturnType<typeof seed>>) {
     const page = await testRequest().get(f.path).set("Cookie", cookie);
-    expect(page.status).toBe(200);
+    expect(page.status, page.text).toBe(200);
     expect(page.headers["cache-control"]).toBe("no-store");
     expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
     expect(page.text).toContain(f.e.scope);
+    expect(page.text).toContain("Synthetic data. No outside effects.");
     const proof = page.text.match(/name="proof" value="([^"]+)"/)?.[1];
     expect(proof).toBeTruthy();
     return proof!;
