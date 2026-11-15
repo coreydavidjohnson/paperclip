@@ -1,11 +1,11 @@
 import type { Request } from "express";
 import { and, eq, sql } from "drizzle-orm";
-import { activityLog, authUsers, companyMemberships, instanceUserRoles, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
+import { activityLog, authUsers, companyMemberships, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import { conflict, forbidden, notFound } from "../errors.js";
 import { persistActivity, publishActivity, type ActivityPublication } from "./activity-log.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { assertSimpleTestCard, digest, parseAnswer, present, requireEnrollment, verify,
-  ApprovalProofError, requireHuman, type ChatApprovalConfig, type Enrollment, type HumanSession } from "./chat-approval-proof.js";
+  ApprovalProofError, designationQuestion, requireHuman, type ChatApprovalConfig, type Enrollment, type HumanSession } from "./chat-approval-proof.js";
 
 type Issue = typeof issues.$inferSelect;
 type Card = typeof issueThreadInteractions.$inferSelect;
@@ -48,16 +48,33 @@ async function assertDesignation(db: Db, e: Enrollment) {
   const expiry = Date.parse(e.expiresAt);
   const result = card?.result as { version?: number; answers?: Array<{ questionId?: string; optionIds?: string[]; otherText?: string }> } | null;
   const answer = result?.answers?.[0];
+  const payload = card?.payload as { questions?: Array<Record<string, unknown>> } | null;
+  const question = payload?.questions?.[0], expected = designationQuestion(e);
   if (!card || card.id === e.interactionId || card.kind !== "ask_user_questions" || card.status !== "answered"
     || card.requestedResolverPolicy !== "human_only" || card.effectiveResolverPolicy !== "human_only"
     || card.addresseeUserId !== e.userId || card.resolvedByUserId !== e.userId
     || card.resolvedByAgentId || card.resolvedByRunId || !card.resolvedAt
     || digest(designationSnapshot(card)) !== e.designationHash
+    || payload?.questions?.length !== 1 || !question || question.id !== expected.id
+    || question.prompt !== expected.prompt || question.helpText !== expected.helpText
+    || question.selectionMode !== "single" || question.required !== true || question.allowOther !== false
+    || digest(question.options) !== digest(expected.options)
     || result?.version !== 1 || result.answers?.length !== 1 || answer?.questionId !== "designate-test-account"
     || answer.optionIds?.length !== 1 || answer.optionIds[0] !== "bind-this-account" || answer.otherText !== e.loginAccountId
     || !Number.isFinite(expiry) || expiry <= Date.now() || expiry > card.resolvedAt.getTime() + 86_400_000) {
     throw forbidden("A current human designation for this exact test account is required");
   }
+}
+async function nativeApprovalIdentity(db: Db, e: Enrollment) {
+  // Lock existing native rights through the answer commit. A completed revocation
+  // must win over an earlier route-local alias. No instance-admin bypass here.
+  const [user] = await db.select().from(authUsers).where(eq(authUsers.id, e.userId)).for("update");
+  const [membership] = await db.select({ companyId: companyMemberships.companyId, membershipRole: companyMemberships.membershipRole, status: companyMemberships.status })
+    .from(companyMemberships).where(and(eq(companyMemberships.companyId, e.companyId),
+      eq(companyMemberships.principalType, "user"), eq(companyMemberships.principalId, e.userId),
+      eq(companyMemberships.status, "active"))).for("update");
+  if (!user || !membership) throw forbidden("The designated human has no current company access");
+  return { user, membership };
 }
 export async function designatedChatApprovalActor(db: Db, e: Enrollment, actor: Request["actor"]): Promise<Request["actor"]> {
   try { requireHuman(actor); } catch { throw forbidden("A separate human login session is required"); }
@@ -68,18 +85,12 @@ export async function designatedChatApprovalActor(db: Db, e: Enrollment, actor: 
     assertSimpleTestCard(e, card);
     await assertDesignation(tx, e);
     await assertNotRevoked(tx, e);
-    const [user] = await tx.select().from(authUsers).where(eq(authUsers.id, e.userId));
-    if (!user) throw forbidden("The designated human is unavailable");
-    const memberships = await tx.select({ companyId: companyMemberships.companyId, membershipRole: companyMemberships.membershipRole, status: companyMemberships.status })
-      .from(companyMemberships).where(and(eq(companyMemberships.principalType, "user"),
-        eq(companyMemberships.principalId, e.userId), eq(companyMemberships.status, "active")));
-    const [role] = await tx.select({ id: instanceUserRoles.id }).from(instanceUserRoles)
-      .where(and(eq(instanceUserRoles.userId, e.userId), eq(instanceUserRoles.role, "instance_admin")));
+    const { user, membership } = await nativeApprovalIdentity(tx, e);
     // Route-local only. Use existing native rights; never manufacture memberships,
     // roles, an implicit-local bypass, or a replacement BetterAuth identity.
     return { ...actor, userId: e.userId, chatApprovalAccountId: actor.userId,
-      userName: user.name, userEmail: user.email, companyIds: memberships.map(row => row.companyId),
-      memberships, isInstanceAdmin: Boolean(role) };
+      userName: user.name, userEmail: user.email, companyIds: [membership.companyId],
+      memberships: [membership], isInstanceAdmin: false };
   }).catch(error => {
     if (error instanceof ApprovalProofError) throw forbidden(error.message);
     throw error;
@@ -108,6 +119,7 @@ export async function presentChatApproval(db: Db, config: ChatApprovalConfig, e:
     const { issue, card } = await locked(tx, e);
     assertSimpleTestCard(e, card);
     await assertDesignation(tx, e);
+    await nativeApprovalIdentity(tx, e);
     await assertNotRevoked(tx, e);
     if (card.status !== "pending") throw conflict("This card already has an answer");
     if (["done", "cancelled"].includes(issue.status)) throw conflict("This issue is closed");
@@ -130,6 +142,7 @@ export async function resolveChatApproval(db: Db, args: {
     const { issue, card } = await locked(tx, e);
     assertSimpleTestCard(e, card);
     await assertDesignation(tx, e);
+    await nativeApprovalIdentity(tx, e);
     await assertNotRevoked(tx, e);
     if (card.status !== "pending") {
       const receipt = await chatApprovalReceipt(tx, e);
@@ -143,7 +156,8 @@ export async function resolveChatApproval(db: Db, args: {
     if (answer.decision === "revoke") {
       publication = (await persistActivity(tx, { companyId: e.companyId, actorType: "user", actorId: args.actor.userId!,
         action: "issue.chat_approval_revoked", entityType: "issue", entityId: e.issueId,
-        details: { interactionId: e.interactionId, enrollmentHash: digest(e), source: "chat_approval_prompt", responseId: proof.responseId },
+        details: { interactionId: e.interactionId, enrollmentHash: digest(e), source: "chat_approval_prompt", responseId: proof.responseId,
+          humanUserId: args.actor.userId, loginAccountId: args.actor.chatApprovalAccountId, designationId: e.designationId, designationHash: e.designationHash },
       })).publication;
       return { interaction: await svc.getForIssue(issue, card.id), receipt: null, deduplicated: false };
     }

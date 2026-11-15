@@ -8,6 +8,12 @@ export type Enrollment = {
   action: string; target: string; scope: string; undo: string;
   effect: "synthetic_test_only";
 };
+export function designationQuestion(e: Omit<Enrollment, "loginAccountId" | "designationId" | "designationHash" | "expiresAt">) {
+  return { id: "designate-test-account", prompt: "Which login account do you choose for this one test?",
+    helpText: `Type the account ID from your private sign-in page. This choice binds that account to the test below for no more than 24 hours after your answer. It does not answer the test. Do not choose this option if the account is not yours.\nAction: ${e.action}\nTarget: ${e.target}\nScope: ${e.scope}\nUndo: ${e.undo}\nCompany: ${e.companyId}\nIssue: ${e.issueId}\nTest card: ${e.interactionId}\nHuman: ${e.userId}\nChat: ${e.chatId}\nAgent: ${e.submittingAgentId}\nPolicy: ${e.revision}\nEffect: ${e.effect}`,
+    selectionMode: "single" as const, required: true, allowOther: false,
+    options: [{ id: "bind-this-account", label: "Bind my account to this test", freeText: true }] };
+}
 export type ChatApprovalConfig = { origin: string; key: string; enrollments: Enrollment[] };
 export type Presentation = {
   version: 1; responseId: string; userId: string; sessionTag: string;
