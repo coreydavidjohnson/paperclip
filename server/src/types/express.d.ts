@@ -14,6 +14,7 @@ declare global {
         companyId?: string;
         companyIds?: string[];
         sessionId?: string | null;
+        chatApprovalSession?: boolean;
         memberships?: Array<{
           companyId: string;
           membershipRole?: string | null;
@@ -30,7 +31,7 @@ declare global {
         runId?: string;
         onBehalfOfUserId?: string | null;
         identityContextId?: string | null;
-        source?: "local_implicit" | "session" | "chat_approval_session" | "board_key" | "agent_key" | "agent_jwt" | "mcp_oauth" | "cloud_tenant" | "cloud_control" | "none";
+        source?: "local_implicit" | "session" | "board_key" | "agent_key" | "agent_jwt" | "mcp_oauth" | "cloud_tenant" | "cloud_control" | "none";
       };
     }
   }

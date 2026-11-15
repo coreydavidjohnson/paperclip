@@ -1,6 +1,6 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 
-export type HumanSession = { type: string; source?: string; userId?: string; sessionId?: string | null; agentId?: string; runId?: string };
+export type HumanSession = { type: string; source?: string; userId?: string; sessionId?: string | null; chatApprovalSession?: boolean; agentId?: string; runId?: string };
 export type Enrollment = {
   companyId: string; issueId: string; interactionId: string; userId: string;
   chatId: string; submittingAgentId: string; revision: string;
@@ -24,7 +24,7 @@ export function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 export function requireHuman(actor: HumanSession): asserts actor is HumanSession & { userId: string; sessionId: string } {
-  if (actor.type !== "board" || actor.source !== "chat_approval_session" || !actor.userId || !actor.sessionId
+  if (actor.type !== "board" || actor.source !== "session" || actor.chatApprovalSession !== true || !actor.userId || !actor.sessionId
     || actor.agentId || actor.runId) refuse("A separate human login session is required");
 }
 export function readChatApprovalConfig(env: NodeJS.ProcessEnv = process.env): ChatApprovalConfig | null {

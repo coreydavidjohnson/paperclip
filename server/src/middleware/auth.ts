@@ -317,13 +317,14 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             type: "board",
             userId,
             sessionId: session.session.id,
+            chatApprovalSession: Boolean(approvalSession),
             userName: session.user.name ?? null,
             userEmail: session.user.email ?? null,
             companyIds: memberships.map((row) => row.companyId),
             memberships,
             isInstanceAdmin: Boolean(roleRow),
             runId: runIdHeader ?? undefined,
-            source: approvalSession ? "chat_approval_session" : "session",
+            source: "session",
           };
           next();
           return;

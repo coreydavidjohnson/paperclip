@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { ApprovalProofError, readChatApprovalConfig, requireHuman, requireEnrollment, assertSimpleTestCard, present, verify, parseAnswer, renderPrompt } from '../server/src/services/chat-approval-proof.ts';
 const e = { companyId:'company', issueId:'issue', interactionId:'card', userId:'human', chatId:'chief-chat', submittingAgentId:'chief', revision:'test-1', action:'Run synthetic no-op', target:'Disposable fixture', scope:'Synthetic data only', undo:'Delete the fixture', effect:'synthetic_test_only' };
 const config = { origin:'https://approval.example.test', key:randomBytes(32).toString('hex'), enrollments:[e] };
-const human = { type:'board', source:'chat_approval_session', userId:'human', sessionId:'human-login' };
+const human = { type:'board', source:'session', chatApprovalSession:true, userId:'human', sessionId:'human-login' };
 const snapshot = { question:'Approve this synthetic test?', target:'fixture-v1' };
 const card = { id:'card', companyId:'company', issueId:'issue', kind:'request_confirmation', createdByAgentId:'chief', payload:{version:1,prompt:snapshot.question} };
 test('off by default and refuses malformed or broad configuration', () => {
@@ -13,7 +13,10 @@ test('off by default and refuses malformed or broad configuration', () => {
   assert.deepEqual(readChatApprovalConfig(env), config);
   for (const override of [ {PAPERCLIP_CHAT_APPROVAL_ORIGIN:'http://approval.example.test'}, {PAPERCLIP_CHAT_APPROVAL_ORIGIN:config.origin+'/'}, {PAPERCLIP_CHAT_APPROVAL_HMAC_KEY:'short'}, {PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS:JSON.stringify([{...e,effect:'production'}])}, {PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS:JSON.stringify([e,e])} ]) assert.throws(() => readChatApprovalConfig({...env,...override}));
 });
-for (const source of ['local_implicit','session','board_key','agent_key','agent_jwt','mcp_oauth','cloud_tenant','none']) test(`rejects ${source} even with a copied human id`, () => assert.throws(() => requireHuman({...human,source})));
+for (const source of ['local_implicit','board_key','agent_key','agent_jwt','mcp_oauth','cloud_tenant','none']) test(`rejects ${source} even with a copied human id`, () => assert.throws(() => requireHuman({...human,source})));
+test('rejects ordinary login sessions without the dedicated credential boundary', () => {
+  for (const chatApprovalSession of [undefined, false]) assert.throws(() => requireHuman({...human,chatApprovalSession}), ApprovalProofError);
+});
 test('rejects owner tokens, session editors, actor/run claims and another login', () => {
   for (const actor of [{...human,type:'agent'}, {...human,userId:'editor'}, {...human,sessionId:null}, {...human,agentId:'chief'}, {...human,runId:'run'}]) assert.throws(() => requireEnrollment(config,'issue','card',actor));
   const {token} = present(config,e,human,snapshot,1000);
