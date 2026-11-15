@@ -29,6 +29,8 @@ describe("isolated chat approval with native authentication and persistence", ()
   let cookie: string;
   let userId: string;
   let enrollments: Enrollment[] = [];
+  // Supertest can choose an IPv6 bind host. Send the same allowed host as the human page.
+  const testRequest = () => request.agent(app).set("Host", new URL(ORIGIN).host);
   beforeAll(async () => {
     process.env.BETTER_AUTH_SECRET = randomBytes(32).toString("hex");
     process.env.PAPERCLIP_AGENT_JWT_SECRET = randomBytes(32).toString("hex");
@@ -51,7 +53,7 @@ describe("isolated chat approval with native authentication and persistence", ()
       decisionServiceOptions: { wakeOriginAgent: async () => undefined },
       betterAuthHandler: createBetterAuthHandler(auth), resolveSession: req => resolveBetterAuthSession(auth, req),
     });
-    const signup = await request(app).post("/api/auth/sign-up/email").set("Origin", ORIGIN)
+    const signup = await testRequest().post("/api/auth/sign-up/email").set("Origin", ORIGIN)
       .send({ email: "synthetic-human@fixture.invalid", password: randomBytes(24).toString("hex"), name: "Synthetic human" });
     expect(signup.status, signup.text).toBe(200);
     userId = signup.body.user.id;
@@ -83,7 +85,7 @@ describe("isolated chat approval with native authentication and persistence", ()
     return { e, path, token, card, issueId };
   }
   async function prompt(f: Awaited<ReturnType<typeof seed>>) {
-    const page = await request(app).get(f.path).set("Cookie", cookie);
+    const page = await testRequest().get(f.path).set("Cookie", cookie);
     expect(page.status).toBe(200);
     expect(page.headers["cache-control"]).toBe("no-store");
     expect(page.headers["content-security-policy"]).toContain("frame-ancestors 'none'");
@@ -94,11 +96,11 @@ describe("isolated chat approval with native authentication and persistence", ()
   }
   const read = async (id: string) => (await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, id)))[0]!;
   const audit = async (issueId: string) => (await db.select().from(activityLog).where(eq(activityLog.entityId, issueId))).filter(row => row.action === "issue.chat_approval_answered");
-  const post = (path: string, proof: string, choice = "accept", answer = "") => request(app).post(path).set("Cookie", cookie).set("Origin", ORIGIN).type("form").send({ proof, choice, answer });
+  const post = (path: string, proof: string, choice = "accept", answer = "") => testRequest().post(path).set("Cookie", cookie).set("Origin", ORIGIN).type("form").send({ proof, choice, answer });
 
   it("opens one existing card from the agent route, accepts a real login answer, and retries once without a second audit", async () => {
     const f = await seed();
-    const link = await request(app).get(f.path).set("Authorization", `Bearer ${f.token}`);
+    const link = await testRequest().get(f.path).set("Authorization", `Bearer ${f.token}`);
     expect(link.status).toBe(200);
     expect(link.body).toMatchObject({ humanLoginRequired: true, chatId: f.e.chatId, url: ORIGIN + f.path });
     expect(JSON.stringify(link.body)).not.toContain("sessionTag");
@@ -110,7 +112,7 @@ describe("isolated chat approval with native authentication and persistence", ()
     const records = await audit(f.issueId);
     expect(records).toHaveLength(1);
     expect(records[0]?.details).toMatchObject({ humanUserId: userId, submittingAgentId: f.e.submittingAgentId, chatId: f.e.chatId, exactAnswer: "Approve", decision: "accept", question: "Approve the disposable marker test?" });
-    const receipt = await request(app).get(f.path).set("Authorization", `Bearer ${f.token}`);
+    const receipt = await testRequest().get(f.path).set("Authorization", `Bearer ${f.token}`);
     expect(receipt.body.receipt.responseId).toBe(records[0]!.details!.responseId);
     const marker = join(root, `${f.card.id}.marker`);
     await writeFile(marker, "synthetic execution after authoritative acceptance");
@@ -128,7 +130,7 @@ describe("isolated chat approval with native authentication and persistence", ()
   });
   it("refuses an agent POST even with the human proof and copied user id", async () => {
     const f = await seed(), proof = await prompt(f);
-    const response = await request(app).post(f.path).set("Authorization", `Bearer ${f.token}`).set("Origin", ORIGIN).type("form").send({proof,choice:"accept",answer:""});
+    const response = await testRequest().post(f.path).set("Authorization", `Bearer ${f.token}`).set("Origin", ORIGIN).type("form").send({proof,choice:"accept",answer:""});
     expect(response.status).toBe(403);
     expect((await read(f.card.id)).status).toBe("pending");
     expect(await audit(f.issueId)).toHaveLength(0);
@@ -142,7 +144,7 @@ describe("isolated chat approval with native authentication and persistence", ()
       if (mode === "policy") { f.e.revision = "revoked-v2"; process.env.PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS = JSON.stringify(enrollments); }
       if (mode === "forged") proof += "x";
       const response = mode === "origin"
-        ? await request(app).post(f.path).set("Cookie", cookie).set("Origin", "https://evil.example.test").type("form").send({proof,choice:"accept",answer:""})
+        ? await testRequest().post(f.path).set("Cookie", cookie).set("Origin", "https://evil.example.test").type("form").send({proof,choice:"accept",answer:""})
         : await post(f.path, proof, "accept", mode === "conflict" ? "Deny" : "");
       expect(response.status).not.toBe(200);
       expect((await read(f.card.id)).status).toBe(mode === "cancelled" ? "cancelled" : "pending");
