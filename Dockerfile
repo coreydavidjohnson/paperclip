@@ -184,6 +184,9 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     --hookTimeout=120000 --testTimeout=60000 \
     src/controller-drain.test.ts \
     src/__tests__/db-errors.test.ts \
+    src/__tests__/heartbeat-queued-run-claim-isolation.test.ts \
+    src/__tests__/routines-service.test.ts \
+    src/__tests__/routine-status-reconciliation.test.ts \
     src/__tests__/health-readiness-db.test.ts \
     src/__tests__/live-events-readiness-db.test.ts \
     src/__tests__/issue-interactions-read-only-contract.test.ts \

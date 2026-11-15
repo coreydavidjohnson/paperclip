@@ -680,3 +680,34 @@ heartbeat.ts.
 - Verification is the full exact-source production target, not an overlay test.
   Its replacement build must pass before release. No runtime setting changes.
 - Remove when the standard server build enforces an equivalent compiler budget.
+
+## Isolate queued claim database failures (PER-1310)
+
+- A non-HTTP exception from one queued claim previously escaped the recovery
+  loop and prevented later agents from being processed. Preserve the existing
+  permanent 403 cancellation and recoverable HTTP rejection paths. Log other
+  failures with bounded SQLSTATE, safe IDs and a constant error category, never
+  raw query text, parameters or driver messages. Failed queued rows remain
+  retryable.
+- Claims include post-commit bookkeeping. Re-read the run after an exception;
+  only a verified queued row permits scanning later rows for that agent. A
+  committed or unreadable claim stops that agent scan without resetting or
+  dispatching uncertain work. Other agents continue. Existing transactional
+  run admission and orphan recovery retain concurrency and recovery authority.
+- Real-Postgres trigger regressions cover SQLSTATE 23505 and XX000 before
+  commit, continued same-agent and other-agent execution, queued wake retention,
+  exactly-once dispatch after the trigger is removed, safe logs, and a
+  post-commit wake-bookkeeping failure that is not replayed. The two original
+  cases fail on the deployed base; the reviewed candidate passes 102/102 with
+  the existing routine coalescing and status-reconciliation suites.
+- Cross-provider Fable 5.2 review identified uncertain post-commit claims and
+  insufficient diagnostics. The state check, post-commit regression, error-level
+  log and bounded SQLSTATE address those findings. Retry exhaustion was not
+  added: the task requires recoverable rows to remain available, and this
+  change must not cancel admitted work on an unknown failure.
+- Add these three suites to the production image gate. Reuse the existing
+  open-idle-issue coalescing carry above rather than duplicating it.
+- Remove when upstream isolates queued claim failures with equivalent
+  uncertain-outcome safety. Upstream master and v2026.1106.0 still rethrow
+  non-HTTP claim errors at inspection. The required 24-hour live routine
+  observation is a separate acceptance gate, not established by these tests.
