@@ -47,6 +47,33 @@ heartbeat.ts.
 - Retire when upstream implements equivalent transactional contracts. No
   migration, approval release, execution-stop attestation or replay is added.
 
+## Expected external cancellation acknowledgement (PER-1524 / PER-1498)
+
+- Reconcile expected operator, control-plane and queued-message cancellation
+  through the original durable handle and saved provider configuration. Probe
+  before Stop so a reused session does not prevent proof that the old turn ended.
+- Keep provider calls outside issue/run locks. Recheck task/company/agent,
+  handle, cancellation intent, pending acknowledgement, configuration, epoch
+  and version under lock before recording proof. Unknown evidence stays held.
+- A confirmed original stop acknowledges the unique run and persists the
+  existing finalize outbox in one transaction. Resolve only its exact eligible
+  legacy-execution hold; preserve workspace, approval and dependency holds.
+  Acknowledgement proves termination, never success of unknown actions.
+- Sweep historical requested acknowledgements even when their stop outbox is
+  already done. Claimed outbox consumers stop only a positively active original
+  turn. A replay after committed proof does not Stop the session again.
+- The existing PostgreSQL suites now cover all three intent sources, strict
+  unknown-proof 409, superseded evidence, a winning concurrent rebind with zero
+  Stop/ack and competing public workers with exactly one Stop, acknowledgement,
+  finalize receipt and outcome-aware saved-state continuation. Both suites are
+  already included in the production image gate.
+- If finalization dispatch permanently fails after acknowledgement, callers see
+  verified cancellation, not a successful restart. The durable pending outbox
+  retains lastError and capped-backoff retries; operator repair remains required.
+- Retire when upstream provides equivalent original-turn proof and durable
+  acknowledgement across expected cancellation sources. No migration or approval
+  release is added.
+
 ## PER-1507 guarded terminal duplicate cancellation
 
 - Extend the existing exact exhausted-disposition status repair to cancelled.

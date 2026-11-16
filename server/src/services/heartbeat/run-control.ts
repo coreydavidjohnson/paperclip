@@ -139,6 +139,7 @@ export interface HeartbeatRunControlDependencies extends Pick<ReturnType<typeof 
       reason: string;
     }) => Promise<{ closed: number; busy: number; failed: number }>;
   };
+  acknowledgeExternalStop?: (runId: string, companyId: string) => Promise<boolean>;
   envOrchestrator: Pick<ReturnType<typeof environmentRunOrchestrator>, "releaseForRun">;
   enqueueWakeup: ReturnType<typeof createHeartbeatQueue>["enqueueWakeup"];
   startNextQueuedRunForAgent: ReturnType<typeof createHeartbeatQueue>["startNextQueuedRunForAgent"];
@@ -388,6 +389,14 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   }
 
   async function acknowledgeRemoteStop(runId: string, companyId: string) {
+    const external = await getRun(runId);
+    if (external?.companyId === companyId && external.runtimeMode === "legacy" && external.externalRunHandle &&
+        parseObject(external.resultJson?.executionCancellation).state === "requested") {
+      // Read-only original-turn proof. A terminal row alone never acknowledges Stop.
+      await dependencies.acknowledgeExternalStop?.(runId, companyId).catch(err => {
+        logger.warn({ err, runId }, "External provider stop remains unverified");
+      });
+    }
     // The provider receipt arrives after adapter settlement. A remote ACP child
     // has no host PID, so only this target-aware boundary can acknowledge Stop.
     const stopped = await getRun(runId);
@@ -1151,6 +1160,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
               });
               throw conflict(error.message, { code: "adapter_stop_pending", runId: run.id });
             }
+            await acknowledgeRemoteStop(run.id, run.companyId);
             const stopped = await getRun(run.id);
             if (stopped && isHeartbeatRunTerminalStatus(stopped.status)) {
               if (

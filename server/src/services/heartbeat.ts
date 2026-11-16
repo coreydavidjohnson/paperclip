@@ -1370,6 +1370,7 @@ export function heartbeatService(
   }
 
   const runControl = createHeartbeatRunControl(db, {
+    acknowledgeExternalStop: (runId, companyId) => externalLiveness.acknowledgeStoppedRun(runId, companyId),
     getRun,
     options,
     envOrchestrator,

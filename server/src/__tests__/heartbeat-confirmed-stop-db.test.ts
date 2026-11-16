@@ -13,17 +13,19 @@ describe.skipIf(!support.supported)('confirmed external stop and parked hold rel
  beforeAll(async () => { temp = await startEmbeddedPostgresTestDatabase('confirmed-stop-'); db = createDb(temp.connectionString); }, 120000);
  afterAll(async () => { await db?.$client.end({ timeout: 0 }); await temp?.cleanup(); });
  afterEach(async () => { await db.update(runLivenessOutbox).set({ status: "done" }); });
- async function fixture() {
+ async function fixture(source = 'operator') {
   const companyId = randomUUID(), agentId = randomUUID();
   await db.insert(companies).values({ id: companyId, name: 'Stop', issuePrefix: companyId.slice(0, 8), defaultResponsibleUserId: 'board-user' });
   await db.insert(agents).values({ id: agentId, companyId, name: 'Stop', status: 'idle', adapterType: 'test_external' });
   const [task] = await db.insert(issues).values({ companyId, title: 'Saved work', status: 'in_progress', assigneeAgentId: agentId, responsibleUserId: 'board-user' }).returning();
-  const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId, issueId: task.id, contextSnapshot: { issueId: task.id }, status: 'running', runtimeMode: 'legacy',
+  const runId = randomUUID();
+  const [run] = await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, issueId: task.id, contextSnapshot: { issueId: task.id }, status: 'running', runtimeMode: 'legacy',
    startedAt: new Date(Date.now() - 3600000), runnerProfileJson: { externalObservation: { adapterType: 'test_external', config: { original: true } } },
-   externalRunHandle: { sessionId: randomUUID(), turnRef: randomUUID(), dispatch: 'accepted' } }).returning();
+   externalRunHandle: { runId, companyId, agentId, sessionId: randomUUID(), turnRef: randomUUID(), dispatch: 'accepted' } }).returning();
   await db.update(issues).set({ executionRunId: run.id }).where(eq(issues.id, task.id));
   await terminalizeLegacyExecution({ db, run, status: 'cancelled', reconcileIfNeeded: true, patch: { finishedAt: new Date(), resultJson: {
-   cancellation: { source: 'operator', expected: true, initiator: { type: 'user', id: 'board-user' }, reason: 'Stop requested', recordedAt: new Date().toISOString() },
+   executionCancellation: { state: 'requested', requestedAt: new Date().toISOString() },
+   cancellation: { source, expected: true, initiator: { type: 'user', id: 'board-user' }, reason: 'Stop requested', recordedAt: new Date().toISOString() },
   } } });
   const [wake] = await db.insert(agentWakeupRequests).values({ companyId, agentId, source: 'automation', status: 'deferred_issue_execution', payload: { issueId: task.id }, requestedAt: new Date(0) }).returning();
   return { run: (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0], task, wake };
@@ -34,7 +36,7 @@ describe.skipIf(!support.supported)('confirmed external stop and parked hold rel
    resolveConfig: async (_company, config) => config, onSettled: async () => {}, onObserve: async () => {}, onTerminal: options.terminal ?? vi.fn(async () => {}), wake: options.wake ?? vi.fn(async () => {}) });
  }
  for (const state of ['gone', 'settled']) it(`records ${state} after operator stop and releases once`, async () => {
-  const { run, task } = await fixture(); const probe = vi.fn(async () => ({ state })), wake = vi.fn(async () => {}), terminal = vi.fn(async () => {});
+  const { run, task } = await fixture(); const probe = vi.fn(async () => ({ state, ...(state === 'gone' ? { authoritative: true } : {}) })), wake = vi.fn(async () => {}), terminal = vi.fn(async () => {});
   const w = worker(probe, { wake, terminal });
   await w.consumeOutbox(); await w.consumeOutbox(); await w.consumeOutbox();
   expect(probe).toHaveBeenCalledWith(expect.objectContaining({ handle: run.externalRunHandle, config: { original: true } }));
@@ -56,27 +58,27 @@ describe.skipIf(!support.supported)('confirmed external stop and parked hold rel
  it('retains workspace holds even when the provider has stopped', async () => {
   const { run, task } = await fixture();
   await db.update(issueRecoveryActions).set({ evidence: sql`${issueRecoveryActions.evidence} || '{"workspaceRestoreFailure":"restore_unsafe_archive"}'::jsonb` }).where(eq(issueRecoveryActions.sourceIssueId, task.id));
-  await worker(async () => ({ state: 'gone' })).consumeOutbox();
+  await worker(async () => ({ state: 'gone', authoritative: true })).consumeOutbox();
   expect(await getExecutionBlocker(db, run.companyId, task.id)).not.toBeNull();
  });
  it('does not restart cancelled work when no input is parked', async () => {
   const { run } = await fixture(); await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, run.companyId));
   const wake = vi.fn(async () => {}), terminal = vi.fn(async () => {});
-  const w = worker(async () => ({ state: 'gone', reason: 'deleted' }), { wake, terminal });
+  const w = worker(async () => ({ state: 'gone', authoritative: true, reason: 'deleted' }), { wake, terminal });
   await w.consumeOutbox(); await w.consumeOutbox(); expect(wake).not.toHaveBeenCalled(); expect(terminal).toHaveBeenCalledOnce();
  });
  it('rolls back reconciliation and hold retirement if durable release cannot commit', async () => {
   const { run, task } = await fixture();
   await db.execute(sql.raw(`CREATE FUNCTION reject_stop_release() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.run_id = '${run.id}' AND NEW.action = 'finalize_external_run' THEN RAISE EXCEPTION 'injected release failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER reject_stop_release BEFORE INSERT ON run_liveness_outbox FOR EACH ROW EXECUTE FUNCTION reject_stop_release();`));
   try {
-   await worker(async () => ({ state: 'gone', reason: 'deleted' })).consumeOutbox();
+   await worker(async () => ({ state: 'gone', authoritative: true, reason: 'deleted' })).consumeOutbox();
    expect((await read(run.id)).resultJson?.executionReconciliation).toBeUndefined();
    expect(await getExecutionBlocker(db, run.companyId, task.id)).not.toBeNull();
   } finally { await db.execute(sql.raw('DROP TRIGGER reject_stop_release ON run_liveness_outbox; DROP FUNCTION reject_stop_release();')); }
  });
  it('rejects probe evidence superseded by a concurrent version change', async () => {
   const { run, task } = await fixture();
-  await worker(async () => { await db.update(heartbeatRuns).set({ livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1` }).where(eq(heartbeatRuns.id, run.id)); return { state: 'gone', reason: 'deleted' }; }).consumeOutbox();
+  await worker(async () => { await db.update(heartbeatRuns).set({ livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1` }).where(eq(heartbeatRuns.id, run.id)); return { state: 'gone', authoritative: true, reason: 'deleted' }; }).consumeOutbox();
   expect((await read(run.id)).resultJson?.executionReconciliation).toBeUndefined();
   expect(await getExecutionBlocker(db, run.companyId, task.id)).not.toBeNull();
  });
@@ -103,7 +105,7 @@ describe.skipIf(!support.supported)('confirmed external stop and parked hold rel
   const w = worker(probe, { stop }); await w.consumeOutbox(); await w.consumeOutbox();
   await db.update(runLivenessOutbox).set({ status: 'pending', nextAttemptAt: new Date(0) }).where(and(eq(runLivenessOutbox.runId, run.id), eq(runLivenessOutbox.action, 'stop_provider_session')));
   probe.mockResolvedValue({ state: 'active' }); await w.consumeOutbox();
-  expect(stop).toHaveBeenCalledOnce(); expect(probe).toHaveBeenCalledOnce();
+  expect(stop).not.toHaveBeenCalled(); expect(probe).toHaveBeenCalledOnce();
   const [row] = await db.select().from(runLivenessOutbox).where(and(eq(runLivenessOutbox.runId, run.id), eq(runLivenessOutbox.action, 'stop_provider_session')));
   expect(row.status).toBe('done');
  });
@@ -121,6 +123,54 @@ describe.skipIf(!support.supported)('confirmed external stop and parked hold rel
   await db.update(heartbeatRuns).set({ livenessProbe: { state: 'gone', firstGoneAt: new Date(Date.now() - 120001).toISOString() } }).where(eq(heartbeatRuns.id, run.id));
   expect(await w.sweepParkedWakes({ companyId: run.companyId, apply: true })).toMatchObject({ entries: [{ state: 'gone', applied: true }] });
   expect((await read(run.id)).resultJson).toMatchObject({ executionReconciliation: { runId: run.id, providerStopped: true, actionOutcome: 'mixed' } });
+ });
+
+ for (const source of ['operator', 'control_plane', 'queued_message']) it(`acknowledges exact ${source} stop before attempting another provider stop`, async () => {
+  const { run, task } = await fixture(source); const stop = vi.fn(async () => { throw new Error('Session reused by another turn; refusing stop'); });
+  await worker(async () => ({ state: 'settled' }), { stop }).consumeOutbox();
+  expect((await read(run.id)).resultJson).toMatchObject({ executionCancellation: { state: 'acknowledged', proof: 'external_run_probe' }, executionReconciliation: { actionOutcome: 'mixed', providerStopped: true } });
+  expect(await getExecutionBlocker(db, run.companyId, task.id)).toBeNull(); expect(stop).not.toHaveBeenCalled();
+ });
+ it('repairs requested acknowledgement when the historical stop outbox is already done', async () => {
+  const { run } = await fixture('queued_message');
+  await db.update(runLivenessOutbox).set({ status: 'done' }).where(eq(runLivenessOutbox.runId, run.id));
+  const stop = vi.fn(async () => {}); await worker(async () => ({ state: 'settled' }), { stop }).sweep();
+  expect((await read(run.id)).resultJson?.executionCancellation).toMatchObject({ state: 'acknowledged' }); expect(stop).not.toHaveBeenCalled();
+ });
+ it('requires two matching heuristic gone observations for an expected stopped run', async () => {
+  const { run, task } = await fixture('control_plane'); const w = worker(async () => ({ state: 'gone', reason: 'offline original turn' }));
+  expect((await w.sweepParkedWakes({ companyId: run.companyId, apply: true })).entries[0].applied).toBe(false);
+  expect((await read(run.id)).resultJson?.executionCancellation).toMatchObject({ state: 'requested' });
+  expect(await getExecutionBlocker(db, run.companyId, task.id)).not.toBeNull();
+  const current = await read(run.id);
+  await db.update(heartbeatRuns).set({ livenessProbe: { ...current.livenessProbe, firstGoneAt: new Date(Date.now() - 120001).toISOString() } }).where(eq(heartbeatRuns.id, run.id));
+  expect((await w.sweepParkedWakes({ companyId: run.companyId, apply: true })).entries[0].applied).toBe(true);
+  expect((await read(run.id)).resultJson?.executionCancellation).toMatchObject({ state: 'acknowledged' });
+ });
+ for (const changed of ['handle', 'intent', 'pending_ack', 'configuration']) it(`rejects original stop proof after concurrent ${changed} change`, async () => {
+  const { run, task } = await fixture();
+  await worker(async () => {
+   if (changed === 'handle') await db.update(heartbeatRuns).set({ externalRunHandle: { ...run.externalRunHandle!, turnRef: randomUUID() } }).where(eq(heartbeatRuns.id, run.id));
+   if (changed === 'intent') await db.update(heartbeatRuns).set({ resultJson: { ...run.resultJson, cancellation: { ...(run.resultJson?.cancellation as object), recordedAt: new Date(0).toISOString() } } }).where(eq(heartbeatRuns.id, run.id));
+   if (changed === 'pending_ack') await db.update(heartbeatRuns).set({ resultJson: { ...run.resultJson, executionCancellation: { state: 'requested', requestedAt: new Date(0).toISOString() } } }).where(eq(heartbeatRuns.id, run.id));
+   if (changed === 'configuration') await db.update(heartbeatRuns).set({ runnerProfileJson: { externalObservation: { adapterType: 'other', config: {} } } }).where(eq(heartbeatRuns.id, run.id));
+   return { state: 'settled' };
+  }).consumeOutbox();
+  expect((await read(run.id)).resultJson?.executionCancellation).toMatchObject({ state: 'requested' });
+  expect(await getExecutionBlocker(db, run.companyId, task.id)).not.toBeNull();
+ });
+ for (const source of ['provider', 'transport', 'shutdown', 'unknown']) it(`does not automatically acknowledge ${source} cancellation`, async () => {
+  const { run, task } = await fixture(source); const stop = vi.fn(async () => {}), probe = vi.fn(async () => ({ state: 'settled' }));
+  const w = worker(probe, { stop }); await w.sweep(); await w.consumeOutbox();
+  expect((await read(run.id)).resultJson?.executionCancellation).toMatchObject({ state: 'requested' });
+  expect(await getExecutionBlocker(db, run.companyId, task.id)).not.toBeNull(); expect(stop).not.toHaveBeenCalled();
+ });
+ for (const field of ['runId', 'companyId', 'agentId']) it(`denies a missing or foreign ${field} handle binding`, async () => {
+  const { run } = await fixture(); const probe = vi.fn(async () => ({ state: 'settled' })), stop = vi.fn(async () => {});
+  await db.update(heartbeatRuns).set({ externalRunHandle: { ...run.externalRunHandle!, [field]: field === 'runId' ? undefined : randomUUID() } }).where(eq(heartbeatRuns.id, run.id));
+  await worker(probe, { stop }).consumeOutbox();
+  expect((await read(run.id)).resultJson?.executionCancellation).toMatchObject({ state: 'requested' });
+  expect(probe).not.toHaveBeenCalled(); expect(stop).not.toHaveBeenCalled();
  });
 
 });

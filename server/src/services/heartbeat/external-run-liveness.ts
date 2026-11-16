@@ -121,9 +121,44 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       counters[code] = (counters[code] ?? 0) + 1;
     });
   }
-  function operatorStopped(run: Run) {
+  function expectedStopped(run: Run) {
     const cancellation = readRunCancellation(run.resultJson);
-    return run.status === "cancelled" && cancellation?.source === "operator" && cancellation.expected;
+    return run.status === "cancelled" && cancellation?.expected === true && ["operator", "control_plane", "queued_message"].includes(cancellation.source);
+  }
+
+  function assertStopHandle(run: Run) {
+    const handle = run.externalRunHandle;
+    const bindings = [run.issueId, run.nativeIssueId, run.contextSnapshot?.issueId].filter(value => value != null);
+    if (!handle || handle.runId !== run.id || handle.companyId !== run.companyId || handle.agentId !== run.agentId ||
+        typeof handle.sessionId !== "string" || !handle.sessionId || !bindings.length ||
+        bindings.some(value => typeof value !== "string" || value !== bindings[0])) {
+      throw new Error("external stop ownership unprovable");
+    }
+  }
+  function sameStopSnapshot(current: Run, previous: Run) {
+    return current.agentId === previous.agentId && current.issueId === previous.issueId && current.nativeIssueId === previous.nativeIssueId &&
+      current.contextSnapshot?.issueId === previous.contextSnapshot?.issueId &&
+      isDeepStrictEqual(current.externalRunHandle, previous.externalRunHandle) &&
+      isDeepStrictEqual(readRunCancellation(current.resultJson), readRunCancellation(previous.resultJson)) &&
+      isDeepStrictEqual(current.resultJson?.executionCancellation, previous.resultJson?.executionCancellation) &&
+      isDeepStrictEqual(current.runnerProfileJson?.externalObservation, previous.runnerProfileJson?.externalObservation);
+  }
+  function sameProbeBinding(run: Run) {
+    return isDeepStrictEqual(run.livenessProbe?.handle, run.externalRunHandle) &&
+      // Historical key retained for durable operator-stop receipts.
+      isDeepStrictEqual(run.livenessProbe?.operatorStop, readRunCancellation(run.resultJson)) &&
+      isDeepStrictEqual(run.livenessProbe?.configuration, run.runnerProfileJson?.externalObservation);
+  }
+  function confirmedProbe(probe: Record<string, unknown> | null) {
+    return probe?.state === "settled" || (probe?.state === "gone" && (probe.authoritative === true ||
+      (typeof probe.firstGoneAt === "string" && typeof probe.checkedAt === "string" &&
+       Date.parse(probe.checkedAt) - Date.parse(probe.firstGoneAt) >= EXTERNAL_RUN_GONE_CONFIRM_MS)));
+  }
+  function recordedStop(run: Run) {
+    const reconciliation = run.resultJson?.executionReconciliation as Record<string, unknown> | undefined;
+    return expectedStopped(run) && reconciliation?.runId === run.id && reconciliation.actorId === "external-liveness" &&
+      reconciliation.providerStopped === true && sameProbeBinding(run) && confirmedProbe(run.livenessProbe) &&
+      isDeepStrictEqual(reconciliation.probe, run.livenessProbe);
   }
 
   // Caller owns the issue/run locks. Never retire another run's or workspace's hold.
@@ -132,12 +167,18 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
     const reconciliation = { runId: run.id, providerStopped: true, actionOutcome: "mixed",
       probe, outcomeEvidence: JSON.stringify(probe), actorId: "external-liveness", recordedAt: new Date().toISOString() };
     const [updated] = await tx.update(heartbeatRuns).set({
-      resultJson: { ...run.resultJson, executionReconciliation: reconciliation },
+      resultJson: { ...run.resultJson, executionReconciliation: reconciliation,
+        ...(expectedStopped(run) ? { executionCancellation: {
+          ...(run.resultJson?.executionCancellation as Record<string, unknown> | undefined),
+          state: "acknowledged", acknowledgedAt: new Date().toISOString(), proof: "external_run_probe",
+        } } : {}),
+      },
     }).where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id))).returning();
     const issueId = run.issueId ?? run.nativeIssueId ?? run.contextSnapshot?.issueId;
     const holds = await tx.select().from(issueRecoveryActions).where(and(
       eq(issueRecoveryActions.companyId, run.companyId),
       typeof issueId === "string" ? eq(issueRecoveryActions.sourceIssueId, issueId) : sql`false`,
+      sql`${issueRecoveryActions.status} in ('active', 'escalated')`,
       eq(issueRecoveryActions.fingerprint, `legacy-execution:${run.id}`),
       eq(issueRecoveryActions.cause, "legacy_execution_requires_reconciliation"),
       sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
@@ -152,22 +193,27 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
     return updated;
   }
 
-  async function reconcileOperatorStop(run: Run, result: ExternalRunProbe) {
+  async function reconcileExpectedStop(run: Run, result: ExternalRunProbe) {
     const issueId = run.issueId ?? run.nativeIssueId ?? run.contextSnapshot?.issueId;
     return db.transaction(async tx => {
       // Same lock order as terminalizeLegacyExecution and the normal release path.
-      if (typeof issueId === "string") await tx.select({ id: issues.id }).from(issues).where(and(
+      const [task] = typeof issueId === "string" ? await tx.select({ id: issues.id }).from(issues).where(and(
         eq(issues.companyId, run.companyId), eq(issues.id, issueId),
-      )).for("update");
+      )).for("update") : [];
       const [current] = await tx.select().from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id),
         eq(heartbeatRuns.livenessVersion, run.livenessVersion), eq(heartbeatRuns.observerEpoch, run.observerEpoch),
       )).for("update");
-      if (!current || !operatorStopped(current) || current.runtimeMode !== "legacy") throw new Error("external stop evidence superseded");
-      const probe = { ...result, checkedAt: new Date().toISOString(), handle: current.externalRunHandle, operatorStop: readRunCancellation(current.resultJson) };
-      await tx.update(heartbeatRuns).set({ livenessProbe: probe, livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1` })
+      if (!task || !current || !expectedStopped(current) || current.runtimeMode !== "legacy" || !sameStopSnapshot(current, run))
+        throw new Error("external stop evidence superseded");
+      assertStopHandle(current);
+      const previous = sameProbeBinding(current) ? current.livenessProbe : null;
+      const decision = decideExternalRunLiveness({ deadlineAt: null, unknownSince: null, livenessProbe: previous }, result, new Date());
+      const probe = { ...decision.probe, handle: current.externalRunHandle, operatorStop: readRunCancellation(current.resultJson),
+        configuration: current.runnerProfileJson?.externalObservation };
+      await tx.update(heartbeatRuns).set({ livenessProbe: probe, livenessVersion: sql`${heartbeatRuns.livenessVersion} + 1`, livenessClaimedUntil: sql`clock_timestamp() + interval '2 minutes'` })
         .where(eq(heartbeatRuns.id, current.id));
-      if (result.state !== "gone" && result.state !== "settled") return false;
+      if (!confirmedProbe(probe)) return false;
       await recordConfirmedStop(tx as unknown as Db, current, probe);
       const [parked] = typeof issueId === "string" ? await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
         eq(agentWakeupRequests.companyId, run.companyId), eq(agentWakeupRequests.status, "deferred_issue_execution"),
@@ -178,6 +224,21 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       await event(tx as unknown as Db, current, "provider_stopped", probe);
       return true;
     });
+  }
+
+  async function acknowledgeStoppedRun(runId: string, companyId: string) {
+    const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, runId), eq(heartbeatRuns.companyId, companyId)));
+    if (!run || run.runtimeMode !== "legacy" || !expectedStopped(run)) return false;
+    assertStopHandle(run);
+    if (recordedStop(run)) {
+      if ((run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "acknowledged") return true;
+      return reconcileExpectedStop(run, run.livenessProbe as unknown as ExternalRunProbe);
+    }
+    const saved = recordedExternalRunConfiguration(run), adapter = dependencies.getAdapter(saved.adapterType);
+    if (!adapter?.probeRun) throw new Error("adapter probeRun unavailable for expected stop");
+    const config = await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId, saved.config));
+    const probe = await boundedExternalRunOperation(signal => adapter.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
+    return reconcileExpectedStop(run, probe);
   }
 
   async function inspect(candidate: Run) {
@@ -256,6 +317,21 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
         or(sql`${heartbeatRuns.livenessClaimedUntil} is null`,sql`${heartbeatRuns.livenessClaimedUntil} <= clock_timestamp()`),
         externalProbeDue(),
       )).orderBy(sql`${heartbeatRuns.livenessClaimedUntil} asc nulls first`, asc(heartbeatRuns.createdAt)).limit(25);
+    const stops = await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.status, "cancelled"), eq(heartbeatRuns.runtimeMode, "legacy"), isNotNull(heartbeatRuns.externalRunHandle),
+      sql`${heartbeatRuns.resultJson}->'executionCancellation'->>'state' = 'requested'`,
+      sql`${heartbeatRuns.resultJson}->'cancellation'->'expected' = 'true'::jsonb`,
+      sql`${heartbeatRuns.resultJson}->'cancellation'->>'source' in ('operator', 'control_plane', 'queued_message')`,
+      or(sql`${heartbeatRuns.livenessClaimedUntil} is null`, sql`${heartbeatRuns.livenessClaimedUntil} <= clock_timestamp()`),
+    )).orderBy(sql`${heartbeatRuns.livenessClaimedUntil} asc nulls first`, asc(heartbeatRuns.createdAt)).limit(25);
+    for (const run of stops) {
+      const [claimed] = await db.update(heartbeatRuns).set({ livenessClaimedUntil: sql`clock_timestamp() + interval '30 seconds'` }).where(and(
+        eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.livenessVersion, run.livenessVersion),
+        or(sql`${heartbeatRuns.livenessClaimedUntil} is null`, sql`${heartbeatRuns.livenessClaimedUntil} <= clock_timestamp()`),
+      )).returning({ id: heartbeatRuns.id });
+      if (claimed) try { await acknowledgeStoppedRun(run.id, run.companyId); }
+      catch (err) { logger.warn({ err, runId: run.id }, "External stop proof remains retryable"); }
+    }
     for (let i = 0; i < candidates.length; i += 4) await Promise.all(candidates.slice(i, i+4).map(async candidate => {
       try {
         await inspect(candidate);
@@ -289,18 +365,19 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
           eq(heartbeatRuns.companyId, options.companyId), eq(heartbeatRuns.id, entry.runId),
         ));
         if (!run?.externalRunHandle || run.runtimeMode !== "legacy") { entry.state = "missing_durable_handle"; continue; }
-        if (run.status !== "running" && !operatorStopped(run)) { entry.state = "manual_reconciliation_required"; continue; }
+        if (run.status !== "running" && !expectedStopped(run)) { entry.state = "manual_reconciliation_required"; continue; }
         if (run.status === "running") {
           const [due] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(eq(heartbeatRuns.id, run.id), externalProbeDue()));
           if (!due) { entry.state = "progress_grace"; continue; }
         }
+        if (expectedStopped(run)) assertStopHandle(run);
         const saved = recordedExternalRunConfiguration(run), adapter = dependencies.getAdapter(saved.adapterType);
         if (!adapter?.probeRun) { entry.state = "probe_unavailable"; continue; }
         const config = await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId, saved.config));
         const result = await boundedExternalRunOperation(signal => adapter.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
         entry.state = result.state;
-        if (operatorStopped(run)) {
-          if (options.apply && (result.state === "gone" || result.state === "settled")) entry.applied = await reconcileOperatorStop(run, result);
+        if (expectedStopped(run)) {
+          if (options.apply && (result.state === "gone" || result.state === "settled")) entry.applied = await reconcileExpectedStop(run, result);
         } else {
           const [{ now }] = await db.select({ now: sql<Date>`clock_timestamp()`.mapWith(heartbeatRuns.createdAt) }).from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id));
           const decision = decideExternalRunLiveness(run, result, now);
@@ -329,26 +406,22 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
           eq(heartbeatRuns.id,row.runId!),eq(heartbeatRuns.companyId,row.companyId!)));
         if (!run) throw new Error("external run outbox source missing");
         if (["running","queued"].includes(run.status)) throw new Error("external run is not terminal");
-        const reconciliation = run.resultJson?.executionReconciliation as Record<string, unknown> | undefined;
-        const stopped = operatorStopped(run) && reconciliation?.runId === run.id &&
-          reconciliation.actorId === "external-liveness" && reconciliation.providerStopped === true &&
-          ["gone", "settled"].includes(String(run.livenessProbe?.state)) &&
-          isDeepStrictEqual(reconciliation.probe, run.livenessProbe) &&
-          isDeepStrictEqual(run.livenessProbe?.handle, run.externalRunHandle) &&
-          isDeepStrictEqual(run.livenessProbe?.operatorStop, readRunCancellation(run.resultJson));
-        if (row.action === "stop_provider_session" && !stopped) {
-          const saved=recordedExternalRunConfiguration(run);
-          const adapter=dependencies.getAdapter(saved.adapterType);
-          if (!adapter?.stopRun) throw new Error("adapter stopRun unavailable");
-          const config=await boundedExternalRunOperation(() => dependencies.resolveConfig(run.companyId,saved.config));
-          await boundedExternalRunOperation(signal=>adapter.stopRun!({config,handle:run.externalRunHandle as ExternalRunHandle,signal}));
-          if (operatorStopped(run) && run.runtimeMode === "legacy") {
-            if (!adapter.probeRun) throw new Error("adapter probeRun unavailable after operator stop");
-            const probe = await boundedExternalRunOperation(signal => adapter.probeRun!({ config, handle: run.externalRunHandle as ExternalRunHandle, signal }));
-            if (!await reconcileOperatorStop(run, probe)) throw new Error(`operator stop not confirmed: ${probe.state}`);
+        if (row.action === "stop_provider_session") {
+          if (run.runtimeMode !== "legacy" || !expectedStopped(run)) throw new Error("external stop lacks expected cancellation intent");
+          assertStopHandle(run);
+          if (!await acknowledgeStoppedRun(run.id, run.companyId)) {
+            // Only a positively active original turn can need a stop. Unknown
+            // or unconfirmed gone evidence never licenses a provider mutation.
+            const [current] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
+            if (!current || !expectedStopped(current) || !sameStopSnapshot(current, run) || current.observerEpoch !== run.observerEpoch ||
+                current.livenessVersion !== run.livenessVersion + 1 || current.livenessProbe?.state !== "active")
+              throw new Error("external stop not confirmed");
+            const saved = recordedExternalRunConfiguration(current), adapter = dependencies.getAdapter(saved.adapterType);
+            if (!adapter?.stopRun) throw new Error("adapter stopRun unavailable");
+            const config = await boundedExternalRunOperation(() => dependencies.resolveConfig(current.companyId, saved.config));
+            await boundedExternalRunOperation(signal => adapter.stopRun!({ config, handle: current.externalRunHandle as ExternalRunHandle, signal }));
+            if (!await acknowledgeStoppedRun(current.id, current.companyId)) throw new Error("external stop not confirmed after request");
           }
-        } else if (row.action === "stop_provider_session" && stopped) {
-          // The stop proof committed before a lost ACK. Never stop the reused session again.
         } else if (row.action === "finalize_external_run") {
           // Persist/admit the recovery contract before releasing queued human
           // input. Otherwise terminal cleanup can promote an unsafe plain wake.
@@ -362,5 +435,5 @@ export function createExternalRunLivenessWorker(db: Db, dependencies: Dependenci
       }
     }
   }
-  return { sweep, consumeOutbox, sweepParkedWakes, metrics: () => ({ ...counters }) };
+  return { sweep, consumeOutbox, sweepParkedWakes, acknowledgeStoppedRun, metrics: () => ({ ...counters }) };
 }
