@@ -359,7 +359,10 @@ function createRunContextDb(
   };
   const buildQuery = (selection: Record<string, unknown>, chatBindingQuery = false, settledRecoveryQuery = false) => {
     const whereResult = {
-      orderBy: vi.fn(async () => []),
+      orderBy: vi.fn(() => ({
+        for: vi.fn(async () => []),
+        then: async (resolve: (rows: unknown[]) => unknown) => resolve([]),
+      })),
       limit: vi.fn(() => ({
         then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(await rowsForSelection(selection, chatBindingQuery, settledRecoveryQuery)),
         for: vi.fn(() => ({
@@ -389,7 +392,10 @@ function createRunContextDb(
           return buildQuery({}, false, true);
         }
         if (getTableName(table) === "issue_thread_interactions") {
-          return { where: vi.fn(() => ({ limit: vi.fn(async () => []) })) };
+          return { where: vi.fn(() => ({
+            limit: vi.fn(async () => []),
+            orderBy: vi.fn(() => ({ for: vi.fn(async () => []) })),
+          })) };
         }
         return buildQuery(selection, getTableName(table) === "chat_conversations", getTableName(table) === "issue_recovery_actions");
       }),
@@ -1754,6 +1760,7 @@ describe("agent issue mutation checkout ownership", () => {
         status: "blocked",
         unblockDescriptor: { owner: "board", action: "Review the blocker" },
       }),
+      expect.anything(),
     );
   });
 
@@ -3078,7 +3085,10 @@ describe("agent issue mutation checkout ownership", () => {
       const buildQuery = (selection: Record<string, unknown>) => {
         const rows = rowsForSelection(selection);
         const whereResult = {
-          orderBy: vi.fn(async () => []),
+          orderBy: vi.fn(() => ({
+            for: vi.fn(async () => []),
+            then: async (resolve: (rows: unknown[]) => unknown) => resolve([]),
+          })),
           limit: vi.fn(() => ({
             then: async (resolve: (limitedRows: unknown[]) => unknown) => resolve(rows),
           })),
@@ -3090,12 +3100,13 @@ describe("agent issue mutation checkout ownership", () => {
         };
         return query;
       };
-      return {
-        transaction: async (callback: (tx: Record<string, never>) => Promise<unknown>) => callback({}),
+      const db = {
+        transaction: async (callback: (tx: typeof db) => Promise<unknown>) => callback(db),
         select: vi.fn((selection: Record<string, unknown> = {}) => ({
           from: vi.fn(() => buildQuery(selection)),
         })),
       };
+      return db;
     }
 
     // The base boundary always denies a cross-agent issue:mutate; only the
@@ -3141,11 +3152,19 @@ describe("agent issue mutation checkout ownership", () => {
         ...patch,
       }));
 
-      const app = await createApp(watchdogActor(), createWatchdogDb());
+      // This case verifies watchdog authorization, not permission to invent a
+      // blocked state. Supply a real reason for the transactional blocked gate.
+      if (status === "blocked") mockIssueService.getDependencyReadiness.mockResolvedValue({
+        blockerIssueIds: [watchdogReportIssueId], isDependencyReady: false, unresolvedBlockerCount: 1,
+      });
+      const db = createWatchdogDb();
+      const app = await createApp(watchdogActor(), db);
       const res = await request(app).patch(`/api/issues/${issueId}`).send({ status });
 
       expect(res.status, JSON.stringify(res.body)).toBe(200);
-      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({ status }));
+      expect(mockIssueService.update).toHaveBeenCalledWith(
+        issueId, expect.objectContaining({ status }), ...(status === "blocked" ? [db] : []),
+      );
     });
 
     it("lets a watchdog run transition a watched issue to in_review with a live review path", async () => {

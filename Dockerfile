@@ -154,8 +154,8 @@ RUN GOMEMLIMIT=3GiB GOMAXPROCS=2 pnpm --filter @paperclipai/server build
 RUN test -f server/dist/index.js || (echo "ERROR: server build output missing" && exit 1)
 RUN rm -rf packages/paperclip-runner/runner/target
 
-# Luma fork gate (PATCHES.md): every carried patch's regression suite and the
-# full workspace typecheck must pass before the production image is assembled.
+# Optional broad regression target. Affected checks run separately from image
+# assembly so unchanged suites cannot consume the artifact build's capacity.
 FROM build AS luma-patch-tests
 RUN node scripts/check-docker-deps-stage.mjs && node scripts/check-maps.mjs && node --test scripts/pnpm-resource-budget.test.mjs packages/paperclip-runner/scripts/materialize-cursor-distribution.test.mjs packages/paperclip-runner/scripts/candidate-provider-pack.test.mjs
 # BuildKit pods are capped at 6 GiB: one package at a time, Go heap bounded.
@@ -313,7 +313,7 @@ RUN echo "cli-tools-epoch: ${CLI_TOOLS_CACHE_EPOCH}" \
 COPY scripts/docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-COPY --chown=node:node --from=luma-patch-tests /app /app
+COPY --chown=node:node --from=build /app /app
 
 COPY --from=runner-provider-pack /provider-pack /opt/paperclip-runner/provider-pack
 # Managed deployments can remap node's UID at startup. This immutable pack

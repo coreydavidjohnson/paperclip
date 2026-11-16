@@ -2958,8 +2958,8 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     const { sourceIssueId, sourceIssue, action } = await seedTrappedDisposition();
     const before = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id));
     const result = await request(createApp()).patch(`/api/issues/${sourceIssueId}`)
-      .send({ status, title: "Must roll back with the status" }).expect(status === "blocked" ? 422 : 409);
-    if (status !== "blocked") expect(result.body.details?.code).toBe("recovery_status_repair_required");
+      .send({ status, title: "Must roll back with the status" }).expect(409);
+    expect(result.body.details?.code).toBe("recovery_status_repair_required");
     expect(await db.select().from(issues).where(eq(issues.id, sourceIssueId))).toEqual([sourceIssue]);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, action.id))).toEqual(before);
     expect(await db.select().from(activityLog).where(eq(activityLog.entityId, sourceIssueId))).toHaveLength(0);

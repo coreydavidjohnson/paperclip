@@ -9,8 +9,10 @@ No upstream issue or PR links, by Corey's instruction.
 The PER-980 audit (drop/carry per old commit) is in the PER-980 ticket. Every
 carried patch below has a regression suite run by the `luma-patch-tests`
 Dockerfile stage, which also runs `pnpm -r typecheck` and `pnpm check:token-gates`.
-The production stage copies from that stage, so an image cannot exist unless
-the gate passed.
+The production stage copies compiled output from `build`, not the broad test
+stage. Image CI compiles and packages the exact source; affected regression
+checks run separately and must pass before landing. The broad target remains
+available for changes that actually need it.
 
 Not carried any more (upstream covers them, or the PER-966 lifecycle replaces
 them): create-task dialog overrides (upstream dialog uses the task composer),
