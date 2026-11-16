@@ -109,7 +109,7 @@ export function parseAnswer(choice: unknown, answer: unknown) {
 export function escapeHtml(value: string) { return value.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!); }
 export function renderPrompt(enrollment: Enrollment, prompt: string, helpText: string, token: string, path: string) {
   const e = escapeHtml;
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Test approval</title><body><main>
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Test approval</title><body style="font:1rem sans-serif"><main style="max-width:36rem;margin:2rem auto;padding:1rem;overflow-wrap:anywhere">
 <h1>Test approval</h1><p>This answer applies only to the test shown below. It does not permit production work.</p>
 <h2>${e(prompt)}</h2><pre style="white-space:pre-wrap">${e(helpText)}</pre>
 <dl><dt>Action</dt><dd>${e(enrollment.action)}</dd><dt>Target</dt><dd>${e(enrollment.target)}</dd><dt>Scope</dt><dd>${e(enrollment.scope)}</dd><dt>Undo limit</dt><dd>${e(enrollment.undo)}</dd></dl>
@@ -118,5 +118,9 @@ export function renderPrompt(enrollment: Enrollment, prompt: string, helpText: s
 <form method="post" action="${e(path)}"><input type="hidden" name="proof" value="${e(token)}">
 <label for="answer">Your answer</label><input id="answer" name="answer" maxlength="256" autocomplete="off">
 <button name="choice" value="">Send typed answer</button><button name="choice" value="accept">Approve</button><button name="choice" value="reject">Deny</button><button name="choice" value="revoke">Stop chat approval</button></form>
+<p><a href="/api/chat-approval-auth/login">Manage test sign-in or sign out</a></p>
 </main></body></html>`;
+}
+export function renderApprovalStatus(title: string, message: string) {
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><main style="max-width:36rem;margin:2rem auto;padding:1rem;font:1rem sans-serif;overflow-wrap:anywhere"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a href="/api/chat-approval-auth/login">Manage test sign-in or sign out</a></p><p>This record is not proof that the test ran.</p></main></html>`;
 }

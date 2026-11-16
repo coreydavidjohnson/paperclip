@@ -750,6 +750,25 @@ limit. Do not use the shared 6 GiB daemon for this image. The complete image
 gate remains mandatory. No runtime authorization changes or test removals are
 part of this build correction. This supersedes the earlier PER-1507 budget.
 
+## Dedicated approval-page browser controls (PER-1498)
+
+The test-only human login page now exposes the existing native sign-out API.
+The approval page links to that control. Sign-out failure is not reported as
+success, and ending a login does not answer or stop the original card.
+Approval results and expected browser refusals have readable phone-width
+HTML pages. Tool callers retain the JSON error contract and HTTP status.
+
+The native credential tests prove that signing out invalidates that session's
+old form without changing the card or its audit, while a different session
+and ordinary local-board routes remain usable. The existing revocation test
+also checks browser HTML and tool JSON refusal representations. The first
+disposable browser fixture exposed the missing control and unreadable errors;
+the follow-up GUI campaign remains a separate release prerequisite.
+
+This extends our own disabled-by-default synthetic approval candidate. It
+does not alter global authentication, standing approvals, enrollment scope,
+agent answer authority, or the requirement for Corey's own live test answer.
+
 Verification: exact candidate server compilation with extended diagnostics,
 including declaration emission, exit 0. The isolated namespace was removed and
 its absence verified. Full image acceptance remains separate.

@@ -22,7 +22,7 @@ import { setIssueTitle } from "../services/issue-title.js";
 import { setIssueTitleSchema } from "@paperclipai/shared";
 import { resolveConfirmationFromComment } from "../services/confirmation-comment-resolution.js";
 import { urlencoded } from "express";
-import { ApprovalProofError, readChatApprovalConfig, renderPrompt, escapeHtml, requireHuman } from "../services/chat-approval-proof.js";
+import { ApprovalProofError, readChatApprovalConfig, renderPrompt, renderApprovalStatus, requireHuman } from "../services/chat-approval-proof.js";
 import { presentChatApproval, resolveChatApproval, chatApprovalReceipt, designatedChatApprovalActor } from "../services/chat-approval-resolution.js";
 import { createIssueReadTiming } from "../services/issue-read-timing.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -45,7 +45,7 @@ import {
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
 import { createHash, randomUUID } from "node:crypto";
-import { Router, type Request, type Response } from "express";
+import { Router, type Request, type Response, type ErrorRequestHandler } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
@@ -17182,9 +17182,20 @@ export function issueRoutes(
         actor: getActorInfo(req), source: "issue.interaction.chat_approval" });
     }
     res.set({ "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY",
-      "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'; base-uri 'none'" });
-    res.type("html").send(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Test approval result</title><main><h1>Answer recorded</h1><p>${escapeHtml(result.receipt?.question as string ?? "Chat approval stopped. The original card stays open.")}</p><p>${escapeHtml(result.receipt?.exactAnswer as string ?? "This chat path is disabled for this card.")}</p><p>This record is an answer, not proof that the test ran.</p></main></html>`);
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
+    res.type("html").send(renderApprovalStatus(result.receipt ? "Answer recorded" : "Chat approval stopped",
+      result.receipt ? `${result.receipt.question}: ${result.receipt.exactAnswer}` : "The original card stays open. This chat path is disabled for this card."));
   });
+
+  // Browser refusals need readable pages too. Keep the JSON contract for tool callers.
+  const chatApprovalError: ErrorRequestHandler = (error, req, res, next) => {
+    if (res.headersSent || req.actor.type === "agent" || req.accepts(["json", "html"]) !== "html") { next(error); return; }
+    if (!(error instanceof HttpError) || error.status >= 500) { next(error); return; }
+    res.set({ "Cache-Control": "no-store", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'" });
+    res.status(error.status).type("html").send(renderApprovalStatus("Test approval unavailable", error.message));
+  };
+  router.use(chatApprovalPath, chatApprovalError);
 
   router.post(
     "/issues/:id/interactions/:interactionId/resolve-from-comment",

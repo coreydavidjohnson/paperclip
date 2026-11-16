@@ -146,6 +146,29 @@ describe("isolated chat approval with native authentication and persistence", ()
     expect(login.status, login.text).toBe(200);
     expect(login.body.user.id).toBe(userId);
   });
+  it("signs out only that human session and refuses its old form without changing the card", async () => {
+    const f = await seed();
+    const login = await testRequest().post("/api/chat-approval-auth/sign-in/email").set("Origin", ORIGIN)
+      .send({ email: "synthetic-human@fixture.invalid", password });
+    expect(login.status, login.text).toBe(200);
+    const cookies = login.headers["set-cookie"];
+    const signedOutCookie = (Array.isArray(cookies) ? cookies : [cookies]).map(value => value.split(";")[0]).join("; ");
+    const page = await testRequest().get(f.path).set("Cookie", signedOutCookie);
+    expect(page.status, page.text).toBe(200);
+    const proof = page.text.match(/name="proof" value="([^"]+)"/)?.[1];
+    expect(proof).toBeTruthy();
+    const response = await testRequest().post("/api/chat-approval-auth/sign-out")
+      .set("Cookie", signedOutCookie).set("Origin", ORIGIN).send({});
+    expect(response.status, response.text).toBe(200);
+    expect((await testRequest().get(f.path).set("Cookie", signedOutCookie)).status).toBe(403);
+    expect((await testRequest().post(f.path).set("Cookie", signedOutCookie).set("Origin", ORIGIN)
+      .type("form").send({ proof, choice: "accept", answer: "" })).status).toBe(403);
+    expect((await read(f.card.id)).status).toBe("pending");
+    expect(await audit(f.issueId)).toHaveLength(0);
+    const profile = await testRequest().get("/api/auth/get-session").set("Cookie", signedOutCookie);
+    expect(profile.body.user.id).toBe("local-board");
+    await prompt(f); // A different human session is not signed out.
+  });
   it("turns off only this path and invalidates its old session on key rotation", async () => {
     const f = await seed();
     const key = process.env.PAPERCLIP_CHAT_APPROVAL_HMAC_KEY;
@@ -229,7 +252,13 @@ describe("isolated chat approval with native authentication and persistence", ()
     // Stopping this card survives harmless enrollment serialization/revision changes.
     revoked.e.expiresAt = new Date(Date.now() + 1_800_000).toISOString();
     process.env.PAPERCLIP_CHAT_APPROVAL_ENROLLMENTS = JSON.stringify(enrollments);
-    expect((await testRequest().get(revoked.path).set("Cookie", cookie)).status).toBe(403);
+    const browserRefusal = await testRequest().get(revoked.path).set("Cookie", cookie).set("Accept", "text/html");
+    expect(browserRefusal.status).toBe(403);
+    expect(browserRefusal.headers["content-type"]).toContain("text/html");
+    expect(browserRefusal.text).toContain("Chat approval was revoked");
+    const toolRefusal = await testRequest().get(revoked.path).set("Cookie", cookie).set("Accept", "application/json");
+    expect(toolRefusal.status).toBe(403);
+    expect(toolRefusal.body.error).toContain("Chat approval was revoked");
     expect((await post(revoked.path, oldProof)).status).toBe(403);
     expect((await read(revoked.card.id)).status).toBe("pending");
     expect(await audit(revoked.issueId)).toHaveLength(0);
