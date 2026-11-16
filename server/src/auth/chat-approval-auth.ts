@@ -44,6 +44,7 @@ export function createChatApprovalAuth(db: Db, config: ChatApprovalConfig): Chat
       const nonce = randomBytes(18).toString("base64");
       res.set("Content-Security-Policy", `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'`);
       res.type("html").send(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Test approval sign-in</title><main style="max-width:32rem;margin:2rem auto;padding:1rem;font:1rem sans-serif">
+<style>button,input{font:inherit;min-height:44px;box-sizing:border-box;max-width:100%}button{padding:.5rem .75rem;margin:.25rem .25rem .25rem 0}label,input{display:block}input{width:100%}</style>
 <h1>Test approval sign-in</h1><p>Use a password that you enter yourself. Do not give it to an agent. This sign-in does not approve a card or give access to a task.</p>
 <form id="login"><p><label>Email <input name="email" type="email" required autocomplete="username"></label></p><p><label>Password <input name="password" type="password" required minlength="8" autocomplete="current-password"></label></p><button value="sign-in">Sign in</button><button value="sign-up">Create account</button></form><p id="result" role="status"></p>
 <p><button id="sign-out" type="button">Sign out</button> Sign out ends this test sign-in. It does not answer or stop a card.</p>

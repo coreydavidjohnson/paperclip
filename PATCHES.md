@@ -763,12 +763,17 @@ old form without changing the card or its audit, while a different session
 and ordinary local-board routes remain usable. The existing revocation test
 also checks browser HTML and tool JSON refusal representations. The first
 disposable browser fixture exposed the missing control and unreadable errors;
-the follow-up GUI campaign remains a separate release prerequisite.
+the follow-up GUI campaign remains a separate release prerequisite. Its
+390 CSS-pixel check found small native buttons, so the login and decision
+controls now have 44-pixel minimum heights and wrap within the viewport.
+This presentation-only follow-up needs its own browser check.
 
 This extends our own disabled-by-default synthetic approval candidate. It
 does not alter global authentication, standing approvals, enrollment scope,
 agent answer authority, or the requirement for Corey's own live test answer.
 
-Verification: exact candidate server compilation with extended diagnostics,
-including declaration emission, exit 0. The isolated namespace was removed and
-its absence verified. Full image acceptance remains separate.
+Verification: the predecessor passed full server compilation with declaration
+emission. The sign-out candidate passed 73 native tests and 14 proof checks.
+The touch-target follow-up does not change request or authorization logic.
+Full exact-source image qualification and final browser acceptance remain
+separate prerequisites. Disposable native-test cleanup was verified.

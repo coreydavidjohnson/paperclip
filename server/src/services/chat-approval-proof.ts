@@ -110,6 +110,7 @@ export function escapeHtml(value: string) { return value.replace(/[&<>"']/g, c =
 export function renderPrompt(enrollment: Enrollment, prompt: string, helpText: string, token: string, path: string) {
   const e = escapeHtml;
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Test approval</title><body style="font:1rem sans-serif"><main style="max-width:36rem;margin:2rem auto;padding:1rem;overflow-wrap:anywhere">
+<style>button,input{font:inherit;min-height:44px;box-sizing:border-box;max-width:100%}button{padding:.5rem .75rem}form{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center}label{flex-basis:100%}</style>
 <h1>Test approval</h1><p>This answer applies only to the test shown below. It does not permit production work.</p>
 <h2>${e(prompt)}</h2><pre style="white-space:pre-wrap">${e(helpText)}</pre>
 <dl><dt>Action</dt><dd>${e(enrollment.action)}</dd><dt>Target</dt><dd>${e(enrollment.target)}</dd><dt>Scope</dt><dd>${e(enrollment.scope)}</dd><dt>Undo limit</dt><dd>${e(enrollment.undo)}</dd></dl>
