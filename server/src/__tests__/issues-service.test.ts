@@ -6503,6 +6503,7 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
         agentId: actorAgentId,
         status: actorRunStatus,
         invocationSource: "manual",
+        contextSnapshot: { issueId },
         startedAt: actorRunStatus === "running" ? new Date() : null,
         finishedAt: actorRunStatus === "running" ? null : new Date(),
       },

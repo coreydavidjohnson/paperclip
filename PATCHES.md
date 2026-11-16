@@ -22,6 +22,31 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## Frozen-ticket repair contracts (PER-1030 / PER-1536)
+
+- Preserve an ordinary question with an explicit false supersedeOnUserComment
+  marker in the active-interaction predicate. Missing and JSON-null historical
+  markers retain the old recency rule. No backfill changes existing cards.
+- Validate entry into blocked under the issue and pending interaction/approval
+  row locks. A triggering comment, expiry/event writes and status update share
+  the transaction. Normal explicit resolution remains available and its existing
+  issue lock and pending-row CAS serialize concurrent comments and answers.
+- Adopt checkout only after locking and rereading the issue and actor run in
+  one transaction. Require positive task identity plus matching company and
+  agent; reject absent or conflicting task ownership without claiming checkout.
+- Evaluate proposed blocker replacements through the existing readiness
+  evaluator, including cancelled blockers and pending workspace finalization.
+  Delete/insert relations, reread readiness and transition status in one
+  transaction with sorted issue locks. External resume stays after commit.
+- The real-PostgreSQL HTTP/service regression reproduces the three incident
+  failures, unknown/foreign ownership and an ownership rebind while adoption
+  is blocked on a real row lock. It also covers concurrent blocker changes,
+  per-card supersession, explicit answers during comments, atomic rollback,
+  and unchanged negative controls. Existing blocker/handoff/audience tests
+  remain in the bounded verification run. Register it in luma-patch-tests.
+- Retire when upstream implements equivalent transactional contracts. No
+  migration, approval release, execution-stop attestation or replay is added.
+
 ## PER-1507 guarded terminal duplicate cancellation
 
 - Extend the existing exact exhausted-disposition status repair to cancelled.

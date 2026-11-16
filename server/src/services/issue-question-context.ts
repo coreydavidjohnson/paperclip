@@ -11,7 +11,9 @@ export function ordinaryQuestionCondition() {
 
 /** Match the feed's newer-human-message rule without storing UI dismissals. */
 export function historicalQuestionCondition() {
-  return sql`(${ordinaryQuestionCondition()} and exists (
+  return sql`(${ordinaryQuestionCondition()}
+    and ${issueThreadInteractions.payload} -> 'supersedeOnUserComment' is distinct from 'false'::jsonb
+    and exists (
     select 1 from ${issueComments}
     where ${issueComments.companyId} = ${issueThreadInteractions.companyId}
       and ${issueComments.issueId} = ${issueThreadInteractions.issueId}

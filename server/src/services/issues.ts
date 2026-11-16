@@ -2631,6 +2631,7 @@ async function listIssueDependencyReadinessMap(
   dbOrTx: Pick<Db, "select">,
   companyId: string,
   issueIds: string[],
+  replacement?: { issueId: string; blockerIssueIds: string[] },
 ) {
   const uniqueIssueIds = [...new Set(issueIds.filter(Boolean))];
   const readinessMap = new Map<string, IssueDependencyReadiness>();
@@ -2639,7 +2640,17 @@ async function listIssueDependencyReadinessMap(
   }
   if (uniqueIssueIds.length === 0) return readinessMap;
 
-  const blockerRows = await dbOrTx
+  const blockerRows = replacement
+    ? (replacement.blockerIssueIds.length === 0 ? [] : await dbOrTx
+        .select({
+          blockerIssueId: issues.id,
+          blockerStatus: issues.status,
+          blockerExecutionWorkspaceId: issues.executionWorkspaceId,
+        })
+        .from(issues)
+        .where(and(eq(issues.companyId, companyId), inArray(issues.id, replacement.blockerIssueIds))))
+        .map(row => ({ ...row, issueId: replacement.issueId }))
+    : await dbOrTx
     .select({
       issueId: issueRelations.relatedIssueId,
       blockerIssueId: issueRelations.issueId,
@@ -2747,26 +2758,6 @@ async function listUnresolvedBlockerDetails(
   });
 }
 
-async function listUnresolvedBlockerIssueIds(
-  dbOrTx: Pick<Db, "select">,
-  companyId: string,
-  blockerIssueIds: string[],
-) {
-  const uniqueBlockerIssueIds = [...new Set(blockerIssueIds.filter(Boolean))];
-  if (uniqueBlockerIssueIds.length === 0) return [];
-  return dbOrTx
-    .select({ id: issues.id })
-    .from(issues)
-    .where(
-      and(
-        eq(issues.companyId, companyId),
-        inArray(issues.id, uniqueBlockerIssueIds),
-        // Cancelled blockers intentionally remain unresolved until the relation changes.
-        ne(issues.status, "done"),
-      ),
-    )
-    .then((rows) => rows.map((row) => row.id));
-}
 async function getProjectDefaultGoalId(
   db: ProjectGoalReader,
   companyId: string,
@@ -7562,6 +7553,20 @@ export function issueService(db: Db) {
     return heartbeatRunIsTerminalOrMissing(dbOrTx, runId);
   }
 
+  function canAdoptCheckoutRun(
+    run: typeof heartbeatRuns.$inferSelect | null,
+    issue: { id: string; companyId: string },
+    actorAgentId: string,
+  ) {
+    if (!run || run.companyId !== issue.companyId || run.agentId !== actorAgentId ||
+        TERMINAL_HEARTBEAT_RUN_STATUSES.has(run.status)) return false;
+    const taskIds = [run.nativeIssueId, run.issueId,
+      readStringFromRecord(run.contextSnapshot, "issueId"),
+      readStringFromRecord(run.contextSnapshot, "taskId"),
+    ].filter((id): id is string => Boolean(id));
+    return taskIds.length > 0 && taskIds.every(id => id === issue.id);
+  }
+
   async function adoptStaleCheckoutRun(input: {
     issueId: string;
     actorAgentId: string;
@@ -7609,7 +7614,7 @@ export function issueService(db: Db) {
           .where(eq(heartbeatRuns.id, input.expectedCheckoutRunId))
           .then((rows) => rows[0] ?? null),
         tx
-          .select({ status: heartbeatRuns.status })
+          .select()
           .from(heartbeatRuns)
           .where(eq(heartbeatRuns.id, input.actorRunId))
           .then((rows) => rows[0] ?? null),
@@ -7627,9 +7632,7 @@ export function issueService(db: Db) {
           return { adopted: null, latest: lockedIssue };
         }
       }
-      const actorLive =
-        actorRun && !TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status);
-      if (!stale || !actorLive) {
+      if (!stale || !canAdoptCheckoutRun(actorRun, lockedIssue, input.actorAgentId)) {
         return { adopted: null, latest: lockedIssue };
       }
 
@@ -7683,15 +7686,19 @@ export function issueService(db: Db) {
     actorRunId: string;
   }) {
     return db.transaction(async (tx) => {
+      const lockedIssue = await tx.select({ id: issues.id, companyId: issues.companyId })
+        .from(issues).where(eq(issues.id, input.issueId)).for("update")
+        .then(rows => rows[0] ?? null);
+      if (!lockedIssue) return null;
       await tx.execute(
         sql`select ${heartbeatRuns.id} from ${heartbeatRuns} where ${heartbeatRuns.id} = ${input.actorRunId} for update`,
       );
       const actorRun = await tx
-        .select({ status: heartbeatRuns.status })
+        .select()
         .from(heartbeatRuns)
         .where(eq(heartbeatRuns.id, input.actorRunId))
         .then((rows) => rows[0] ?? null);
-      if (!actorRun || TERMINAL_HEARTBEAT_RUN_STATUSES.has(actorRun.status))
+      if (!canAdoptCheckoutRun(actorRun, lockedIssue, input.actorAgentId))
         return null;
 
       const now = new Date();
@@ -9184,7 +9191,7 @@ export function issueService(db: Db) {
       };
     },
 
-    getDependencyReadiness: async (issueId: string, dbOrTx: any = db) => {
+    getDependencyReadiness: async (issueId: string, dbOrTx: any = db, blockedByIssueIds?: string[]) => {
       const issue = await dbOrTx
         .select({ id: issues.id, companyId: issues.companyId })
         .from(issues)
@@ -9197,6 +9204,7 @@ export function issueService(db: Db) {
         dbOrTx,
         issue.companyId,
         [issueId],
+        blockedByIssueIds === undefined ? undefined : { issueId, blockerIssueIds: blockedByIssueIds },
       );
       return readiness.get(issueId) ?? createIssueDependencyReadiness(issueId);
     },
@@ -11058,38 +11066,6 @@ export function issueService(db: Db) {
       ) {
         throw unprocessable("in_progress issues require an assignee");
       }
-      if (patch.status === "in_progress") {
-        const dependencyReadiness =
-          blockedByIssueIds === undefined
-            ? (
-                await listIssueDependencyReadinessMap(
-                  dbOrTx,
-                  existing.companyId,
-                  [id],
-                )
-              ).get(id)
-            : null;
-        const unresolvedBlockerIssueIds =
-          blockedByIssueIds !== undefined
-            ? await listUnresolvedBlockerIssueIds(
-                dbOrTx,
-                existing.companyId,
-                blockedByIssueIds,
-              )
-            : (dependencyReadiness?.unresolvedBlockerIssueIds ?? []);
-        if (unresolvedBlockerIssueIds.length > 0) {
-          const unresolvedBlockers = await listUnresolvedBlockerDetails(
-            dbOrTx,
-            existing.companyId,
-            unresolvedBlockerIssueIds,
-            dependencyReadiness?.pendingFinalizeBlockerIssueIds,
-          );
-          throw unprocessable("Issue is blocked by unresolved blockers", {
-            unresolvedBlockerIssueIds,
-            unresolvedBlockers,
-          });
-        }
-      }
       const shouldValidateNextAssignee =
         Boolean(nextAssigneeAgentId) &&
         (issueData.assigneeAgentId !== undefined ||
@@ -11191,6 +11167,23 @@ export function issueService(db: Db) {
       const runUpdate = async (tx: any) => {
         const changesPrivacy = issueData.visibility !== undefined || issueData.parentId !== undefined || issueData.projectId !== undefined;
         if (changesPrivacy) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${existing.companyId}`}, 0))`);
+        const dependencyWrite = blockedByIssueIds !== undefined || patch.status === "in_progress";
+        const currentBlockerIds = dependencyWrite && blockedByIssueIds === undefined
+          ? (await tx.select({ id: issueRelations.issueId }).from(issueRelations).where(and(
+              eq(issueRelations.companyId, existing.companyId),
+              eq(issueRelations.relatedIssueId, id), eq(issueRelations.type, "blocks"),
+            ))).map((row: { id: string }) => row.id)
+          : [];
+        // Match syncBlockedByIssueIds' issue-ID ordering before taking any
+        // individual issue lock. Re-read readiness only after these locks.
+        const dependencyLockIds = dependencyWrite
+          ? [...new Set([id, ...(blockedByIssueIds ?? currentBlockerIds)])].sort()
+          : [];
+        if (dependencyLockIds.length) {
+          await tx.select({ id: issues.id }).from(issues)
+            .where(and(eq(issues.companyId, existing.companyId), inArray(issues.id, dependencyLockIds)))
+            .orderBy(issues.id).for("update");
+        }
         // The receipt baseline must be read under the same row lock as the
         // write. Otherwise a concurrent update can be mistaken for a change
         // made by this request.
@@ -11263,6 +11256,24 @@ export function issueService(db: Db) {
             ? getIssueRelationSummaryMap(existing.companyId, [id], tx)
             : Promise.resolve(new Map<string, IssueRelationSummaryMap>()),
         ]);
+        if (blockedByIssueIds !== undefined) {
+          await syncBlockedByIssueIds(id, receiptExisting.companyId, blockedByIssueIds, {
+            agentId: actorAgentId ?? null, userId: actorUserId ?? null,
+          }, tx);
+        }
+        if (patch.status === "in_progress") {
+          const readiness = (await listIssueDependencyReadinessMap(tx, receiptExisting.companyId, [id])).get(id)!;
+          if (readiness.blockerIssueIds.some(blockerId => !dependencyLockIds.includes(blockerId))) {
+            throw conflict("Issue blockers changed while resuming; retry with the current prerequisites");
+          }
+          if (readiness.unresolvedBlockerCount > 0) {
+            throw unprocessable("Issue is blocked by unresolved blockers", {
+              unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
+              unresolvedBlockers: await listUnresolvedBlockerDetails(tx, receiptExisting.companyId,
+                readiness.unresolvedBlockerIssueIds, readiness.pendingFinalizeBlockerIssueIds),
+            });
+          }
+        }
         const defaultCompanyGoal = await getDefaultCompanyGoal(tx, existing.companyId);
         const [currentProjectGoalId, nextProjectGoalId] = await Promise.all([
           getProjectDefaultGoalId(tx, existing.companyId, existing.projectId),
@@ -11504,18 +11515,6 @@ export function issueService(db: Db) {
             updated.id,
             existing.companyId,
             nextLabelIds,
-            tx,
-          );
-        }
-        if (blockedByIssueIds !== undefined) {
-          await syncBlockedByIssueIds(
-            updated.id,
-            existing.companyId,
-            blockedByIssueIds,
-            {
-              agentId: actorAgentId ?? null,
-              userId: actorUserId ?? null,
-            },
             tx,
           );
         }

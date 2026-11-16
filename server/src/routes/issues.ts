@@ -6896,7 +6896,7 @@ export function issueRoutes(
     req: Request,
     res: Response,
     issue: Parameters<typeof decideIssueAccess>[1],
-    options: { resumeIntent?: boolean } = {},
+    options: { resumeIntent?: boolean; blockedByIssueIds?: string[] } = {},
   ) {
     if (
       await assertLowTrustControlPlaneDenied(req, res, issue.companyId, issue)
@@ -6944,7 +6944,7 @@ export function issueRoutes(
     }
 
     if (issue.status === "blocked") {
-      const readiness = await svc.getDependencyReadiness(issue.id);
+      const readiness = await svc.getDependencyReadiness(issue.id, db, options.blockedByIssueIds);
       if (readiness.unresolvedBlockerCount > 0) {
         res.status(409).json({
           error: "Issue follow-up blocked by unresolved blockers",
@@ -13913,6 +13913,7 @@ export function issueRoutes(
         resumeRequested === true &&
         !(await assertExplicitResumeIntentAllowed(req, res, existing, {
           resumeIntent: true,
+          blockedByIssueIds: req.body.blockedByIssueIds,
         }))
       )
         return;
@@ -13926,7 +13927,9 @@ export function issueRoutes(
         req.actor.type === "agent" &&
         reopenRequested === true
       ) {
-        if (!(await assertExplicitResumeIntentAllowed(req, res, existing)))
+        if (!(await assertExplicitResumeIntentAllowed(req, res, existing, {
+          blockedByIssueIds: req.body.blockedByIssueIds,
+        })))
           return;
       }
       await assertIssueEnvironmentSelection(
@@ -13976,7 +13979,9 @@ export function issueRoutes(
       if (
         resumeRequested !== true &&
         agentStatusTransitionRequiresResumeAuthority &&
-        !(await assertExplicitResumeIntentAllowed(req, res, existing))
+        !(await assertExplicitResumeIntentAllowed(req, res, existing, {
+          blockedByIssueIds: req.body.blockedByIssueIds,
+        }))
       ) {
         return;
       }
@@ -14023,7 +14028,7 @@ export function issueRoutes(
         : null;
       const hasUnresolvedFirstClassBlockers =
         isBlocked && effectiveMoveToTodoRequested
-          ? (await svc.getDependencyReadiness(existing.id))
+          ? (await svc.getDependencyReadiness(existing.id, db, req.body.blockedByIssueIds))
               .unresolvedBlockerCount > 0
           : false;
       if (
@@ -14279,67 +14284,6 @@ export function issueRoutes(
       }
       const enteringBlocked =
         existing.status !== "blocked" && updateFields.status === "blocked";
-      if (enteringBlocked) {
-        const requestedBlockerIds = Array.isArray(req.body.blockedByIssueIds)
-          ? [...new Set(req.body.blockedByIssueIds as string[])]
-          : null;
-        const hasUnresolvedBlocker = requestedBlockerIds
-          ? requestedBlockerIds.length > 0 &&
-            (await db
-              .select({ id: issueRows.id })
-              .from(issueRows)
-              .where(
-                and(
-                  eq(issueRows.companyId, existing.companyId),
-                  inArray(issueRows.id, requestedBlockerIds),
-                  notInArray(issueRows.status, ["done", "cancelled"]),
-                ),
-              )
-              .limit(1)
-              .then((rows) => rows.length > 0))
-          : (await svc.getDependencyReadiness(existing.id))
-              .unresolvedBlockerCount > 0;
-        const [pendingInteraction, pendingApproval] = await Promise.all([
-          db
-            .select({ id: issueThreadInteractions.id })
-            .from(issueThreadInteractions)
-            .where(
-              and(
-                eq(issueThreadInteractions.companyId, existing.companyId),
-                eq(issueThreadInteractions.issueId, existing.id),
-                eq(issueThreadInteractions.status, "pending"),
-                activeIssueInteractionCondition(),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-          db
-            .select({ id: approvals.id })
-            .from(issueApprovals)
-            .innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
-            .where(
-              and(
-                eq(issueApprovals.companyId, existing.companyId),
-                eq(issueApprovals.issueId, existing.id),
-                eq(approvals.status, "pending"),
-              ),
-            )
-            .limit(1)
-            .then((rows) => rows[0] ?? null),
-        ]);
-        if (
-          !hasUnresolvedBlocker &&
-          !pendingInteraction &&
-          !pendingApproval &&
-          !descriptor
-        ) {
-          res.status(422).json({
-            error:
-              "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
-          });
-          return;
-        }
-      }
       if (
         reviewRequest !== undefined &&
         transition.patch.executionState === undefined
@@ -14697,10 +14641,14 @@ export function issueRoutes(
       const commentWithAdapterOverrides = Boolean(
         commentBody && updateFields.assigneeAdapterOverrides !== undefined,
       );
-      const transactionalCommentSourceTrust = commentAttachmentIds?.length || commentWithAdapterOverrides
+      const transactionalCommentSourceTrust = commentAttachmentIds?.length || commentWithAdapterOverrides || (enteringBlocked && commentBody)
         ? await sourceTrustForActorWrite(existing, actor)
         : undefined;
+      // A pending-card reason and a comment which can supersede it must be
+      // evaluated together, serialized with explicit interaction resolution.
+      const transactionalBlockedComment = enteringBlocked && Boolean(commentBody);
       const shouldUseTransactionalIssueUpdate =
+        enteringBlocked ||
         Boolean(commentAttachmentIds?.length) ||
         commentWithAdapterOverrides ||
         Boolean(decision) ||
@@ -14717,7 +14665,7 @@ export function issueRoutes(
               return null;
             const updated = await updateIssue(tx);
             if (!updated) return null;
-            if (commentAttachmentIds?.length || commentWithAdapterOverrides) {
+            if (commentAttachmentIds?.length || commentWithAdapterOverrides || transactionalBlockedComment) {
               // Adapter settings, reassignment, comment and upload binding commit together.
               // A failed comment or invalid receipt rolls back the issue update.
               transactionalComment = await svc.addComment(
@@ -14769,6 +14717,30 @@ export function issueRoutes(
 
             await persistReviewTransitionActivity(tx, updated);
 
+            if (enteringBlocked) {
+              // updateIssue and addComment hold the issue row. Resolution takes
+              // that same lock; lock the actual pending rows too, so historical
+              // expiry cannot win between the reason read and this commit.
+              const pendingInteractions = await tx.select({ id: issueThreadInteractions.id })
+                .from(issueThreadInteractions).where(and(
+                  eq(issueThreadInteractions.companyId, updated.companyId),
+                  eq(issueThreadInteractions.issueId, updated.id),
+                  eq(issueThreadInteractions.status, "pending"),
+                  activeIssueInteractionCondition(),
+                )).orderBy(issueThreadInteractions.id).for("update");
+              const pendingApprovals = await tx.select({ id: approvals.id })
+                .from(issueApprovals).innerJoin(approvals, eq(issueApprovals.approvalId, approvals.id))
+                .where(and(eq(issueApprovals.companyId, updated.companyId),
+                  eq(issueApprovals.issueId, updated.id), eq(approvals.status, "pending")))
+                .orderBy(approvals.id).for("update");
+              const readiness = await svc.getDependencyReadiness(updated.id, tx);
+              if (!pendingInteractions.length && !pendingApprovals.length &&
+                  readiness.unresolvedBlockerCount === 0 && !updated.unblockDescriptor) {
+                throw unprocessable(
+                  "Entering blocked requires unresolved blockers, a pending interaction/approval, or unblockDescriptor",
+                );
+              }
+            }
             return updated;
           });
         } else {
