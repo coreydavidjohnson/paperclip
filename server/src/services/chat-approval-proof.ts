@@ -119,9 +119,9 @@ export function renderPrompt(enrollment: Enrollment, prompt: string, helpText: s
 <form method="post" action="${e(path)}"><input type="hidden" name="proof" value="${e(token)}">
 <label for="answer">Your answer</label><input id="answer" name="answer" maxlength="256" autocomplete="off">
 <button name="choice" value="">Send typed answer</button><button name="choice" value="accept">Approve</button><button name="choice" value="reject">Deny</button><button name="choice" value="revoke">Stop chat approval</button></form>
-<p><a href="/api/chat-approval-auth/login">Manage test sign-in or sign out</a></p>
+<p><a style="display:inline-flex;align-items:center;min-height:44px;max-width:100%;box-sizing:border-box;padding:.5rem .75rem" href="/api/chat-approval-auth/login">Manage test sign-in or sign out</a></p>
 </main></body></html>`;
 }
 export function renderApprovalStatus(title: string, message: string) {
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><main style="max-width:36rem;margin:2rem auto;padding:1rem;font:1rem sans-serif;overflow-wrap:anywhere"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a href="/api/chat-approval-auth/login">Manage test sign-in or sign out</a></p><p>This record is not proof that the test ran.</p></main></html>`;
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><main style="max-width:36rem;margin:2rem auto;padding:1rem;font:1rem sans-serif;overflow-wrap:anywhere"><h1>${escapeHtml(title)}</h1><p>${escapeHtml(message)}</p><p><a style="display:inline-flex;align-items:center;min-height:44px;max-width:100%;box-sizing:border-box;padding:.5rem .75rem" href="/api/chat-approval-auth/login">Manage test sign-in or sign out</a></p><p>This record is not proof that the test ran.</p></main></html>`;
 }
