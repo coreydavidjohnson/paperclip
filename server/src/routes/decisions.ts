@@ -179,16 +179,16 @@ export function decisionRoutes(db: Db, options: DecisionServiceOptions) {
     res.json(await svc.outcome(decision.id));
   });
   router.post("/decisions/:id/decide", validate(decideSchema), async (req, res) => {
-    const userId = boardUserId(req);
+    const userId = req.chiefRelay ? null : boardUserId(req);
     const decision = await getAccessibleResource(req, res, svc.get(req.params.id as string), "Decision not found");
     if (!decision) return;
-    res.json(await svc.decide({ id: decision.id, decidedByUserId: userId, userActor: req.actor, ...req.body }));
+    res.json(await svc.decide({ id: decision.id, decidedByUserId: userId, userActor: req.actor, ...req.body, chiefRelay: req.chiefRelay }));
   });
   router.post("/decisions/:id/dismiss", validate(dismissSchema), async (req, res) => {
-    const userId = boardUserId(req);
+    const userId = req.chiefRelay ? null : boardUserId(req);
     const decision = await getAccessibleResource(req, res, svc.get(req.params.id as string), "Decision not found");
     if (!decision) return;
-    res.json(await svc.dismiss(decision.id, userId, req.actor, req.body.reason));
+    res.json(await svc.dismiss(decision.id, userId, req.actor, req.body.reason, req.chiefRelay));
   });
   router.post("/decisions/:id/cancel", async (req, res) => {
     assertBoardOrAgent(req);

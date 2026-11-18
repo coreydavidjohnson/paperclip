@@ -16,7 +16,7 @@ import { errorHandler } from "../../../middleware/error-handler.js";
 import { createLifecycleDriver } from "../../../services/agent-lifecycle-driver.js";
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { agents, approvals, projects, issues, heartbeatRuns, nativeRunFinalizations, budgetPolicies, environmentLeases, agentApiKeys, activityLog, agentConfigRevisions, userCompanyPreferences, companies, companyMemberships, principalPermissionGrants, plugins, pluginCompanySettings, createDb, type Db } from "@paperclipai/db";
+import { agents, approvals, projects, issues, heartbeatRuns, nativeRunFinalizations, budgetPolicies, budgetIncidents, environmentLeases, agentApiKeys, activityLog, agentConfigRevisions, userCompanyPreferences, companies, companyMemberships, principalPermissionGrants, plugins, pluginCompanySettings, createDb, type Db } from "@paperclipai/db";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../../__tests__/helpers/embedded-postgres.js";
 import { createAgentLifecycle, configureAgentLifecycle } from "../../../services/agent-lifecycle.js";
@@ -329,6 +329,81 @@ const support = await getEmbeddedPostgresTestSupport();
     await approvalService(db).approve(approval.id, "board");
     await vi.waitFor(async () => expect((await current(agent.id)).lifecycleState).toBe("ready"));
     expect(observed).toEqual(["preparing", "verifying"]);
+  });
+
+  it.each(["approved", "rejected"] as const)("propagates Chief relay through the %s hire lifecycle without a user impersonation", async decision => {
+    const proposed = await hire("pending_approval");
+    const [chief] = await db.insert(agents).values({ companyId, name: "Chief", role: "ceo", status: "idle" }).returning();
+    const approval = await approvalService(db).create(companyId, { type: "hire_agent", payload: { agentId: proposed.id }, status: "pending" });
+    const proof = { agentId: chief!.id, companyId, representedUserId: "local-board", sourceSessionId: "source-session", sourceMessageId: "source-message",
+      exactQuote: "Resolve this hire.", scope: "This hire approval", idempotencyKey: "relay-hire", requestFingerprint: "hire-choice" };
+    const svc = approvalService(db);
+    const resolve = decision === "approved" ? svc.approve : svc.reject;
+    expect(await resolve(approval.id, null, "Explicit instruction", proof)).toMatchObject({ applied: true, approval: { status: decision, decidedByUserId: null } });
+    expect((await current(proposed.id)).lifecycleState).toBe(decision === "approved" ? "preparing" : "rejected");
+    expect(await resolve(approval.id, null, "Explicit instruction", proof)).toMatchObject({ applied: false });
+    const receipts = await db.select().from(activityLog).where(and(eq(activityLog.entityId, approval.id), eq(activityLog.action, "approval.chief_relay_resolved")));
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]).toMatchObject({ actorType: "agent", actorId: chief!.id, details: { chiefRelay: proof } });
+  });
+
+  it.each([true, false])("attributes a positive-budget Chief relay hire and its policy audit to the real agent (proposed=%s)", async proposedExists => {
+    const proposed = proposedExists ? await hire("pending_approval") : null;
+    const [chief] = await db.insert(agents).values({ companyId, name: "Chief", role: "ceo", status: "idle" }).returning();
+    const [run] = await db.insert(heartbeatRuns).values({ companyId, agentId: chief!.id, status: "running" }).returning();
+    const svc = approvalService(db);
+    const approval = await svc.create(companyId, { type: "hire_agent", payload: {
+      ...(proposed ? { agentId: proposed.id } : { name: "Positive budget relay hire", adapterType: "process" }), budgetMonthlyCents: 2500,
+    }, status: "pending" });
+    const proof = { agentId: chief!.id, companyId, representedUserId: "local-board", sourceSessionId: "source-session", sourceMessageId: "budget-source-message",
+      exactQuote: "Approve this hire with a 2500 cent monthly budget.", scope: "This hire and its monthly budget", idempotencyKey: "relay-budget-hire", requestFingerprint: "hire-with-budget" };
+    await svc.approve(approval.id, null, "Explicit instruction", proof, run!.id);
+    const [policy] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.companyId, companyId));
+    expect(policy).toMatchObject({ scopeType: "agent", amount: 2500, isActive: true, createdByUserId: null, updatedByUserId: null });
+    const target = await current(policy!.scopeId);
+    expect(target).toMatchObject({ budgetMonthlyCents: 2500, lifecycleState: "preparing" });
+    if (proposed) expect(target.id).toBe(proposed.id);
+    const audits = () => db.select().from(activityLog).where(and(eq(activityLog.entityId, policy!.id), eq(activityLog.action, "budget.policy_upserted")));
+    expect(await audits()).toEqual([expect.objectContaining({ actorType: "agent", actorId: chief!.id, agentId: chief!.id, runId: run!.id, responsibleUserId: null,
+      details: expect.objectContaining({ chiefRelay: proof, amount: 2500 }) })]);
+    expect(await svc.approve(approval.id, null, "Explicit instruction", proof, run!.id)).toMatchObject({ applied: false });
+    expect(await audits()).toHaveLength(1);
+  });
+
+  it("keeps budget incident approval side effects honestly attributed during a positive-budget relay hire", async () => {
+    const proposed = await hire("pending_approval");
+    await budgetService(db).upsertPolicy(companyId, { scopeType: "agent", scopeId: proposed.id, amount: 100 }, "original-budget-author");
+    const [policy] = await db.select().from(budgetPolicies).where(eq(budgetPolicies.scopeId, proposed.id));
+    const svc = approvalService(db);
+    const budgetApproval = await svc.create(companyId, { type: "budget_override_required", payload: { policyId: policy!.id }, status: "pending" });
+    const [incident] = await db.insert(budgetIncidents).values({ companyId, policyId: policy!.id, scopeType: "agent", scopeId: proposed.id, metric: policy!.metric,
+      windowKind: policy!.windowKind, windowStart: new Date("2026-01-01T00:00:00Z"), windowEnd: new Date("2026-02-01T00:00:00Z"),
+      thresholdType: "hard", amountLimit: 100, amountObserved: 100, approvalId: budgetApproval.id }).returning();
+    const [chief] = await db.insert(agents).values({ companyId, name: "Chief", role: "ceo", status: "idle" }).returning();
+    const proof = { agentId: chief!.id, companyId, representedUserId: "local-board", sourceSessionId: "source-session", sourceMessageId: "budget-source-message",
+      exactQuote: "Approve this hire with a 2500 cent monthly budget.", scope: "This hire and its monthly budget", idempotencyKey: "relay-budget-hire", requestFingerprint: "hire-with-budget" };
+    const hireApproval = await svc.create(companyId, { type: "hire_agent", payload: { agentId: proposed.id, budgetMonthlyCents: 2500 }, status: "pending" });
+    await svc.approve(hireApproval.id, null, null, proof);
+    expect((await db.select().from(budgetIncidents).where(eq(budgetIncidents.id, incident!.id)))[0]).toMatchObject({ status: "resolved" });
+    expect((await db.select().from(approvals).where(eq(approvals.id, budgetApproval.id)))[0]).toMatchObject({ status: "approved", decidedByUserId: null });
+    expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, budgetApproval.id), eq(activityLog.action, "budget.approval_resolved")))).toEqual([
+      expect.objectContaining({ actorType: "agent", actorId: chief!.id, agentId: chief!.id, responsibleUserId: null, details: expect.objectContaining({ chiefRelay: proof }) }),
+    ]);
+  });
+
+  it.each(["approved", "rejected"] as const)("rolls back a relayed %s hire pointing at a foreign-company agent", async decision => {
+    const foreignCompanyId = randomUUID();
+    await db.insert(companies).values({ id: foreignCompanyId, name: "Other company", issuePrefix: `F${foreignCompanyId.slice(0, 7)}` });
+    const foreign = await createAgentLifecycle(db).requestHire(foreignCompanyId, { name: "Foreign hire", status: "pending_approval", adapterType: "process" });
+    const [chief] = await db.insert(agents).values({ companyId, name: "Chief", role: "ceo", status: "idle" }).returning();
+    const approval = await approvalService(db).create(companyId, { type: "hire_agent", payload: { agentId: foreign.id }, status: "pending" });
+    const proof = { agentId: chief!.id, companyId, representedUserId: "local-board", sourceSessionId: "source-session", sourceMessageId: "source-message",
+      exactQuote: "Resolve this hire.", scope: "This hire approval", idempotencyKey: "relay-hire", requestFingerprint: "hire-choice" };
+    const svc = approvalService(db);
+    await expect((decision === "approved" ? svc.approve : svc.reject)(approval.id, null, null, proof)).rejects.toThrow("Hire target does not belong to relay company");
+    expect((await current(foreign.id)).lifecycleState).toBe("pending_approval");
+    expect((await db.select().from(approvals).where(eq(approvals.id, approval.id)))[0]).toMatchObject({ status: "pending", decidedAt: null });
+    expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, approval.id), eq(activityLog.action, "approval.chief_relay_resolved")))).toHaveLength(0);
   });
 
   it.each(["approved", "rejected"] as const)("uses the same %s hire decision for an agent and its approval", async decision => {

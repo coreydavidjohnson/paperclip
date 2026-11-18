@@ -1,3 +1,4 @@
+import type { ChiefRelay } from "./chief-relay-types.js";
 import { approvalResolutionRecords, resolvableApprovalStatuses as resolvableStatuses } from "../lib/approval-records.js";
 import { budgetService } from "./budgets.js";
 import { notifyHireApproved } from "./hire-hook.js";
@@ -172,9 +173,9 @@ export function approvalService(db: Db) {
     await builtInAgentService(database).ensure(companyId, sourceBuiltInAgentKey);
   }
 
-  async function decideHire(target: string | { approvalId: string }, status: "approved" | "rejected", userId: string, note?: string | null) {
+  async function decideHire(target: string | { approvalId: string }, status: "approved" | "rejected", userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) {
     const lifecycle = createAgentLifecycle(db);
-    const result = await (status === "approved" ? lifecycle.approveHire : lifecycle.rejectHire)(target, userId, note);
+    const result = await (status === "approved" ? lifecycle.approveHire : lifecycle.rejectHire)(target, userId, note, chiefRelay, actorRunId);
     if (result?.hireApprovedAgentId && result.approval) {
       await reconcileApprovedBuiltInAgent(result.approval.companyId, result.approval.payload, db);
       await budgetService(db).deliverPendingEnforcement(result.approval.companyId);
@@ -184,18 +185,18 @@ export function approvalService(db: Db) {
     return result;
   }
 
-  async function decide(id: string, status: "approved" | "rejected", userId: string, note?: string | null) {
+  async function decide(id: string, status: "approved" | "rejected", userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) {
     const approval = await getExistingApproval(id);
     if (approval.type === "hire_agent") {
-      const result = await decideHire({ approvalId: id }, status, userId, note);
+      const result = await decideHire({ approvalId: id }, status, userId, note, chiefRelay, actorRunId);
       return { approval: result!.approval!, applied: result!.applied };
     }
-    return resolveApproval(id, status, userId, note);
+    return resolveApproval(id, status, userId, note, db, chiefRelay, undefined, actorRunId);
   }
   return { ...records,
-    approveHire: (agentId: string, userId: string, note?: string | null) => decideHire(agentId, "approved", userId, note),
-    rejectHire: (agentId: string, userId: string, note?: string | null) => decideHire(agentId, "rejected", userId, note),
-    approve: (id: string, userId: string, note?: string | null) => decide(id, "approved", userId, note),
-    reject: (id: string, userId: string, note?: string | null) => decide(id, "rejected", userId, note),
+    approveHire: (agentId: string, userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) => decideHire(agentId, "approved", userId, note, chiefRelay, actorRunId),
+    rejectHire: (agentId: string, userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) => decideHire(agentId, "rejected", userId, note, chiefRelay, actorRunId),
+    approve: (id: string, userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) => decide(id, "approved", userId, note, chiefRelay, actorRunId),
+    reject: (id: string, userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) => decide(id, "rejected", userId, note, chiefRelay, actorRunId),
   };
 }

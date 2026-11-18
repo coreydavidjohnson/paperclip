@@ -1,3 +1,5 @@
+import type { ChiefRelay } from "./chief-relay-types.js";
+import { assertChiefRelayRunWriteAllowed } from "../lib/chief-relay-run.js";
 import { compareCents, normalizeCents } from "@paperclipai/shared";
 import { and, desc, eq, gte, inArray, lt, ne, sql, or, isNull, type SQL } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -262,7 +264,7 @@ async function markApprovalStatus(
   approvalId: string | null,
   status: "approved" | "rejected",
   decisionNote: string | null | undefined,
-  decidedByUserId: string,
+  decidedByUserId: string | null,
 ) {
   if (!approvalId) return;
   await db
@@ -275,6 +277,11 @@ async function markApprovalStatus(
       updatedAt: new Date(),
     })
     .where(eq(approvals.id, approvalId));
+}
+
+function relayAuditActor(chiefRelay: ChiefRelay, runId?: string | null) {
+  return { actorType: "agent" as const, actorId: chiefRelay.agentId, agentId: chiefRelay.agentId,
+    runId: runId ?? null, responsibleUserIdOverride: null };
 }
 
 /** Internal: caller must hold the company accounting transaction lock. */
@@ -497,6 +504,8 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
     approvalStatus: "approved" | "rejected" | null,
     decidedByUserId: string | null,
     thresholdType?: BudgetThresholdType,
+    chiefRelay?: ChiefRelay,
+    actorRunId?: string | null,
   ) {
     const condition = and(eq(budgetIncidents.policyId, policyId), eq(budgetIncidents.status, "open"),
       thresholdType ? eq(budgetIncidents.thresholdType, thresholdType) : undefined);
@@ -514,9 +523,14 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       })
       .where(condition);
 
-    if (!approvalStatus || !decidedByUserId) return;
+    if (!approvalStatus || (!decidedByUserId && !chiefRelay)) return;
     for (const row of openRows) {
       await markApprovalStatus(db, row.approvalId ?? null, approvalStatus, "Resolved via budget update", decidedByUserId);
+      if (chiefRelay && row.approvalId) await recordActivity({
+        companyId: chiefRelay.companyId, ...relayAuditActor(chiefRelay, actorRunId),
+        action: "budget.approval_resolved", entityType: "approval", entityId: row.approvalId,
+        details: { chiefRelay, policyId, status: approvalStatus, decidedByUserId: null, reason: "Resolved via budget update" },
+      });
     }
   }
 
@@ -620,7 +634,15 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
       companyId: string,
       input: BudgetPolicyUpsertInput,
       actorUserId: string | null,
+      chiefRelay?: ChiefRelay,
+      actorRunId?: string | null,
     ): Promise<BudgetPolicySummary> => {
+      // Only trusted lifecycle callers supply this explicit proof. Public budget
+      // routes keep their existing user-only contract.
+      if (chiefRelay) {
+        if (actorUserId !== null || chiefRelay.companyId !== companyId) throw unprocessable("Chief relay budget submitter or company mismatch");
+        await assertChiefRelayRunWriteAllowed(db, chiefRelay, actorRunId);
+      }
       const scope = await resolveScopeRecord(db, input.scopeType, input.scopeId);
       if (scope.companyId !== companyId) {
         throw unprocessable("Budget scope does not belong to company");
@@ -711,7 +733,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         const observed = await computeObservedSpend(db, row);
         if (!observedBlocks(row, observed)) {
           await resumeScopeFromBudget(row);
-          await resolveOpenIncidentsForPolicy(row.id, "approved", actorUserId ?? "budget_service", "hard");
+          await resolveOpenIncidentsForPolicy(row.id, "approved", chiefRelay ? null : actorUserId ?? "budget_service", "hard", chiefRelay, actorRunId);
           if (row.notifyEnabled && compareCents(observed.totalExact, Math.ceil(row.amount * row.warnPercent / 100)) >= 0) {
             await createIncidentIfNeeded(row, "soft", observed);
           } else {
@@ -730,13 +752,12 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
         }
       } else {
         await resumeScopeFromBudget(row);
-        await resolveOpenIncidentsForPolicy(row.id, "approved", actorUserId ?? "budget_service");
+        await resolveOpenIncidentsForPolicy(row.id, "approved", chiefRelay ? null : actorUserId ?? "budget_service", undefined, chiefRelay, actorRunId);
       }
 
       await recordActivity({
         companyId,
-        actorType: "user",
-        actorId: actorUserId ?? "board",
+        ...(chiefRelay ? relayAuditActor(chiefRelay, actorRunId) : { actorType: "user" as const, actorId: actorUserId ?? "board" }),
         action: "budget.policy_upserted",
         entityType: "budget_policy",
         entityId: row.id,
@@ -745,6 +766,7 @@ export function budgetServiceInTransaction(db: Db, publications: ActivityPublica
           scopeId: row.scopeId,
           amount: row.amount,
           windowKind: row.windowKind,
+          ...(chiefRelay ? { chiefRelay } : {}),
         },
       });
 

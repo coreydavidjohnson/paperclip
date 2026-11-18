@@ -1,7 +1,8 @@
+import { toolAccessPolicyService } from "../services/tool-access-policy.js";
 import { subscribeDeliveryWork } from "../services/delivery-work-notifications.js";
 import { DELIVERY_QUEUES } from "../services/delivery-work-notifications.js";
 import { randomUUID } from "node:crypto";
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog,
@@ -36,6 +37,7 @@ import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js
 import type { VercelConnectClient } from "../services/vercel-connect.js";
 import { initializeRunIdentity, reserveSteeredIdentity, reconcileSteeredIdentity } from "../services/run-identity.js";
 import { issueService } from "../services/issues.js";
+import type { ChiefRelay } from "../services/chief-relay-types.js";
 import { commitToolActionReview } from "../services/tool-action-review.js";
 import { materializeNativeInteractionResponses } from "../services/native-runtime/native-interaction-bridge.js";
 import { toolActionDeliveryService } from "../services/tool-action-delivery.js";
@@ -378,6 +380,263 @@ describeEmbeddedPostgres("tool gateway service", () => {
     });
     const [consumed] = await db.select().from(toolActionRequests);
     expect(consumed.status).toBe("executed");
+  });
+
+  async function chiefRelayActor(companyId: string) {
+    const [chief] = await db.insert(agents).values({ companyId, name: "Chief", role: "ceo", adapterType: "process" }).returning();
+    const chiefRelay: ChiefRelay = { agentId: chief.id, companyId, representedUserId: "corey",
+      sourceSessionId: "owned-chief-chat", sourceMessageId: "message-1498", exactQuote: "Approve the reviewed action.",
+      scope: "This tool review only", idempotencyKey: randomUUID(), requestFingerprint: "review-fingerprint" };
+    return { agentId: chief.id, userId: null, chiefRelay };
+  }
+
+  it("Chief relay tool review rejects ordinary agents and mismatched proof without effects", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "reviewed" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    for (const resolve of [gateway.approveActionRequest, gateway.declineActionRequest]) {
+      await expect(resolve({ companyId: company.id, actionRequestId: request.id, actor: { agentId: agent.id } })).rejects.toMatchObject({ status: 403 });
+      for (const chiefRelay of [{ ...actor.chiefRelay, companyId: randomUUID() }, { ...actor.chiefRelay, agentId: agent.id }]) {
+        await expect(resolve({ companyId: company.id, actionRequestId: request.id, actor: { ...actor, chiefRelay } })).rejects.toMatchObject({ reasonCode: "chief_relay_mismatch" });
+      }
+    }
+    for (const decision of ["approved", "rejected"] as const) {
+      for (const deniedActor of [{ agentId: agent.id }, { ...actor, chiefRelay: { ...actor.chiefRelay, companyId: randomUUID() } }, { ...actor, chiefRelay: { ...actor.chiefRelay, agentId: agent.id } }]) {
+        await expect(commitToolActionReview(db, { companyId: company.id, actionRequestId: request.id, decision, actor: deniedActor })).rejects.toMatchObject({ status: 403 });
+      }
+    }
+    expect((await db.select().from(toolActionRequests))[0].status).toBe("pending");
+    expect((await db.select().from(issueThreadInteractions))[0]).toMatchObject({ status: "pending", resolvedByAgentId: null, resolvedByUserId: null });
+    expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toHaveLength(0);
+  });
+
+  it("Chief relay tool approval executes signed arguments once and preserves exact proof and actual resolver", async () => {
+    const { company, agent, issue, run } = await createRunFixture(db);
+    await initializeRunIdentity(db, { companyId: company.id, runId: run.id, issueId: issue.id, responsibleUserId: null, cause: "company_default" });
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "signed body" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const baseActor = await chiefRelayActor(company.id);
+    const [chiefRun] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: baseActor.agentId, status: "running" }).returning();
+    const actor = { ...baseActor, runId: chiefRun.id };
+    const approve = () => gateway.approveActionRequest({ companyId: company.id, issueId: issue.id, interactionId: request.interactionId!, actionRequestId: request.id, actor });
+    expect(await approve()).toMatchObject({ status: "executed", resolvedByUserId: null, decidedByUserId: null });
+    await approve();
+    const [interaction] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, request.interactionId!));
+    expect(interaction).toMatchObject({ status: "accepted", resolvedByAgentId: actor.agentId, resolvedByUserId: null, result: { outcome: "accepted", toolAction: { status: "executed" } } });
+    expect((interaction.result as Record<string, unknown>).chiefRelay).toEqual(actor.chiefRelay);
+    expect(interaction.resolvedByRunId).toBe(chiefRun.id);
+    const [audit] = await db.select().from(activityLog).where(eq(activityLog.action, "issue.thread_interaction_accepted"));
+    expect(audit).toMatchObject({ actorType: "agent", actorId: actor.agentId, agentId: actor.agentId, runId: chiefRun.id });
+    const replay = await gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "signed body" } });
+    expect(replay.status).toBe("replayed");
+    expect((replay.result as { data?: { bodyLength?: number } }).data?.bodyLength).toBe("signed body".length);
+    expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toHaveLength(1);
+  });
+
+  it("Chief relay tool decline persists proof as an agent decision and never executes", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "decline" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    await gateway.declineActionRequest({ companyId: company.id, actionRequestId: request.id, actor, reason: "Not authorized" });
+    const [interaction] = await db.select().from(issueThreadInteractions);
+    expect(interaction).toMatchObject({ status: "rejected", resolvedByAgentId: actor.agentId, resolvedByUserId: null, result: { outcome: "rejected", reason: "Not authorized" } });
+    expect((interaction.result as Record<string, unknown>).chiefRelay).toEqual(actor.chiefRelay);
+    await gateway.declineActionRequest({ companyId: company.id, actionRequestId: request.id, actor, reason: "Not authorized" });
+    await expect(gateway.declineActionRequest({ companyId: company.id, actionRequestId: request.id, actor: { ...actor, chiefRelay: { ...actor.chiefRelay, requestFingerprint: "different-decision" } } })).rejects.toMatchObject({ status: 409 });
+    expect(await db.select().from(activityLog).where(eq(activityLog.action, "issue.thread_interaction_rejected"))).toHaveLength(1);
+    expect((await db.select().from(toolInvocations))[0]).toMatchObject({ status: "denied", approvalState: "rejected" });
+    expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toHaveLength(0);
+  });
+
+  it("Chief relay tool approval still denies a changed target definition", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const { connection, catalogEntry } = await createRemoteMcpToolFixture(db, company.id);
+    await db.insert(toolPolicies).values({ companyId: company.id, name: "Ask first", policyType: "require_approval", selectors: { connectionId: connection.id } });
+    const remoteHttpRequest = vi.fn<NonNullable<ToolGatewayServiceOptions["remoteHttpRequest"]>>(async (_url, init) => {
+      const body = JSON.parse(String(init.body));
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "fixture" }] } }), { headers: { "content-type": "application/json" } });
+    });
+    const gateway = createTestToolGatewayService(db, { remoteHttpRequest });
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    const tool = (await gateway.listToolsForSession(session.token)).find(t => t.connectionId === connection.id)!;
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: { limit: 10 } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    await db.update(toolCatalogEntries).set({ versionHash: "changed-after-review" }).where(eq(toolCatalogEntries.id, catalogEntry.id));
+    await expect(gateway.approveActionRequest({ companyId: company.id, actionRequestId: request.id, actor })).rejects.toMatchObject({ reasonCode: "approved_tool_target_changed" });
+    expect((await db.select().from(toolActionRequests))[0].status).toBe("pending");
+    expect((await db.select().from(issueThreadInteractions))[0].status).toBe("pending");
+    expect(remoteHttpRequest).not.toHaveBeenCalled();
+  });
+
+  it.each(["approved", "rejected"] as const)("Chief relay %s serializes against actual actor run cancellation", async (decision) => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "cancellation-race" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const baseActor = await chiefRelayActor(company.id);
+    const [chiefRun] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: baseActor.agentId, status: "running" }).returning();
+    const actor = { ...baseActor, runId: chiefRun.id };
+    let releaseStop!: () => void;
+    let signalLocked!: () => void;
+    const locked = new Promise<void>(resolve => { signalLocked = resolve; });
+    const release = new Promise<void>(resolve => { releaseStop = resolve; });
+    const stopping = db.transaction(async tx => {
+      await tx.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, chiefRun.id));
+      signalLocked();
+      await release;
+    });
+    await locked;
+    const resolve = decision === "approved" ? gateway.approveActionRequest : gateway.declineActionRequest;
+    const resolution = resolve({ companyId: company.id, actionRequestId: request.id, actor }).then(value => ({ value, error: null }), error => ({ value: null, error }));
+    let waiting = false;
+    try {
+      for (let attempt = 0; attempt < 80; attempt++) {
+        const [row] = await db.execute<{ waiting: boolean }>(sql`SELECT EXISTS (
+          SELECT 1 FROM pg_stat_activity WHERE state = 'active' AND wait_event_type = 'Lock'
+            AND query ILIKE '%heartbeat_runs%' AND query ILIKE '%for share%'
+        ) AS waiting`);
+        if (row?.waiting) { waiting = true; break; }
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
+    } finally {
+      releaseStop();
+      await stopping;
+    }
+    const outcome = await resolution;
+    expect(waiting).toBe(true);
+    expect(outcome.error).toMatchObject({ status: 403, details: { code: "agent_run_cancelled" } });
+    expect((await db.select().from(toolActionRequests))[0]).toMatchObject({ status: "pending", decidedAt: null, resolvedByUserId: null });
+    expect((await db.select().from(issueThreadInteractions))[0]).toMatchObject({ status: "pending", resolvedByAgentId: null, resolvedByUserId: null, resolvedByRunId: null });
+    expect(await db.select().from(activityLog).where(eq(activityLog.action, decision === "approved" ? "issue.thread_interaction_accepted" : "issue.thread_interaction_rejected"))).toHaveLength(0);
+    expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toHaveLength(0);
+  });
+
+  it("Chief relay tool approval rejects missing or mismatched actual actor runs", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "run-context" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    for (const runId of [run.id, randomUUID()]) {
+      await expect(gateway.approveActionRequest({ companyId: company.id, actionRequestId: request.id, actor: { ...actor, runId } })).rejects.toMatchObject({ status: 403 });
+    }
+    expect((await db.select().from(toolActionRequests))[0].status).toBe("pending");
+    expect((await db.select().from(issueThreadInteractions))[0].resolvedByAgentId).toBeNull();
+  });
+
+  it.each(["approved", "rejected"] as const)("Chief relay %s rejects a terminal actual actor run without effects", async (decision) => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "terminal-run" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    const resolve = decision === "approved" ? gateway.approveActionRequest : gateway.declineActionRequest;
+    for (const status of ["succeeded", "failed", "cancelled"] as const) {
+      const [chiefRun] = await db.insert(heartbeatRuns).values({ companyId: company.id, agentId: actor.agentId, status }).returning();
+      await expect(resolve({ companyId: company.id, actionRequestId: request.id, actor: { ...actor, runId: chiefRun.id } })).rejects.toMatchObject({ status: 403 });
+    }
+    expect((await db.select().from(toolActionRequests))[0]).toMatchObject({ status: "pending", decidedAt: null });
+    const [interaction] = await db.select().from(issueThreadInteractions);
+    expect(interaction).toMatchObject({ status: "pending", resolvedByAgentId: null, resolvedByUserId: null, resolvedByRunId: null });
+    expect((interaction.result as unknown as Record<string, unknown> | null)?.chiefRelay).toBeUndefined();
+    expect(await db.select().from(activityLog).where(eq(activityLog.action, decision === "approved" ? "issue.thread_interaction_accepted" : "issue.thread_interaction_rejected"))).toHaveLength(0);
+    expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toHaveLength(0);
+  });
+
+  it("Chief relay tool approval does not bypass the addressed person's audience", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "audience" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    await db.update(issueThreadInteractions).set({ addresseeUserId: "another-person" }).where(eq(issueThreadInteractions.id, request.interactionId!));
+    await expect(gateway.approveActionRequest({ companyId: company.id, actionRequestId: request.id, actor })).rejects.toMatchObject({ status: 403 });
+    expect((await db.select().from(toolActionRequests))[0].status).toBe("pending");
+    expect((await db.select().from(issueThreadInteractions))[0]).toMatchObject({ status: "pending", resolvedByAgentId: null, resolvedByUserId: null });
+  });
+
+  it("Chief relay remembered permission attributes the rule and audit to Chief without a user", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    const { connection } = await createRemoteMcpToolFixture(db, company.id);
+    await db.insert(toolPolicies).values({ companyId: company.id, name: "Ask first", policyType: "require_approval", selectors: { connectionId: connection.id } });
+    let calls = 0;
+    const gateway = createTestToolGatewayService(db, { remoteHttpRequest: async (_url, init) => {
+      const body = JSON.parse(String(init.body));
+      if (body.method === "tools/call") calls++;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "fixture" }] } }), { headers: { "content-type": "application/json" } });
+    } });
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    const tool = (await gateway.listToolsForSession(session.token)).find(t => t.connectionId === connection.id)!;
+    const call = (limit: number) => gateway.executeTool({ sessionToken: session.token, tool: tool.name, parameters: { limit } });
+    await expect(call(10)).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    expect(await gateway.approveActionRequest({ companyId: company.id, actionRequestId: request.id, rememberAction: true, actor })).toMatchObject({ status: "executed", resolvedByUserId: null, decidedByUserId: null });
+    const [rule] = await db.select().from(toolPolicies).where(eq(toolPolicies.policyType, "trust_rule"));
+    expect(rule).toMatchObject({ createdByAgentId: actor.agentId, createdByUserId: null });
+    const [audit] = await db.select().from(toolAccessAuditEvents).where(eq(toolAccessAuditEvents.action, "tool_access.trust_rule_created"));
+    expect(audit).toMatchObject({ actorType: "agent", actorId: actor.agentId });
+    expect((audit.details as Record<string, unknown>).chiefRelay).toEqual(actor.chiefRelay);
+    const [event] = await db.select().from(toolCallEvents).where(eq(toolCallEvents.eventType, "trust_rule_created"));
+    expect(event).toMatchObject({ actorType: "agent", actorId: actor.agentId });
+    expect((event.metadata as Record<string, unknown>).chiefRelay).toEqual(actor.chiefRelay);
+    const promote = (promotionActor: { agentId: string; userId?: string | null; chiefRelay?: ChiefRelay }) => toolAccessPolicyService(db).createTrustRuleFromActionRequest({
+      companyId: company.id, actionRequestId: request.id, body: { argumentMode: "action", approvalThreshold: 1 }, actor: promotionActor,
+    });
+    await expect(promote({ agentId: actor.agentId })).rejects.toMatchObject({ status: 422 });
+    for (const deniedActor of [
+      { ...actor, chiefRelay: { ...actor.chiefRelay, companyId: randomUUID() } },
+      { ...actor, chiefRelay: { ...actor.chiefRelay, agentId: agent.id } },
+      { ...actor, chiefRelay: { ...actor.chiefRelay, exactQuote: "" } },
+      { ...actor, userId: "board" },
+    ]) await expect(promote(deniedActor)).rejects.toMatchObject({ status: 403 });
+    expect(await db.select().from(toolPolicies).where(eq(toolPolicies.policyType, "trust_rule"))).toHaveLength(1);
+    expect(await db.select().from(toolAccessAuditEvents).where(eq(toolAccessAuditEvents.action, "tool_access.trust_rule_created"))).toHaveLength(1);
+    const [interaction] = await db.select().from(issueThreadInteractions);
+    expect(interaction).toMatchObject({ resolvedByAgentId: actor.agentId, resolvedByUserId: null, result: { toolAction: { rememberedAction: true } } });
+    expect((interaction.result as unknown as Record<string, unknown>).chiefRelay).toEqual(actor.chiefRelay);
+    await call(20);
+    expect(calls).toBe(2);
+    expect(await db.select().from(toolActionRequests)).toHaveLength(1);
+  });
+
+  it("Chief relay remembered permission failure rolls back proof, attribution, decision and effects", async () => {
+    const { company, agent, run } = await createRunFixture(db);
+    await db.insert(toolPolicies).values(reviewNotePolicyRow(company));
+    const gateway = createTestToolGatewayService(db);
+    const session = await gateway.createSession(runSessionInput(company, agent, run));
+    await expect(gateway.executeTool({ sessionToken: session.token, tool: "mcp-remote-fixture:update_note", parameters: { noteId: "n1", body: "rollback" } })).rejects.toMatchObject({ reasonCode: "approval_required" });
+    const [request] = await db.select().from(toolActionRequests);
+    const actor = await chiefRelayActor(company.id);
+    // This built-in fixture has no connection, so it cannot grant action-wide access.
+    await expect(gateway.approveActionRequest({ companyId: company.id, actionRequestId: request.id, actor, rememberAction: true })).rejects.toThrow();
+    expect((await db.select().from(toolActionRequests))[0]).toMatchObject({ status: "pending", resolvedByUserId: null, decidedByUserId: null, decidedAt: null });
+    const [interaction] = await db.select().from(issueThreadInteractions);
+    expect(interaction).toMatchObject({ status: "pending", resolvedByAgentId: null, resolvedByUserId: null, resolvedByRunId: null });
+    expect((interaction.result as unknown as Record<string, unknown> | null)?.chiefRelay).toBeUndefined();
+    expect(await db.select().from(toolPolicies).where(eq(toolPolicies.policyType, "trust_rule"))).toHaveLength(0);
+    expect(await db.select().from(activityLog).where(eq(activityLog.action, "issue.thread_interaction_accepted"))).toHaveLength(0);
+    expect(await db.select().from(toolCallEvents).where(eq(toolCallEvents.reasonCode, "approved_action_executed"))).toHaveLength(0);
   });
 
   it("commits one human decision and delivers once after the original run yields, including after service restart", async () => {

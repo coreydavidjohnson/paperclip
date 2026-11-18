@@ -26,10 +26,10 @@ export function createAgentLifecycleEffects(hooks: BudgetServiceHooks = {}): lif
       invalidateSkillListOnMutation(db, () => withAccountingTransaction(db, companyId, fn))(companyId),
     deleteDependencies: deleteAgentDependencies,
     policyBlocks,
-    setAgentBudget: (db, publications, companyId, agentId, amount, userId, isActive) =>
+    setAgentBudget: (db, publications, companyId, agentId, amount, userId, isActive, chiefRelay, actorRunId) =>
       budgetServiceInTransaction(db, publications).upsertPolicy(companyId, {
         scopeType: "agent", scopeId: agentId, amount, isActive, windowKind: "calendar_month_utc",
-      }, userId),
+      }, userId, chiefRelay, actorRunId),
     enforceBudget: (db, companyId, agentId) => deliverBudgetEnforcement(db, hooks, companyId, agentId),
     recordCreation: (db, companyId, agentId) => recordResourceCreationEvent(db, companyId, "agent", agentId),
     recordStatus: recordAgentStatusEvent,

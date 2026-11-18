@@ -1,3 +1,5 @@
+import { assertChiefRelayRunWriteAllowed } from "../lib/chief-relay-run.js";
+import { readChiefRelay, sameChiefRelay, type ChiefRelay } from "./chief-relay-types.js";
 import { randomUUID } from "node:crypto";
 import { and, asc, count, desc, eq, gt, gte, inArray, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -16,7 +18,7 @@ import { decisionRetentionService, hashAttentionArchiveManifest } from "./decisi
 
 type Snapshot = { status: string; assigneeAgentId: string | null; assigneeUserId: string | null; updatedAt: string;
   descendantCount?: number; descendantIds?: string[]; childCount?: number; attentionArchive?: unknown };
-type Wake = (input: { companyId: string; agentId: string; issueId: string; decisionId: string; outcome: "decided" | "expired" | "cancelled" }) => Promise<unknown>;
+type Wake = (input: { companyId: string; agentId: string; issueId: string; decisionId: string; outcome: "decided" | "expired" | "cancelled"; requestedByActorType?: "agent"; requestedByActorId?: string }) => Promise<unknown>;
 export type DecisionServiceOptions = { wakeOriginAgent: Wake };
 const DAY = 86_400_000;
 
@@ -189,6 +191,7 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
   }
 
   async function createInStore(input: CreateInputWithSnapshots, dbOrTx: Db) {
+    if (input.metadata && (Object.hasOwn(input.metadata, "chiefRelay") || Object.hasOwn(input.metadata, "chiefRelayRunId"))) throw unprocessable("chiefRelay metadata is server-owned");
     if (input.idempotencyKey) {
       const lockKey = `decision-create:${input.companyId}:${input.idempotencyKey}`;
       await dbOrTx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
@@ -381,16 +384,53 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
     };
   }
 
+  function resolutionRelay(decision: typeof decisions.$inferSelect) {
+    return decision.decidedByUserId === null ? readChiefRelay(decision.metadata?.chiefRelay) : undefined;
+  }
+
+  function resolutionRelayRunId(decision: typeof decisions.$inferSelect): string | null {
+    return resolutionRelay(decision) && typeof decision.metadata?.chiefRelayRunId === "string" ? decision.metadata.chiefRelayRunId : null;
+  }
+
+  async function resolutionTransaction<T>(relay: ChiefRelay | undefined, runId: string | null | undefined, work: (store: Db, publications?: ActivityPublication[]) => Promise<T>): Promise<T> {
+    if (!relay) return work(db);
+    const publications: ActivityPublication[] = [];
+    const result = await db.transaction(async (tx) => {
+      await assertChiefRelayRunWriteAllowed(tx as unknown as Db, relay, runId);
+      return work(tx as unknown as Db, publications);
+    });
+    for (const publication of publications) publishActivity(publication);
+    return result;
+  }
+
+  function resolutionAuditActor(decision: typeof decisions.$inferSelect, userId: string | null) {
+    const relay = resolutionRelay(decision);
+    return relay
+      ? { actorType: "agent" as const, actorId: relay.agentId, agentId: relay.agentId, runId: resolutionRelayRunId(decision), responsibleUserIdOverride: null }
+      : { actorType: "system" as const, actorId: "decision-executor", agentId: decision.originAgentId,
+          runId: decision.originRunId, responsibleUserIdOverride: userId };
+  }
+
+  function assertRelaySubmitter(relay: ChiefRelay | undefined, userId: string | null, actor: AuthorizationActor, companyId: string) {
+    if (relay && (userId !== null || actor.type !== "agent" || actor.agentId !== relay.agentId || actor.companyId !== companyId || relay.companyId !== companyId)) {
+      throw forbidden("Chief relay submitter or company mismatch");
+    }
+    if (!relay && !userId) throw unprocessable("Decision resolution requires a submitter");
+  }
+
   async function effectAudit(tx: Db, decision: typeof decisions.$inferSelect, executionId: string, effect: DecisionEffect,
-    status: "executed" | "failed" | "skipped", decidedByUserId: string, originResponsibleUserId: string | null, details: Record<string, unknown>) {
-    return logActivity(tx, { companyId: decision.companyId, actorType: "system", actorId: "decision-executor", agentId: decision.originAgentId,
-      runId: decision.originRunId, responsibleUserIdOverride: decidedByUserId, action: `decision.effect_${status}`, entityType: "decision", entityId: decision.id,
+    status: "executed" | "failed" | "skipped", decidedByUserId: string | null, originResponsibleUserId: string | null, details: Record<string, unknown>) {
+    return logActivity(tx, { companyId: decision.companyId, ...resolutionAuditActor(decision, decidedByUserId), action: `decision.effect_${status}`, entityType: "decision", entityId: decision.id,
       details: { effectType: effect.type, targetIssueId: effect.targetIssueId, originIssueId: decision.originIssueId, originAgentId: decision.originAgentId,
-        chosenOptionId: decision.chosenOptionId, executionId, decidedByUserId, originResponsibleUserId, ...details } });
+        chosenOptionId: decision.chosenOptionId, executionId, decidedByUserId, originResponsibleUserId,
+        ...(resolutionRelay(decision) ? { chiefRelay: resolutionRelay(decision) } : {}), ...details } });
   }
 
   async function executeEffect(decision: typeof decisions.$inferSelect, effect: DecisionEffect, effectIndex: number,
-    userActor: AuthorizationActor, decidedByUserId: string, originResponsibleUserId: string | null) {
+    userActor: AuthorizationActor, decidedByUserId: string | null, originResponsibleUserId: string | null) {
+    const chiefRelay = resolutionRelay(decision);
+    const commentActor = chiefRelay ? { agentId: chiefRelay.agentId, runId: resolutionRelayRunId(decision) } : { userId: decidedByUserId! };
+    const mutationActor = chiefRelay ? { actorAgentId: chiefRelay.agentId, actorUserId: null, actorRunId: resolutionRelayRunId(decision) } : { actorUserId: decidedByUserId };
     const lockKey = `decision-effect:${decision.id}:${effectIndex}`;
     const recordFailure = async (reason: string, details: Record<string, unknown>) => db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
@@ -434,7 +474,13 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
           return finish("failed", "invalid_signed_cancellation_scope", { reason: "invalid_signed_cancellation_scope" });
         }
         const referencedIds = new Set([...directReferencedIds, ...(cancellationDescendantIds ?? [])]);
-        const referencedIssues = await tx.select().from(issues).where(and(eq(issues.companyId, decision.companyId), inArray(issues.id, [...referencedIds])));
+        const referencedQuery = tx.select().from(issues).where(and(eq(issues.companyId, decision.companyId), inArray(issues.id, [...referencedIds])));
+        // Match native task mutation's issue -> run lock order. Sorting also
+        // keeps multi-target relay effects from taking issue locks inversely.
+        const referencedIssues = chiefRelay
+          ? await referencedQuery.orderBy(asc(issues.id)).for("update")
+          : await referencedQuery;
+        if (chiefRelay) await assertChiefRelayRunWriteAllowed(tx as unknown as Db, chiefRelay, resolutionRelayRunId(decision));
         if (referencedIssues.length !== referencedIds.size) return finish("failed", "invalid_effect_reference", { reason: "invalid_effect_reference" });
         const target = referencedIssues.find((item) => item.id === effect.targetIssueId)!;
         const originActor: AuthorizationActor = { type: "agent", agentId: decision.originAgentId, companyId: decision.companyId,
@@ -442,7 +488,11 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
         const originAction = effect.type === "comment_on_issue" ? "issue:comment" : "issue:mutate";
         const originAccess = await Promise.all(referencedIssues.map((item) => authz.decide({ actor: originActor, action: originAction, resource: resource(item) })));
         let userAccess: { allowed: boolean; reason: string };
-        if (effect.type === "assign_issue" || (effect.type === "create_issue" && (effect.draft.assigneeAgentId || effect.draft.assigneeUserId))) {
+        if (chiefRelay?.companyId === decision.companyId) {
+          // Authenticated relay represents explicit board authority, not a board
+          // identity. The signed scope and origin-agent intersection still apply.
+          userAccess = { allowed: true, reason: "allow_authenticated_chief_relay" };
+        } else if (effect.type === "assign_issue" || (effect.type === "create_issue" && (effect.draft.assigneeAgentId || effect.draft.assigneeUserId))) {
           const assigneeAgentId = effect.type === "assign_issue" ? effect.assigneeAgentId : effect.draft.assigneeAgentId;
           const assigneeUserId = effect.type === "assign_issue" ? effect.assigneeUserId : effect.draft.assigneeUserId;
           const parentIssueId = effect.type === "create_issue" ? effect.draft.parentId ?? target.id : target.parentId;
@@ -468,17 +518,17 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
         const values = decision.inputValues ?? {};
         let result: Record<string, unknown>;
         if (effect.type === "comment_on_issue") {
-          const comment = await svc.addComment(target.id, interpolate(effect.bodyMarkdown, values), { userId: decidedByUserId }, undefined, tx);
+          const comment = await svc.addComment(target.id, interpolate(effect.bodyMarkdown, values), commentActor, undefined, tx);
           result = { commentId: comment.id };
         } else if (effect.type === "update_issue_status") {
           const updated = await svc.update(
             target.id,
-            { status: effect.status, actorUserId: decidedByUserId },
+            { status: effect.status, ...mutationActor },
             tx,
             postCommitActivityPublications,
             postCommitIssueActions,
           );
-          if (effect.comment) await svc.addComment(target.id, interpolate(effect.comment, values), { userId: decidedByUserId }, undefined, tx);
+          if (effect.comment) await svc.addComment(target.id, interpolate(effect.comment, values), commentActor, undefined, tx);
           result = { issueId: updated?.id, status: updated?.status };
         } else if (effect.type === "assign_issue") {
           const updated = await svc.update(
@@ -486,13 +536,13 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
             {
               assigneeAgentId: effect.assigneeAgentId ?? null,
               assigneeUserId: effect.assigneeUserId ?? null,
-              actorUserId: decidedByUserId,
+              ...mutationActor,
             },
             tx,
             postCommitActivityPublications,
             postCommitIssueActions,
           );
-          if (effect.comment) await svc.addComment(target.id, interpolate(effect.comment, values), { userId: decidedByUserId }, undefined, tx);
+          if (effect.comment) await svc.addComment(target.id, interpolate(effect.comment, values), commentActor, undefined, tx);
           result = { issueId: updated?.id };
         } else if (effect.type === "resolve_blocker") {
           const current = await tx.select({ id: issueRelations.issueId }).from(issueRelations).where(and(eq(issueRelations.companyId, decision.companyId), eq(issueRelations.relatedIssueId, target.id), eq(issueRelations.type, "blocks")));
@@ -500,7 +550,7 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
             target.id,
             {
               blockedByIssueIds: current.map((row) => row.id).filter((id) => !effect.removeBlockedByIssueIds.includes(id)),
-              actorUserId: decidedByUserId,
+              ...mutationActor,
             },
             tx,
             postCommitActivityPublications,
@@ -511,21 +561,21 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
           const draft = effect.draft;
           const created = await svc.create(decision.companyId, { title: draft.title, description: draft.description ?? null, parentId: draft.parentId ?? target.id,
             assigneeAgentId: draft.assigneeAgentId ?? null, assigneeUserId: draft.assigneeUserId ?? null, projectId: draft.projectId ?? target.projectId,
-            goalId: draft.goalId ?? null, blockedByIssueIds: draft.blockedByIssueIds ?? [], createdByUserId: decidedByUserId, actorRunId: decision.originRunId,
-            idempotencyKey: `decision-effect:${decision.id}:${effectIndex}` });
+            goalId: draft.goalId ?? null, blockedByIssueIds: draft.blockedByIssueIds ?? [], createdByUserId: decidedByUserId, createdByAgentId: chiefRelay?.agentId ?? null, actorRunId: chiefRelay ? resolutionRelayRunId(decision) : decision.originRunId,
+            idempotencyKey: `decision-effect:${decision.id}:${effectIndex}` }, chiefRelay ? tx : db);
           result = { issueId: created.id };
         } else {
           const cancelled = [target.id, ...cancellationDescendantIds!].reverse();
           for (const id of cancelled) {
             await svc.update(
               id,
-              { status: "cancelled", actorUserId: decidedByUserId },
+              { status: "cancelled", ...mutationActor },
               tx,
               postCommitActivityPublications,
               postCommitIssueActions,
             );
           }
-          await svc.addComment(target.id, interpolate(effect.reasonComment, values), { userId: decidedByUserId }, undefined, tx);
+          await svc.addComment(target.id, interpolate(effect.reasonComment, values), commentActor, undefined, tx);
           result = { cancelledIssueIds: cancelled };
         }
         const activity = await effectAudit(tx as unknown as Db, decision, execution.id, effect, "executed", decidedByUserId, originResponsibleUserId, result);
@@ -546,7 +596,8 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
 
   async function runEffects(decision: typeof decisions.$inferSelect, userActor: AuthorizationActor) {
     const option = decision.options.find((item) => item.id === decision.chosenOptionId);
-    if (!option || !decision.decidedByUserId) throw unprocessable("Stored decision outcome is invalid");
+    const chiefRelay = resolutionRelay(decision);
+    if (!option || (!decision.decidedByUserId && !chiefRelay)) throw unprocessable("Stored decision outcome is invalid");
     const run = await db.select({ responsibleUserId: heartbeatRuns.responsibleUserId }).from(heartbeatRuns).where(eq(heartbeatRuns.id, decision.originRunId)).then((rows) => rows[0] ?? null);
     const metadata = decision.metadata as Record<string, unknown>;
     if (metadata.kind === "attention_archive_proposal") {
@@ -585,6 +636,8 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
             originActor,
             decidingActor: userActor,
             decidedByUserId: decision.decidedByUserId,
+            chiefRelay,
+            actorRunId: resolutionRelayRunId(decision),
           });
         } catch (error) {
           const message = error instanceof Error ? error.message : "archive_proposal_failed";
@@ -619,7 +672,8 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
     // this acknowledgement can retry, while a crash before wakeup cannot lose
     // the continuation. Heartbeat wakeups coalesce concurrent queued work.
     await options.wakeOriginAgent({ companyId: decision.companyId, agentId: decision.originAgentId,
-      issueId: decision.originIssueId, decisionId: decision.id, outcome });
+      issueId: decision.originIssueId, decisionId: decision.id, outcome,
+      ...(resolutionRelay(decision) ? { requestedByActorType: "agent" as const, requestedByActorId: resolutionRelay(decision)!.agentId } : {}) });
     await db.update(decisions).set({
       metadata: sql`coalesce(${decisions.metadata}, '{}'::jsonb) || jsonb_build_object(
         'continuationPending', false,
@@ -635,11 +689,25 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
     return outcome(decision.id);
   }
 
-  async function decide(input: { id: string; optionId: string; inputValues?: Record<string, string>; idempotencyKey?: string | null; decidedByUserId: string;
-    userActor: AuthorizationActor; dismissed?: boolean; dismissReason?: string | null }) {
+  async function decide(input: { id: string; optionId: string; inputValues?: Record<string, string>; idempotencyKey?: string | null; decidedByUserId: string | null;
+    userActor: AuthorizationActor; chiefRelay?: ChiefRelay; dismissed?: boolean; dismissReason?: string | null }) {
     const current = await get(input.id); if (!current) throw notFound("Decision not found");
     const metadata = current.metadata as Record<string, unknown>;
+    const actorRunId = input.userActor.type === "agent" ? input.userActor.runId ?? null : null;
+    assertRelaySubmitter(input.chiefRelay, input.decidedByUserId, input.userActor, current.companyId);
     if (!verifyDecisionSpec(spec({ id: current.id, options: current.options, targetSnapshots: current.targetSnapshots as Record<string, Snapshot> }), current.signedSpec)) throw forbidden("Decision signature verification failed");
+    if (current.status === "decided" && (input.chiefRelay || resolutionRelay(current))) {
+      if (!input.chiefRelay || !sameChiefRelay(metadata.chiefRelay, input.chiefRelay)
+        || current.decidedByUserId !== null || current.chosenOptionId !== input.optionId
+        || !sameInputValues(current.inputValues ?? {}, input.inputValues ?? {})
+        || Boolean(metadata.dismissed) !== Boolean(input.dismissed)
+        || (metadata.dismissReason ?? null) !== (input.dismissReason ?? null)
+        || (metadata.decideIdempotencyKey ?? null) !== (input.idempotencyKey ?? null)) {
+        throw conflict("chief_relay_replay_mismatch");
+      }
+      await resolutionTransaction(input.chiefRelay, actorRunId, async () => undefined);
+      return resumeDecision(current, input.userActor);
+    }
     if (current.status === "decided" && input.idempotencyKey && metadata.decideIdempotencyKey === input.idempotencyKey) {
       if (current.decidedByUserId !== input.decidedByUserId) throw forbidden("Decision replay belongs to a different user");
       return resumeDecision(current, input.userActor);
@@ -664,18 +732,22 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
     if (!current.options.some((option) => option.id === input.optionId)) throw unprocessable("Unknown optionId");
     const values = input.inputValues ?? {};
     for (const field of current.inputs ?? []) { const value = values[field.id] ?? ""; if (field.required && !value.trim()) throw unprocessable(`Input ${field.id} is required`); if (field.maxLength && value.length > field.maxLength) throw unprocessable(`Input ${field.id} is too long`); }
-    const [claimed] = await db.update(decisions).set({ status: "decided", executionStatus: "running", chosenOptionId: input.optionId, inputValues: values,
-      decidedByUserId: input.decidedByUserId, decidedAt: new Date(), updatedAt: new Date(), metadata: { ...metadata,
-        decideIdempotencyKey: input.idempotencyKey ?? null,
-        ...(current.continuationPolicy === "wake_origin_agent" ? { continuationPending: true } : {}),
-        ...(input.dismissed ? { dismissed: true, dismissReason: input.dismissReason ?? null } : {}) } })
-      .where(and(eq(decisions.id, current.id), eq(decisions.status, "open"))).returning();
-    if (!claimed) throw conflict("decision_already_resolved", { code: "decision_already_resolved" });
-    const run = await db.select({ responsibleUserId: heartbeatRuns.responsibleUserId }).from(heartbeatRuns).where(eq(heartbeatRuns.id, claimed.originRunId)).then((rows) => rows[0] ?? null);
-    await logActivity(db, { companyId: claimed.companyId, actorType: "system", actorId: "decision-executor", agentId: claimed.originAgentId, runId: claimed.originRunId,
-      responsibleUserIdOverride: input.decidedByUserId, action: input.dismissed ? "decision.dismissed" : "decision.decided", entityType: "decision", entityId: claimed.id,
-      details: { chosenOptionId: input.optionId, decidedByUserId: input.decidedByUserId, originResponsibleUserId: run?.responsibleUserId ?? null,
-        ...(input.dismissed ? { dismissed: true, dismissReason: input.dismissReason ?? null } : {}) } });
+    const claimed = await resolutionTransaction(input.chiefRelay, actorRunId, async (store, publications) => {
+      const [claimed] = await store.update(decisions).set({ status: "decided", executionStatus: "running", chosenOptionId: input.optionId, inputValues: values,
+        decidedByUserId: input.decidedByUserId, decidedAt: new Date(), updatedAt: new Date(), metadata: { ...metadata,
+          decideIdempotencyKey: input.idempotencyKey ?? null,
+          ...(input.chiefRelay ? { chiefRelay: input.chiefRelay, chiefRelayRunId: actorRunId } : {}),
+          ...(current.continuationPolicy === "wake_origin_agent" ? { continuationPending: true } : {}),
+          ...(input.dismissed ? { dismissed: true, dismissReason: input.dismissReason ?? null } : {}) } })
+        .where(and(eq(decisions.id, current.id), eq(decisions.status, "open"))).returning();
+      if (!claimed) throw conflict("decision_already_resolved", { code: "decision_already_resolved" });
+      const run = await store.select({ responsibleUserId: heartbeatRuns.responsibleUserId }).from(heartbeatRuns).where(eq(heartbeatRuns.id, claimed.originRunId)).then((rows) => rows[0] ?? null);
+      await logActivity(store, { companyId: claimed.companyId, ...resolutionAuditActor(claimed, input.decidedByUserId), action: input.dismissed ? "decision.dismissed" : "decision.decided", entityType: "decision", entityId: claimed.id,
+        details: { chosenOptionId: input.optionId, decidedByUserId: input.decidedByUserId, originResponsibleUserId: run?.responsibleUserId ?? null,
+          ...(input.chiefRelay ? { chiefRelay: input.chiefRelay } : {}),
+          ...(input.dismissed ? { dismissed: true, dismissReason: input.dismissReason ?? null } : {}) } }, publications);
+      return claimed;
+    });
     return resumeDecision(claimed, input.userActor);
   }
 
@@ -694,18 +766,31 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
     return (await get(id))!;
   }
 
-  async function dismiss(id: string, userId: string, userActor: AuthorizationActor, reason?: string | null) {
+  async function dismiss(id: string, userId: string | null, userActor: AuthorizationActor, reason?: string | null, chiefRelay?: ChiefRelay) {
     const current = await get(id); if (!current) throw notFound("Decision not found");
     if (!verifyDecisionSpec(spec({ id: current.id, options: current.options, targetSnapshots: current.targetSnapshots as Record<string, Snapshot> }), current.signedSpec)) throw forbidden("Decision signature verification failed");
+    assertRelaySubmitter(chiefRelay, userId, userActor, current.companyId);
+    const actorRunId = userActor.type === "agent" ? userActor.runId ?? null : null;
+    if (current.status === "decided" && (chiefRelay || resolutionRelay(current))) {
+      if (!chiefRelay || current.decidedByUserId !== null || !sameChiefRelay(current.metadata?.chiefRelay, chiefRelay)
+        || !current.metadata?.dismissed || (current.metadata.dismissReason ?? null) !== (reason ?? null)) {
+        throw conflict("chief_relay_replay_mismatch");
+      }
+      await resolutionTransaction(chiefRelay, actorRunId, async () => undefined);
+      return resumeDecision(current, userActor);
+    }
     const empty = current.options.find((option) => option.effects.length === 0);
-    if (empty) return decide({ id, optionId: empty.id, decidedByUserId: userId, userActor, dismissed: true, dismissReason: reason });
-    const [updated] = await db.update(decisions).set({ status: "decided", executionStatus: "succeeded", chosenOptionId: "dismissed", decidedByUserId: userId,
-      decidedAt: new Date(), updatedAt: new Date(), metadata: { ...current.metadata, dismissed: true, dismissReason: reason ?? null,
-        ...(current.continuationPolicy === "wake_origin_agent" ? { continuationPending: true } : {}) } }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning();
-    if (!updated) throw conflict("decision_already_resolved", { code: "decision_already_resolved" });
-    await logActivity(db, { companyId: updated.companyId, actorType: "system", actorId: "decision-executor", agentId: updated.originAgentId,
-      runId: updated.originRunId, responsibleUserIdOverride: userId, action: "decision.dismissed", entityType: "decision", entityId: updated.id,
-      details: { chosenOptionId: "dismissed", decidedByUserId: userId, dismissed: true } });
+    if (empty) return decide({ id, optionId: empty.id, decidedByUserId: userId, userActor, chiefRelay, dismissed: true, dismissReason: reason });
+    const updated = await resolutionTransaction(chiefRelay, actorRunId, async (store, publications) => {
+      const [updated] = await store.update(decisions).set({ status: "decided", executionStatus: "succeeded", chosenOptionId: "dismissed", decidedByUserId: userId,
+        decidedAt: new Date(), updatedAt: new Date(), metadata: { ...current.metadata, dismissed: true, dismissReason: reason ?? null,
+          ...(chiefRelay ? { chiefRelay, chiefRelayRunId: actorRunId } : {}),
+          ...(current.continuationPolicy === "wake_origin_agent" ? { continuationPending: true } : {}) } }).where(and(eq(decisions.id, id), eq(decisions.status, "open"))).returning();
+      if (!updated) throw conflict("decision_already_resolved", { code: "decision_already_resolved" });
+      await logActivity(store, { companyId: updated.companyId, ...resolutionAuditActor(updated, userId), action: "decision.dismissed", entityType: "decision", entityId: updated.id,
+        details: { chosenOptionId: "dismissed", decidedByUserId: userId, dismissed: true, ...(chiefRelay ? { chiefRelay } : {}) } }, publications);
+      return updated;
+    });
     await deliverContinuation(updated, "decided");
     return outcome(id);
   }
@@ -733,8 +818,12 @@ export function decisionService(db: Db, options: DecisionServiceOptions) {
       .orderBy(asc(decisions.updatedAt)).limit(batchSize);
     let resumed = 0;
     for (const decision of runningRows) {
-      if (!decision.decidedByUserId) continue;
-      const recovered = await runEffects(decision, await recoveryActor(decision.companyId, decision.decidedByUserId));
+      const relay = resolutionRelay(decision);
+      if (!decision.decidedByUserId && !relay) continue;
+      const actor: AuthorizationActor = relay
+        ? { type: "agent", agentId: relay.agentId, companyId: decision.companyId, runId: resolutionRelayRunId(decision), source: "agent_key" }
+        : await recoveryActor(decision.companyId, decision.decidedByUserId!);
+      const recovered = await runEffects(decision, actor);
       if (recovered.executionStatus === "running") continue;
       resumed += 1;
       await deliverContinuation(recovered, "decided");

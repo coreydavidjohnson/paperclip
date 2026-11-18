@@ -1,3 +1,5 @@
+import { assertChiefRelayRunWriteAllowed } from "../lib/chief-relay-run.js";
+import type { ChiefRelay } from "./chief-relay-types.js";
 import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -279,7 +281,9 @@ export function decisionRetentionService(
     manifest: AttentionArchiveManifestEntry[];
     originActor: AuthorizationActor;
     decidingActor: AuthorizationActor;
-    decidedByUserId: string;
+    decidedByUserId: string | null;
+    chiefRelay?: ChiefRelay;
+    actorRunId?: string | null;
   }) {
     const keys = input.manifest.map((entry) => sourceKey(entry.sourceKind, entry.sourceId));
     if (new Set(keys).size !== keys.length || input.manifest.some((entry) => entry.companyId !== input.companyId)) {
@@ -287,10 +291,11 @@ export function decisionRetentionService(
     }
     return db.transaction(async (tx) => {
       const txDb = tx as unknown as Db;
+      if (input.chiefRelay) await assertChiefRelayRunWriteAllowed(txDb, input.chiefRelay, input.actorRunId);
       for (const entry of input.manifest) {
         const kind = entry.sourceKind as AttentionSourceKind;
         if (!(await canReadDecisionSource(txDb, input.originActor, input.companyId, kind, entry.sourceId))
-          || !(await canReadDecisionSource(txDb, input.decidingActor, input.companyId, kind, entry.sourceId))) {
+          || (!(input.chiefRelay?.companyId === input.companyId) && !(await canReadDecisionSource(txDb, input.decidingActor, input.companyId, kind, entry.sourceId)))) {
           throw conflict("archive_proposal_authority_changed", { code: "archive_proposal_authority_changed" });
         }
         await txDb.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`decision-retention:${input.companyId}:${entry.sourceKind}:${entry.sourceId}`}, 0))`);
@@ -308,10 +313,10 @@ export function decisionRetentionService(
         const archived = await txDb.update(decisionRetention).set({
           archivedAt: now,
           archivedReason: "accepted_proposal",
-          archivedByType: "user",
-          archivedByAgentId: null,
+          archivedByType: input.chiefRelay ? "agent" : "user",
+          archivedByAgentId: input.chiefRelay?.agentId ?? null,
           archivedByUserId: input.decidedByUserId,
-          archivedByRunId: null,
+          archivedByRunId: input.chiefRelay ? input.actorRunId ?? null : null,
           archiveVersion: sql`${decisionRetention.archiveVersion} + 1`,
           version: sql`${decisionRetention.version} + 1`,
           updatedAt: now,
@@ -327,13 +332,15 @@ export function decisionRetentionService(
         }
         await logActivity(txDb, {
           companyId: input.companyId,
-          actorType: "system",
-          actorId: "decision-archive-proposal",
+          actorType: input.chiefRelay ? "agent" : "system",
+          actorId: input.chiefRelay?.agentId ?? "decision-archive-proposal",
+          agentId: input.chiefRelay?.agentId ?? null,
+          runId: input.chiefRelay ? input.actorRunId ?? null : null,
           responsibleUserIdOverride: input.decidedByUserId,
           action: "decision_retention.archived",
           entityType: "attention_source",
           entityId: entry.sourceId,
-          details: { sourceKind: entry.sourceKind, reason: "accepted_proposal" },
+          details: { sourceKind: entry.sourceKind, reason: "accepted_proposal", ...(input.chiefRelay ? { chiefRelay: input.chiefRelay } : {}) },
         });
       }
       return { archived: input.manifest.length };

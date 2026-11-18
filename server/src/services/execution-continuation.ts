@@ -1,3 +1,4 @@
+import { readChiefRelay } from "./chief-relay-types.js";
 import { boundExecutionContinuation } from "./continuation-budget.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -109,6 +110,74 @@ export function projectHumanInteractionResponse(row: {
   } else return null;
   return { id: row.id, kind: row.kind, status: row.status, resolvedByUserId: row.resolvedByUserId,
     resolvedAt: row.resolvedAt.toISOString(), result: response };
+}
+
+/** Read only native, server-owned stored proof, never wake payload assertions.
+ * Resolver attribution must agree with the authenticated Chief proof. A bound
+ * run is allowed, but mixed human attribution must never gain relay authority.
+ */
+export function projectRelayedInteractionResponse(row: {
+  id: string; companyId: string; kind: string; status: string; result: unknown;
+  payload?: unknown;
+  resolvedByUserId: string | null; resolvedByAgentId: string | null;
+  resolvedByRunId: string | null; resolvedAt: Date | null;
+}): NonNullable<ExecutionContinuationEnvelope["relayedResponses"]>[number] | null {
+  const result = object(row.result);
+  // A verdict submission's top proof belongs only to that submission, not to
+  // the other winning items or the whole card. Project its persisted items below.
+  if (row.kind === "request_item_verdicts" && result.outcome === "resolved") return null;
+  const proof = readChiefRelay(result.chiefRelay);
+  if (!proof || proof.companyId !== row.companyId || row.resolvedByUserId !== null ||
+    row.resolvedByAgentId !== proof.agentId || !row.resolvedAt ||
+    !["accepted", "rejected", "answered", "cancelled"].includes(row.status)) return null;
+  const { chiefRelay: _proof, ...nativeResult } = result;
+  return {
+    id: row.id, kind: row.kind, status: row.status,
+    resolvedByAgentId: proof.agentId, resolvedByRunId: row.resolvedByRunId,
+    resolvedAt: row.resolvedAt.toISOString(), representedUserId: proof.representedUserId,
+    sourceSessionId: proof.sourceSessionId, sourceMessageId: proof.sourceMessageId,
+    exactQuote: proof.exactQuote, scope: proof.scope, result: nativeResult,
+  };
+}
+
+/** Item winners retain their own native proof across partial submissions.
+ * Composite record IDs make edits/removals independent from the containing card;
+ * an item stays answered when a later submission completes the rest of the card.
+ */
+export function projectRelayedInteractionResponses(
+  row: Parameters<typeof projectRelayedInteractionResponse>[0],
+): NonNullable<ExecutionContinuationEnvelope["relayedResponses"]> {
+  const result = object(row.result);
+  if (row.kind !== "request_item_verdicts" || result.outcome !== "resolved") {
+    const response = projectRelayedInteractionResponse(row);
+    return response ? [response] : [];
+  }
+  if (!["pending", "answered"].includes(row.status) ||
+    result.complete !== (row.status === "answered") || !Array.isArray(result.items)) return [];
+  const payloadItems = object(row.payload).items;
+  if (!Array.isArray(payloadItems)) return [];
+  const currentItemIds = new Set(payloadItems.map(value => string(object(value).id)));
+  const items = result.items.map(object);
+  return items.flatMap(item => {
+    const itemId = string(item.id);
+    const proof = readChiefRelay(item.chiefRelay);
+    const resolvedAt = typeof item.resolvedAt === "string" || item.resolvedAt instanceof Date
+      ? new Date(item.resolvedAt) : null;
+    if (!itemId || !currentItemIds.has(itemId) || items.filter(other => other.id === itemId).length !== 1 ||
+      typeof item.verdict !== "string" || !["approve", "reject", "defer"].includes(item.verdict) ||
+      !proof || proof.companyId !== row.companyId || item.resolvedByUserId != null ||
+      item.resolvedByAgentId !== proof.agentId || !resolvedAt || !Number.isFinite(resolvedAt.getTime()) ||
+      (item.resolvedByRunId != null && !string(item.resolvedByRunId))) return [];
+    const { chiefRelay: _proof, ...nativeResult } = item;
+    return [{
+      id: `${row.id}:item:${encodeURIComponent(itemId)}`, interactionId: row.id, itemId,
+      kind: row.kind, status: "answered", resolvedByAgentId: proof.agentId,
+      resolvedByRunId: string(item.resolvedByRunId), resolvedAt: resolvedAt.toISOString(),
+      representedUserId: proof.representedUserId, sourceSessionId: proof.sourceSessionId,
+      sourceMessageId: proof.sourceMessageId, exactQuote: proof.exactQuote, scope: proof.scope,
+      result: nativeResult,
+    }];
+  });
 }
 
 /** Also retain user direction delivered after the source run's initial wake. */
@@ -301,6 +370,7 @@ export async function buildExecutionContinuation(input: {
     const response = projectHumanInteractionResponse(row);
     return response ? [response] : [];
   });
+  const relayedResponses = interactions.flatMap(projectRelayedInteractionResponses);
   const interactionOutcomes = [...interactions
     .filter((row) => row.status !== "pending")
     .map((row) => ({ id: row.id, kind: row.kind, status: row.status, result: row.result })),
@@ -310,6 +380,7 @@ export async function buildExecutionContinuation(input: {
       ? {
           baseRunId: input.previousContextRunId,
           humanResponses: interactionRecordDelta(priorEnvelope.humanResponses, humanResponses),
+          relayedResponses: interactionRecordDelta(priorEnvelope.relayedResponses, relayedResponses),
           interactionOutcomes: interactionRecordDelta(priorEnvelope.interactionOutcomes, interactionOutcomes),
           messages: messages.filter(
             (message) =>
@@ -466,6 +537,7 @@ export async function buildExecutionContinuation(input: {
     objectiveSource,
     messages,
     humanResponses,
+    relayedResponses,
     interactionOutcomes,
     // Low-trust evidence only: renderPaperclipWakePrompt removes completedWork
     // from requestContext and encodes it in the fenced, non-authoritative

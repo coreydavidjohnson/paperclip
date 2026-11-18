@@ -1,3 +1,4 @@
+import type { ChiefRelay } from "../../services/chief-relay-types.js";
 import { hireApprovalService as approvalRecords, type HireDecisionTarget } from "./adapters/approvals.js";
 import { agents } from "@paperclipai/db";
 import { and, asc, eq, gt, inArray } from "drizzle-orm";
@@ -41,8 +42,8 @@ export function createAgentLifecycle(db: Db, effects: LifecycleEffects) {
     if (result) scheduleAgentLifecycle(db, id);
     return result ? records.getById(id) : null;
   }
-  async function decideHire(target: HireDecisionTarget, decision: "approved" | "rejected", userId: string, note?: string | null) {
-    const result = await approvalRecords(db, effects).decide(target, decision, userId, note);
+  async function decideHire(target: HireDecisionTarget, decision: "approved" | "rejected", userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) {
+    const result = await approvalRecords(db, effects).decide(target, decision, userId, note, chiefRelay, actorRunId);
     if (result?.hireApprovedAgentId) scheduleAgentLifecycle(db, result.hireApprovedAgentId);
     return result;
   }
@@ -59,8 +60,8 @@ export function createAgentLifecycle(db: Db, effects: LifecycleEffects) {
       scheduleAgentLifecycle(db, agent.id);
       return agent;
     },
-    approveHire: (target: HireDecisionTarget, userId = "board", note?: string | null) => decideHire(target, "approved", userId, note),
-    rejectHire: (target: HireDecisionTarget, userId = "board", note?: string | null) => decideHire(target, "rejected", userId, note),
+    approveHire: (target: HireDecisionTarget, userId: string | null = "board", note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) => decideHire(target, "approved", userId, note, chiefRelay, actorRunId),
+    rejectHire: (target: HireDecisionTarget, userId: string | null = "board", note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null) => decideHire(target, "rejected", userId, note, chiefRelay, actorRunId),
     async updateConfiguration(id: string, data: AgentConfigurationPatch, options?: UpdateAgentOptions) {
       const existing = await records.getById(id);
       if (!existing) return null;

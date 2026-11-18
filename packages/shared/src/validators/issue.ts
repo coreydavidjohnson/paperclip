@@ -1175,8 +1175,19 @@ export const connectionIntentPayloadSchema = z
   })
   .strict();
 
+// Persisted delegated answer evidence. This is an agent attestation, never a
+// verified human turn. The server supplies agent/company/represented-user ids.
+export const chiefRelayProofSchema = z.object({
+  agentId: z.string().guid(), companyId: z.string().guid(),
+  representedUserId: z.string().min(1).max(255),
+  sourceSessionId: z.string().min(1).max(160), sourceMessageId: z.string().min(1).max(160),
+  exactQuote: z.string().min(1).max(20000), scope: z.string().min(1).max(4000),
+  idempotencyKey: z.string().min(1).max(160), requestFingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
 export const connectionIntentResultSchema = z
   .object({
+    chiefRelay: chiefRelayProofSchema.optional(),
     version: z.literal(1),
     instruction: z.string().max(4000).optional(),
     outcome: z.enum(["connected", "declined", "superseded", "expired"]),
@@ -1273,6 +1284,7 @@ export const suggestTasksResultCreatedTaskSchema = z.object({
 });
 
 export const suggestTasksResultSchema = z.object({
+    chiefRelay: chiefRelayProofSchema.optional(),
   version: z.literal(1),
   outcome: z
     .enum(["skipped", "withdrawn", "issue_closed", "addressee_deleted"])
@@ -1505,6 +1517,7 @@ export const askUserQuestionsAnswerSchema = z.object({
 });
 
 export const askUserQuestionsResultSchema = z.object({
+    chiefRelay: chiefRelayProofSchema.optional(),
   version: z.literal(1),
   outcome: z
     .enum(["skipped", "withdrawn", "issue_closed", "addressee_deleted"])
@@ -1756,6 +1769,7 @@ export const requestConfirmationSecretProposalResultSchema = z.object({
 });
 
 export const requestConfirmationResultSchema = z.object({
+    chiefRelay: chiefRelayProofSchema.optional(),
   version: z.literal(1),
   outcome: z.enum([
     "accepted",
@@ -1895,6 +1909,7 @@ export const requestItemVerdictsPayloadSchema = z
 
 export const requestItemVerdictsResultItemSchema = z
   .object({
+    chiefRelay: chiefRelayProofSchema.optional(),
     id: z.string().trim().min(1).max(120),
     verdict: requestItemVerdictValueSchema,
     reason: z.string().trim().max(4000).nullable().optional(),
@@ -1912,7 +1927,7 @@ export const requestItemVerdictsResultItemSchema = z
         path: ["resolvedByUserId"],
       });
     }
-    if (value.resolvedByAgentId && !value.resolvedByRunId) {
+    if (value.resolvedByAgentId && !value.resolvedByRunId && value.chiefRelay?.agentId !== value.resolvedByAgentId) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         message: "resolvedByRunId is required for an agent resolver",
@@ -1923,6 +1938,7 @@ export const requestItemVerdictsResultItemSchema = z
 
 export const requestItemVerdictsResultSchema = z
   .object({
+    chiefRelay: chiefRelayProofSchema.optional(),
     version: z.literal(1),
     outcome: z.enum([
       "resolved",

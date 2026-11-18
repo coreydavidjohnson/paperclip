@@ -144,6 +144,7 @@ import {
 } from "./tool-access-policy.js";
 import { toolDiscoveryScheduler, ToolDiscoveryBusyError } from "./tool-discovery-scheduler.js";
 import { commitToolActionReview } from "./tool-action-review.js";
+import { readChiefRelay, type ChiefRelay } from "./chief-relay-types.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import {
   createToolRuntimeSupervisor,
@@ -9678,9 +9679,12 @@ export function createToolGatewayService(
       issueId?: string;
       interactionId?: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; runId?: string | null; chiefRelay?: ChiefRelay };
     }) {
-      if (input.actor.agentId)
+      const relay = readChiefRelay(input.actor.chiefRelay);
+      if (input.actor.chiefRelay && (!relay || !input.actor.agentId || input.actor.userId || relay.agentId !== input.actor.agentId || relay.companyId !== input.companyId))
+        throw new ToolGatewayHttpError(403, "Chief relay does not match the tool review actor or company", "chief_relay_mismatch");
+      if (input.actor.agentId && !relay)
         throw new ToolGatewayHttpError(
           403,
           "Only a human can resolve a tool review",
@@ -9952,8 +9956,13 @@ export function createToolGatewayService(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; runId?: string | null; chiefRelay?: ChiefRelay };
     }) {
+      const relay = readChiefRelay(input.actor.chiefRelay);
+      if (input.actor.chiefRelay && (!relay || !input.actor.agentId || input.actor.userId || relay.agentId !== input.actor.agentId || relay.companyId !== input.companyId))
+        throw new ToolGatewayHttpError(403, "Chief relay does not match the tool review actor or company", "chief_relay_mismatch");
+      if (input.actor.agentId && !relay)
+        throw new ToolGatewayHttpError(403, "Only a human can resolve a tool review", "human_review_required");
       const updated = await commitToolActionReview(db, {
         ...input,
         decision: "rejected",

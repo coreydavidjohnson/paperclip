@@ -9,6 +9,8 @@ import {
   type Db,
 } from "@paperclipai/db";
 import { conflict, forbidden, notFound } from "../errors.js";
+import { assertChiefRelayRunWriteAllowed } from "../lib/chief-relay-run.js";
+import { readChiefRelay, sameChiefRelay, type ChiefRelay } from "./chief-relay-types.js";
 import { assertIssueThreadInteractionResolverAudience } from "./issue-thread-interaction-resolution.js";
 import { emitConnectionInvoked } from "./connector-telemetry.js";
 import { toolAccessPolicyService } from "./tool-access-policy.js";
@@ -29,11 +31,19 @@ export async function commitToolActionReview(
     decision: "approved" | "rejected";
     rememberAction?: boolean;
     reason?: string;
-    actor: { agentId?: string | null; userId?: string | null };
+    actor: { agentId?: string | null; userId?: string | null; runId?: string | null; chiefRelay?: ChiefRelay };
   },
 ) {
-  if (input.actor.agentId)
+  const relay = readChiefRelay(input.actor.chiefRelay);
+  if (input.actor.chiefRelay && (!relay || !input.actor.agentId || input.actor.userId
+    || relay.agentId !== input.actor.agentId || relay.companyId !== input.companyId)) {
+    throw forbidden("Chief relay does not match the tool review actor or company");
+  }
+  if (input.actor.agentId && !relay)
     throw forbidden("Only a human can resolve a tool review");
+  const userId = relay ? null : input.actor.userId ?? "board";
+  const agentId = relay ? relay.agentId : null;
+  const runId = relay ? input.actor.runId ?? null : null;
   const [source] = await db
     .select()
     .from(toolActionRequests)
@@ -45,6 +55,8 @@ export async function commitToolActionReview(
     )
     .limit(1);
   if (!source) throw notFound("Tool action request not found");
+  if (relay && (!source.issueId || !source.interactionId))
+    throw conflict("Chief relay requires a linked tool review interaction");
   if ((input.issueId || input.interactionId) && (!input.issueId || !input.interactionId || source.issueId !== input.issueId || source.interactionId !== input.interactionId)) {
     throw conflict("Tool action request does not belong to this interaction");
   }
@@ -62,6 +74,9 @@ export async function commitToolActionReview(
           )
           .for("update")
       : [];
+    // Match task mutation lock ordering: issue, then actual submitting run.
+    // Stop updates the same run row, so revocation and this decision serialize.
+    if (relay) await assertChiefRelayRunWriteAllowed(tx as unknown as Db, relay, runId);
     const [interaction] = source.interactionId
       ? await tx
           .select()
@@ -92,8 +107,13 @@ export async function commitToolActionReview(
             current.status,
           )) ||
         current.status === input.decision
-      )
+      ) {
+        if (relay && (!interaction || interaction.resolvedByAgentId !== agentId
+          || interaction.resolvedByUserId !== null || !sameChiefRelay((interaction.result as unknown as Record<string, unknown> | null)?.chiefRelay, relay))) {
+          throw conflict("This review was resolved by a different decision");
+        }
         return current;
+      }
       throw conflict("This review has already been resolved");
     }
     if (
@@ -132,7 +152,9 @@ export async function commitToolActionReview(
       )
         throw conflict("Tool review context does not match");
       assertIssueThreadInteractionResolverAudience({
-        actor: { type: "user", userId: input.actor.userId ?? "board" },
+        actor: relay
+          ? { type: "chief_relay", agentId: relay.agentId, representedUserId: relay.representedUserId, runId }
+          : { type: "user", userId: userId! },
         interaction,
         governedAction: true,
       });
@@ -144,8 +166,8 @@ export async function commitToolActionReview(
       .update(toolActionRequests)
       .set({
         status: input.decision,
-        resolvedByUserId: input.actor.userId ?? "board",
-        decidedByUserId: input.actor.userId ?? "board",
+        resolvedByUserId: userId,
+        decidedByUserId: userId,
         decidedAt: now,
         resolvedAt: now,
         updatedAt: now,
@@ -161,7 +183,7 @@ export async function commitToolActionReview(
         companyId: input.companyId,
         actionRequestId: current.id,
         body: { approvalThreshold: 1, priority: 40, argumentMode: "action" },
-        actor: { userId: input.actor.userId ?? "board" },
+        actor: { agentId, userId, ...(relay ? { chiefRelay: relay } : {}) },
       });
     }
     await tx
@@ -173,7 +195,7 @@ export async function commitToolActionReview(
               status: "denied" as const,
               completedAt: now,
               errorCode: "action_declined",
-              errorMessage: "The human declined this action.",
+              errorMessage: relay ? "Chief relayed the instruction to decline this action." : "The human declined this action.",
             }
           : {}),
         updatedAt: now,
@@ -189,7 +211,9 @@ export async function commitToolActionReview(
         .update(issueThreadInteractions)
         .set({
           status: input.decision === "approved" ? "accepted" : "rejected",
-          resolvedByUserId: input.actor.userId ?? "board",
+          resolvedByAgentId: agentId,
+          resolvedByRunId: runId,
+          resolvedByUserId: userId,
           resolvedAt: now,
           updatedAt: now,
           result:
@@ -197,6 +221,7 @@ export async function commitToolActionReview(
               ? {
                   version: 1,
                   outcome: "accepted",
+                  ...(relay ? { chiefRelay: relay } : {}),
                   toolAction: {
                     version: 1,
                     status: "approved",
@@ -204,7 +229,7 @@ export async function commitToolActionReview(
                     updatedAt: now.toISOString(),
                   },
                 }
-              : { version: 1, outcome: "rejected", reason: input.reason },
+              : { version: 1, outcome: "rejected", reason: input.reason, ...(relay ? { chiefRelay: relay } : {}) },
         })
         .where(eq(issueThreadInteractions.id, interaction.id));
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.toolAction);
@@ -221,8 +246,10 @@ export async function commitToolActionReview(
         tx as unknown as Db,
         {
           companyId: input.companyId,
-          actorType: "user",
-          actorId: input.actor.userId ?? "board",
+          actorType: relay ? "agent" : "user",
+          actorId: agentId ?? userId!,
+          agentId,
+          runId,
           action:
             input.decision === "approved"
               ? "issue.thread_interaction_accepted"

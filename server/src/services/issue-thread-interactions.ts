@@ -1,3 +1,5 @@
+import { assertChiefRelayRunWriteAllowed } from "../lib/chief-relay-run.js";
+import { sameChiefRelay } from "./chief-relay-types.js";
 import { normalizeEscapedLineBreaks } from "@paperclipai/shared/validators/text";
 import { notifyDeliveryWork, DELIVERY_QUEUES } from "./delivery-work-notifications.js";
 import { activeIssueInteractionCondition, historicalQuestionCondition } from "./issue-question-context.js";
@@ -145,6 +147,7 @@ export { extractGitHubPullRequestReferences } from "./github-pull-request-merge.
 export type { GitHubPullRequestReference } from "./github-pull-request-merge.js";
 
 type InteractionActor = {
+  chiefRelay?: import("./chief-relay-types.js").ChiefRelay;
   identityContextId?: string | null;
   agentId?: string | null;
   runId?: string | null;
@@ -163,7 +166,8 @@ async function assertInteractionRunWriteAllowed(tx: Db, issue: { id: string; com
   // Keep the same issue -> run lock order as task mutation and checkout.
   await tx.select({ id: issues.id }).from(issues)
     .where(and(eq(issues.id, issue.id), eq(issues.companyId, issue.companyId))).for("update");
-  await assertAgentRunWriteAllowed(tx, issue.companyId, actor);
+  if (actor.chiefRelay) await assertChiefRelayRunWriteAllowed(tx, actor.chiefRelay, actor.runId);
+  else await assertAgentRunWriteAllowed(tx, issue.companyId, actor);
 }
 
 type CreateInteractionOptions = {
@@ -451,6 +455,10 @@ export function resolveInteractionPolicy(args: {
 function resolverActor(actor: InteractionActor) {
   if (actor.systemId)
     return { type: "system" as const, systemId: actor.systemId };
+  if (actor.agentId && actor.chiefRelay?.agentId === actor.agentId) {
+    return { type: "chief_relay" as const, agentId: actor.agentId,
+      representedUserId: actor.chiefRelay.representedUserId, runId: actor.runId };
+  }
   if (actor.agentId) {
     return {
       type: "agent" as const,
@@ -468,6 +476,15 @@ function assertInteractionResolutionAllowed(
   current: IssueThreadInteractionRow,
   actor: InteractionActor,
 ) {
+  if (actor.chiefRelay) {
+    const result = current.result as { chiefRelay?: import("./chief-relay-types.js").ChiefRelay;
+      items?: Array<{ chiefRelay?: import("./chief-relay-types.js").ChiefRelay }> } | null;
+    const proofs = [result?.chiefRelay, ...(result?.items ?? []).map(item => item.chiefRelay)].filter(Boolean);
+    if (proofs.some(proof => proof?.idempotencyKey === actor.chiefRelay!.idempotencyKey
+      && !sameChiefRelay(proof, actor.chiefRelay!))) throw conflict("Relay key already used for a different answer");
+    if (current.status !== "pending" && !proofs.some(proof => sameChiefRelay(proof, actor.chiefRelay!)))
+      throw conflict("This card already has a different outcome");
+  }
   return assertIssueThreadInteractionResolverAudience({
     actor: resolverActor(actor),
     interaction: current,
@@ -514,7 +531,7 @@ async function assertRequestConfirmationResolutionAllowedUnderLock(
     (await isIssueReviewVerdictInteraction(tx, { issue, interaction }));
 
   assertInteractionResolutionAllowed(interaction, actor);
-  if (actor.agentId && isNativeCompletionReview(interaction)) {
+  if (actor.agentId && !actor.chiefRelay && isNativeCompletionReview(interaction)) {
     const target = (interaction.payload as { target?: { revisionId?: string } }).target;
     if (!actor.runId || !await getNativeReviewAssignment(tx, {
       companyId: issue.companyId, issueId: issue.id, agentId: actor.agentId,
@@ -525,7 +542,9 @@ async function assertRequestConfirmationResolutionAllowedUnderLock(
   }
   if (!isReviewVerdict) return;
 
-  const verdictActor = actor.agentId
+  const verdictActor = actor.chiefRelay
+    ? { type: "user" as const, id: actor.chiefRelay.representedUserId }
+    : actor.agentId
     ? { type: "agent" as const, id: actor.agentId }
     : actor.userId
       ? { type: "user" as const, id: actor.userId }
@@ -827,7 +846,7 @@ function shouldReturnAcceptedConfirmationToCreatorAgent(args: {
 }) {
   if (!isRequestConfirmationLikeKind(args.current.kind)) return false;
   if (!args.current.createdByAgentId) return false;
-  if (!args.actor.userId) return false;
+  if (!args.actor.userId && !args.actor.chiefRelay) return false;
   if (isTerminalIssueStatus(args.issue.status)) return false;
   if (args.issue.assigneeAgentId) {
     return (
@@ -1646,6 +1665,7 @@ function resolveRequestItemVerdictSubmissions(args: {
       ...(args.actor.userId ? { resolvedByUserId: args.actor.userId } : {}),
       ...(args.actor.agentId ? { resolvedByAgentId: args.actor.agentId } : {}),
       ...(args.actor.runId ? { resolvedByRunId: args.actor.runId } : {}),
+      ...(args.actor.chiefRelay ? { chiefRelay: args.actor.chiefRelay } : {}),
       resolvedAt: args.now,
     });
     newlyResolvedItemIds.push(submitted.id);
@@ -2242,6 +2262,7 @@ export function issueThreadInteractionService(
         .set({
           status: "accepted",
           result: {
+            ...(args.actor.chiefRelay ? { chiefRelay: args.actor.chiefRelay } : {}),
             version: 1,
             outcome: "accepted",
             ...(selectedOptionIds ? { selectedOptionIds } : {}),
@@ -2519,6 +2540,7 @@ export function issueThreadInteractionService(
         .set({
           status: "rejected",
           result: {
+            ...(args.actor.chiefRelay ? { chiefRelay: args.actor.chiefRelay } : {}),
             version: 1,
             outcome: "rejected",
             reason: reason || null,
@@ -4107,6 +4129,7 @@ export function issueThreadInteractionService(
           .update(issueThreadInteractions)
           .set({
             result: {
+              ...(actor.chiefRelay ? { chiefRelay: actor.chiefRelay } : {}),
               version: 1,
               createdTasks: [...createdByClientKey.values()],
               ...(skippedClientKeys.length > 0 ? { skippedClientKeys } : {}),
@@ -4259,6 +4282,7 @@ export function issueThreadInteractionService(
         }
 
         const result = {
+          ...(actor.chiefRelay ? { chiefRelay: actor.chiefRelay } : {}),
           version: 1,
           outcome: "resolved",
           complete,
@@ -4329,6 +4353,7 @@ export function issueThreadInteractionService(
         .set({
           status: "rejected",
           result: {
+            ...(actor.chiefRelay ? { chiefRelay: actor.chiefRelay } : {}),
             version: 1,
             rejectionReason: input.reason?.trim() || null,
           },
@@ -5057,7 +5082,8 @@ export function issueThreadInteractionService(
         if (!issueRow) throw interactionNotFoundError();
         let historicalAnswer = false;
         if (isTerminalIssueStatus(issueRow.status)) {
-          if (issueRow.status === "done" && actor.userId && !actor.agentId && !actor.runId && !actor.systemId) {
+          if (issueRow.status === "done" && ((actor.userId && !actor.agentId && !actor.runId && !actor.systemId)
+            || (actor.chiefRelay?.agentId === actor.agentId && !actor.userId && !actor.systemId))) {
             historicalAnswer = (await tx.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions)
               .where(and(eq(issueThreadInteractions.id, interactionId),
                 eq(issueThreadInteractions.companyId, issue.companyId), eq(issueThreadInteractions.issueId, issue.id),
@@ -5073,6 +5099,7 @@ export function issueThreadInteractionService(
           .set({
             status: "answered",
             result: {
+              ...(actor.chiefRelay ? { chiefRelay: actor.chiefRelay } : {}),
               version: 1,
               answers: normalizedAnswers,
               summaryMarkdown: input.summaryMarkdown ?? null,
@@ -5182,7 +5209,8 @@ export function issueThreadInteractionService(
           .update(issueThreadInteractions)
           .set({
             status: "cancelled",
-            result: buildSkippedOutcomeResult(current, reason),
+            result: { ...buildSkippedOutcomeResult(current, reason),
+              ...(actor.chiefRelay ? { chiefRelay: actor.chiefRelay } : {}) },
             resolvedByAgentId: actor.agentId ?? null,
             resolvedByRunId: actor.runId ?? null,
             resolvedByUserId: actor.userId ?? null,

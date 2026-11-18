@@ -5,6 +5,8 @@ import type { AgentApiKeyScope } from "@paperclipai/shared";
 declare global {
   namespace Express {
     interface Request {
+      /** Server-only delegated-authority evidence, never parsed by ordinary routes. */
+      chiefRelay?: import("../services/chief-relay-types.js").ChiefRelay;
       actor: {
         type: "board" | "agent" | "none";
         userId?: string;

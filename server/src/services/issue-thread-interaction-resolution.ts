@@ -26,7 +26,9 @@ export type IssueThreadInteractionResolutionDenialCode =
 export type IssueThreadInteractionResolverActor =
   | { type: "user"; userId: string }
   | { type: "agent"; agentId: string | null | undefined; runId: string | null | undefined }
-  | { type: "system"; systemId: string };
+  | { type: "system"; systemId: string }
+  /** Server-authorized Chief relay. The submitter remains an agent in storage. */
+  | { type: "chief_relay"; agentId: string; representedUserId: string; runId?: string | null };
 
 export type IssueThreadInteractionResolverRestriction = {
   policy: IssueThreadInteractionCanonicalResolverPolicy;
@@ -65,7 +67,7 @@ export type IssueThreadInteractionResolverAudienceDecision =
   | {
       allowed: true;
       effectiveResolverPolicy: IssueThreadInteractionCanonicalResolverPolicy;
-      reason: "allow_anyone" | "allow_addressee" | "allow_human" | "allow_system" | "allow_human_override";
+      reason: "allow_anyone" | "allow_addressee" | "allow_human" | "allow_system" | "allow_human_override" | "allow_chief_relay";
     }
   | {
       allowed: false;
@@ -178,6 +180,14 @@ export function evaluateIssueThreadInteractionResolverAudience(
 
   if (input.actor.type === "system") {
     return { allowed: true, effectiveResolverPolicy, reason: "allow_system" };
+  }
+
+  if (input.actor.type === "chief_relay") {
+    // Evaluate the represented person's audience, not a fabricated user actor.
+    // Attribution is still the real Chief agent in the mutation and audit.
+    const delegated = evaluateIssueThreadInteractionResolverAudience({ ...input,
+      actor: { type: "user", userId: input.actor.representedUserId } });
+    return delegated.allowed ? { ...delegated, reason: "allow_chief_relay" } : delegated;
   }
 
   if (input.actor.type === "user") {

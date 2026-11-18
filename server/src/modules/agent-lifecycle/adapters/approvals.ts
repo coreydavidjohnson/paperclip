@@ -1,3 +1,4 @@
+import type { ChiefRelay } from "../../../services/chief-relay-types.js";
 import { agentAppearanceSchema } from "@paperclipai/shared";
 import { approvals, type Db } from "@paperclipai/db";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
@@ -18,13 +19,15 @@ type HireDecisionResult = {
 
 export function hireApprovalService(db: Db, effects: LifecycleEffects) {
   const { getExistingApproval, resolveApproval } = approvalResolutionRecords(db);
-  async function decide(target: HireDecisionTarget, status: "approved" | "rejected", userId: string, note?: string | null): Promise<HireDecisionResult | null> {
+  async function decide(target: HireDecisionTarget, status: "approved" | "rejected", userId: string | null, note?: string | null, chiefRelay?: ChiefRelay, actorRunId?: string | null): Promise<HireDecisionResult | null> {
     const initial = typeof target === "string"
       ? await agentRecords(db, effects).getById(target)
       : await getExistingApproval(target.approvalId);
     if (!initial) return null;
     if (typeof target !== "string" && (!("type" in initial) || initial.type !== "hire_agent")) throw unprocessable("Expected a hire approval");
     const companyId = initial.companyId;
+    if (!userId && !chiefRelay) throw unprocessable("Hire resolution requires a submitter");
+    if (chiefRelay && (userId !== null || chiefRelay.companyId !== companyId)) throw unprocessable("Chief relay submitter or company mismatch");
     // Hire decisions acquire the company lock before changing an approval or agent.
     return effects.transaction(db, companyId, async (tx, publications) => {
       const records = agentRecords(tx, effects);
@@ -37,15 +40,20 @@ export function hireApprovalService(db: Db, effects: LifecycleEffects) {
         )).orderBy(desc(approvals.createdAt)).limit(1);
         approvalId = open?.id ?? null;
       }
+      if (chiefRelay && !approvalId) throw unprocessable("Chief relay requires a native approval record");
       let approval: typeof approvals.$inferSelect | null = null;
       let applied = true;
       if (approvalId) {
-        const result = await resolveApproval(approvalId, status, userId, note, tx);
+        const result = await resolveApproval(approvalId, status, userId, note, tx, chiefRelay, publications, actorRunId);
         approval = result.approval;
         applied = result.applied;
       }
       const payload = approval?.payload ?? {};
       let agentId = typeof target === "string" ? target : typeof payload.agentId === "string" ? payload.agentId : null;
+      if (chiefRelay && agentId) {
+        const targetAgent = await records.getById(agentId);
+        if (!targetAgent || targetAgent.companyId !== companyId) throw unprocessable("Hire target does not belong to relay company");
+      }
       if (applied && status === "approved") {
         if (agentId) {
           const activated = await records.activatePendingApproval(agentId, approval ? payload : null, approval ? approval.requestedByUserId : userId);
@@ -77,7 +85,7 @@ export function hireApprovalService(db: Db, effects: LifecycleEffects) {
           agentId = created.id;
         }
         if (approval && agentId && typeof payload.budgetMonthlyCents === "number" && payload.budgetMonthlyCents > 0) {
-          await effects.setAgentBudget(tx, publications, companyId, agentId, payload.budgetMonthlyCents, userId);
+          await effects.setAgentBudget(tx, publications, companyId, agentId, payload.budgetMonthlyCents, userId, undefined, chiefRelay, actorRunId);
         }
       } else if (applied && agentId) {
         if (approval) await records.rejectPendingHire(agentId);

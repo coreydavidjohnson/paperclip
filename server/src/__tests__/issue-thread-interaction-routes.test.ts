@@ -260,11 +260,13 @@ function createIssue(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function loadAppModules() {
-  return Promise.all([
-    import("../routes/issues.js"),
-    import("../middleware/index.js"),
-  ]);
+async function loadAppModules() {
+  // Vite can deadlock parallel first imports that share middleware through the
+  // route graph after resetModules. Load once in dependency order; no route or
+  // authorization implementation is mocked out by this ordering.
+  const routes = await import("../routes/issues.js");
+  const middleware = await import("../middleware/index.js");
+  return [routes, middleware] as const;
 }
 
 async function createApp(actor: Record<string, unknown> = {

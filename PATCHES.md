@@ -22,6 +22,30 @@ run-lifecycle layers: PER-282 attachment/observation, PER-708 admission
 suspension, PER-902 observer retirement and the omnigent branches in
 heartbeat.ts.
 
+## PER-1498 explicit Chief of Staff relay
+
+- Add the supported `POST /api/chief-relay/answers` endpoint. A fixed active
+  Chief agent, company and source chat may attest Corey's exact instruction.
+  This is delegated authority, not proof of a human UI turn. All native records
+  and activity retain Chief as the submitting agent and never invent a user
+  session, board identity or task run.
+- Reuse native choices, CAS transitions, lifecycle effects and delivery paths
+  for decisions, formal approvals and issue questions/confirmations/verdicts.
+  Store source message, verbatim quote, effect scope and stable replay proof
+  with the native outcome. Recheck current scope on replay. Unrelated agents
+  cannot opt into this path through request bodies or headers.
+- Preserve resource/company boundaries, private conversations, current targets,
+  independent-review policy, cancellation, expiry, execution and credential
+  guards. Each sensitive effect still needs Corey's specific instruction.
+  A relay cannot perform an external identity-provider login or fabricate a
+  provider consent grant. Existing technical permissions remain effective.
+- Project relayed authority separately from directly authenticated human
+  answers. A user-only response projection never includes an agent relay.
+- The production image gate runs real-Postgres routes and governed tool/secret
+  regressions plus ordinary denial, attribution, replay and lifecycle suites.
+  Retire when upstream supports an equivalent explicit delegated actor without
+  board impersonation. No OmniGenT patch, new login or enrollment is required.
+
 ## PER-1507 guarded terminal duplicate cancellation
 
 - Extend the existing exact exhausted-disposition status repair to cancelled.

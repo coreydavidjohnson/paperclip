@@ -8,6 +8,8 @@ type HeartbeatWakeup = (
     triggerDetail: "system";
     reason: string;
     payload: Record<string, unknown>;
+    requestedByActorType?: "agent";
+    requestedByActorId?: string;
   },
 ) => Promise<unknown>;
 
@@ -24,6 +26,7 @@ export function createDecisionWakeOriginAgent(
     source: "automation",
     triggerDetail: "system",
     reason: `decision_${input.outcome}`,
+    ...(input.requestedByActorType ? { requestedByActorType: input.requestedByActorType, requestedByActorId: input.requestedByActorId } : {}),
     payload: {
       issueId: input.issueId,
       decisionId: input.decisionId,

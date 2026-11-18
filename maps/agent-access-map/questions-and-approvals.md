@@ -9,6 +9,26 @@ Each capability needs operation-level review before its entire scope can be
 qualified. No live agent execution is claimed. Follow the [map contract](../README.md)
 for format, permission checks, evidence and maintenance.
 
+PER-1498 adds one explicit delegated path: `POST /api/chief-relay/answers`.
+Only the server-configured active Chief agent in its configured company and chat
+can submit its attestation of Corey's exact words, source message, scope and native
+choice. Chief remains the agent resolver; no board actor or human response is
+created. Ordinary native endpoints cannot enable this path through input/header
+fields. Native audience, current target, action validation, issue ACL, cancellation,
+CAS and governed-effect checks remain. An actual supplied run must remain valid;
+a runless Chief chat does not invent one. External OAuth consent is not fabricated.
+
+Agent access for this exception is `partial` until the Home Lab deployment and
+Chief-only `paperclip_relay_answer` MCP binding are verified. Source/tests are
+[entry point](../../server/src/middleware/chief-relay.ts),
+[native route regressions](../../server/src/__tests__/chief-relay.test.ts),
+[governed tool regressions](../../server/src/__tests__/tool-gateway-service.test.ts),
+and [credential regressions](../../server/src/__tests__/chief-relay-secret-proposals.test.ts).
+Evidence: `source-only` for production; disposable regressions are not a live
+Chief-owned invocation. The release record must identify that real invocation,
+native outcome and audit separately. Relayed continuation authority is explicitly
+`relayedResponses`, never `humanResponses`. No login, signup or enrollment is needed.
+
 ## `questions`
 
 Review: `baseline`.
@@ -22,7 +42,7 @@ Agent access: `partial` — Native request_human_input; REST / MCP forms; author
 responder endpoint.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.
@@ -46,7 +66,7 @@ API: `present` — representative operation IDs:
 Agent access: `partial` — Persisted question API plus browser card state.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.
@@ -71,7 +91,7 @@ Agent access: `partial` — Native request_human_input and call_api resolve-from
 authorized REST resolver.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.
@@ -97,7 +117,7 @@ Agent access: `partial` — Native write_document/request_human_input; explicit 
 recipient.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.
@@ -122,7 +142,7 @@ Agent access: `available` — API resolver checks; assigned review context/resol
 for a native review run.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.
@@ -146,10 +166,10 @@ API: `present` — representative operation IDs:
 - `POST /api/approvals/{id}/reject`.
 
 Agent access: `restricted` — Agent REST/MCP can request/read/comment/resubmit; formal
-approve/reject require board.
+approve/reject require board except for the explicit Chief relay entry point above.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.
@@ -171,10 +191,10 @@ API: `present` — representative operation IDs:
 - `POST /api/tool-gateway/action-requests/{id}/decline`.
 
 Agent access: `restricted` — Agent invokes assigned ask-policy tool; board approval
-executes stored request.
+executes stored request. The explicit Chief relay entry point above can resolve the linked review without granting ordinary agents board identity.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.
@@ -198,7 +218,7 @@ API: `present` — representative operation IDs:
 Agent access: `available` — Server delivery and resumed assigned agent context.
 
 Policy: Current task/run and named audience/resolver policy; governed approval decisions
-require board independently of an ordinary interaction.
+require board or the explicit configured Chief relay path described above, independently of an ordinary agent interaction.
 
 Evidence: `source-only` — [implementation](../../server/src/routes/issues.ts#L16638) at
 the reviewed commit above.

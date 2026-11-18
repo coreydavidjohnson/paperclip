@@ -22,6 +22,7 @@ import {
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { attentionService } from "../services/attention.js";
+import type { ChiefRelay } from "../services/chief-relay-types.js";
 import { decisionService } from "../services/decisions.js";
 import { hashAttentionArchiveManifest } from "../services/decision-retention.js";
 import type { AttentionArchiveManifestEntry, AttentionArchiveTargetSnapshot } from "@paperclipai/shared";
@@ -118,6 +119,167 @@ describePg("decisionService", () => {
     expect(audit[0]?.details).toMatchObject({ decidedByUserId, originResponsibleUserId });
     expect(first.executions[0]?.activityLogId).toBe(audit[0]?.id);
     expect(wakes).toHaveLength(1);
+  });
+
+  async function relayContext(): Promise<{ chiefRelay: ChiefRelay; actor: ReturnType<typeof agentActor> }> {
+    const chiefId = randomUUID();
+    const chiefRunId = randomUUID();
+    await db.insert(agents).values({ id: chiefId, companyId, name: "Chief", role: "ceo", status: "active" });
+    await db.insert(heartbeatRuns).values({ id: chiefRunId, companyId, agentId: chiefId, status: "running", responsibleUserId: originResponsibleUserId, contextSnapshot: { issueId: originIssueId } });
+    return {
+      chiefRelay: { agentId: chiefId, companyId, representedUserId: "local-board", sourceSessionId: "source-session", sourceMessageId: "source-message",
+        exactQuote: "Choose yes on this card.", scope: "This exact decision", idempotencyKey: "relay-1", requestFingerprint: "fingerprint-1" },
+      actor: { ...agentActor(), agentId: chiefId, runId: chiefRunId },
+    };
+  }
+
+  it("executes relayed choices once with actual agent comments, audit and continuation attribution", async () => {
+    const created = await createCommentDecision();
+    const { chiefRelay, actor } = await relayContext();
+    const input = { id: created.id, optionId: "yes", decidedByUserId: null, userActor: actor, chiefRelay };
+    const first = await service().decide(input);
+    expect(first).toMatchObject({ status: "decided", executionStatus: "succeeded", decidedByUserId: null, metadata: { chiefRelay } });
+    await service().decide(input);
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, targetIssueId));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toMatchObject({ authorAgentId: chiefRelay.agentId, authorUserId: null });
+    const audit = await db.select().from(activityLog).where(eq(activityLog.action, "decision.effect_executed"));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actorType: "agent", actorId: chiefRelay.agentId, agentId: chiefRelay.agentId,
+      runId: actor.runId, responsibleUserId: null, details: { decidedByUserId: null, chiefRelay } });
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0]).toMatchObject({ requestedByActorType: "agent", requestedByActorId: chiefRelay.agentId });
+  });
+
+  it("preserves native status effects and attributes their comments to Chief", async () => {
+    await db.update(issues).set({ assigneeAgentId: agentId }).where(eq(issues.id, targetIssueId));
+    const created = await service().create({ companyId, actor: agentActor(), agentId, runId, title: "Start?", body: "Body",
+      options: [{ id: "yes", label: "Yes", effects: [{ type: "update_issue_status", targetIssueId, staleness: "lenient", status: "in_progress", comment: "Start work" }] }] });
+    const { chiefRelay, actor } = await relayContext();
+    const result = await service().decide({ id: created.id, optionId: "yes", decidedByUserId: null, userActor: actor, chiefRelay });
+    expect(result.executionStatus, JSON.stringify(result.executions)).toBe("succeeded");
+    expect((await db.select().from(issues).where(eq(issues.id, targetIssueId)))[0]).toMatchObject({ status: "in_progress", startedAt: expect.any(Date) });
+    expect((await db.select().from(issueComments).where(eq(issueComments.issueId, targetIssueId)))[0]).toMatchObject({ authorAgentId: chiefRelay.agentId, authorUserId: null, body: "Start work" });
+  });
+
+  it("creates a native child issue with the relay agent as creator, not the represented user", async () => {
+    const created = await service().create({ companyId, actor: agentActor(), agentId, runId, title: "Create?", body: "Body",
+      options: [{ id: "yes", label: "Yes", effects: [{ type: "create_issue", targetIssueId, staleness: "lenient", draft: { title: "Chief relayed child" } }] }] });
+    const { chiefRelay, actor } = await relayContext();
+    const result = await service().decide({ id: created.id, optionId: "yes", decidedByUserId: null, userActor: actor, chiefRelay });
+    expect(result.executionStatus).toBe("succeeded");
+    const children = await db.select().from(issues).where(eq(issues.parentId, targetIssueId));
+    expect(children).toHaveLength(1);
+    expect(children[0]).toMatchObject({ createdByAgentId: chiefRelay.agentId, createdByUserId: null });
+  });
+
+  it("rejects altered relay proof, choice, or values on replay without new effects", async () => {
+    const created = await createCommentDecision();
+    const { chiefRelay, actor } = await relayContext();
+    const input = { id: created.id, optionId: "yes", decidedByUserId: null, userActor: actor, chiefRelay };
+    await service().decide(input);
+    for (const key of ["sourceSessionId", "sourceMessageId", "exactQuote", "scope", "idempotencyKey", "requestFingerprint", "representedUserId"] as const) {
+      await expect(service().decide({ ...input, chiefRelay: { ...chiefRelay, [key]: "changed" } })).rejects.toThrow("chief_relay_replay_mismatch");
+    }
+    await expect(service().decide({ ...input, optionId: "other" })).rejects.toThrow("chief_relay_replay_mismatch");
+    await expect(service().decide({ ...input, inputValues: { answer: "changed" } })).rejects.toThrow("chief_relay_replay_mismatch");
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, targetIssueId))).toHaveLength(1);
+  });
+
+  it("keeps one CAS winner when relayed choices race", async () => {
+    const created = await createCommentDecision("lenient", { options: [
+      { id: "yes", label: "Yes", effects: [{ type: "comment_on_issue", targetIssueId, staleness: "lenient", bodyMarkdown: "hello" }] },
+      { id: "no", label: "No", effects: [] },
+    ] });
+    const { chiefRelay, actor } = await relayContext();
+    const input = { id: created.id, decidedByUserId: null, userActor: actor, chiefRelay };
+    const results = await Promise.allSettled([service().decide({ ...input, optionId: "yes" }), service().decide({ ...input, optionId: "no" })]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    const audit = await db.select().from(activityLog).where(eq(activityLog.action, "decision.decided"));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actorType: "agent", actorId: chiefRelay.agentId });
+  });
+
+  it.each([true, false])("dismisses and replays with honest relay attribution (empty option %s)", async (emptyOption) => {
+    const created = await createCommentDecision("lenient", emptyOption ? { options: [{ id: "skip", label: "Skip", effects: [] }] } : {});
+    const { chiefRelay, actor } = await relayContext();
+    const first = await service().dismiss(created.id, null, actor, "Not needed", chiefRelay);
+    const replay = await service().dismiss(created.id, null, actor, "Not needed", chiefRelay);
+    expect(first.id).toBe(replay.id);
+    expect(replay).toMatchObject({ decidedByUserId: null, status: "decided", metadata: { chiefRelay, dismissed: true } });
+    await expect(service().dismiss(created.id, null, actor, "Different", chiefRelay)).rejects.toThrow("chief_relay_replay_mismatch");
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, targetIssueId))).toHaveLength(0);
+    expect(wakes).toHaveLength(1);
+  });
+
+  it("recovers unfinished relayed effects without requiring a fabricated user ID", async () => {
+    const created = await createCommentDecision();
+    const { chiefRelay } = await relayContext();
+    await db.update(decisions).set({ status: "decided", executionStatus: "running", chosenOptionId: "yes", decidedByUserId: null,
+      decidedAt: new Date(), updatedAt: new Date(Date.now() - 120_000), metadata: { ...created.metadata, chiefRelay } }).where(eq(decisions.id, created.id));
+    expect(await service().sweepExpired()).toMatchObject({ resumed: 1 });
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, targetIssueId));
+    expect(comments[0]).toMatchObject({ authorAgentId: chiefRelay.agentId, authorUserId: null });
+  });
+
+  it("does not let decision creators plant server-owned relay proof", async () => {
+    const { chiefRelay } = await relayContext();
+    await expect(createCommentDecision("lenient", { metadata: { chiefRelay } })).rejects.toThrow("chiefRelay metadata is server-owned");
+  });
+
+  it.each(["choose", "dismiss"] as const)("prevents a cancelled real run from submitting a relay %s", async action => {
+    const created = await createCommentDecision();
+    const { chiefRelay, actor } = await relayContext();
+    await db.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, actor.runId));
+    const result = action === "choose"
+      ? service().decide({ id: created.id, optionId: "yes", decidedByUserId: null, userActor: actor, chiefRelay })
+      : service().dismiss(created.id, null, actor, "Skip", chiefRelay);
+    await expect(result).rejects.toThrow("This run was cancelled");
+    expect(await service().get(created.id)).toMatchObject({ status: "open", decidedAt: null });
+    expect(wakes).toHaveLength(0);
+  });
+
+  it("serializes a relay outcome behind a concurrent Stop transaction", async () => {
+    const created = await createCommentDecision();
+    const { chiefRelay, actor } = await relayContext();
+    let release!: () => void;
+    let ready!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const locked = new Promise<void>(resolve => { ready = resolve; });
+    const stop = db.transaction(async tx => {
+      await tx.update(heartbeatRuns).set({ resultJson: { executionCancellation: { state: "requested" } } }).where(eq(heartbeatRuns.id, actor.runId));
+      ready();
+      await held;
+    });
+    await locked;
+    let settled = false;
+    const result = service().decide({ id: created.id, optionId: "yes", decidedByUserId: null, userActor: actor, chiefRelay })
+      .then(value => ({ value, error: null }), error => ({ value: null, error })).finally(() => { settled = true; });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 40));
+      expect(settled).toBe(false);
+    } finally { release(); }
+    await stop;
+    expect((await result).error).toMatchObject({ message: "This run was cancelled" });
+    expect(await service().get(created.id)).toMatchObject({ status: "open", decidedAt: null });
+  });
+
+  it("rejects a relay submitter from another company before claiming the decision", async () => {
+    const created = await createCommentDecision();
+    const { chiefRelay, actor } = await relayContext();
+    await expect(service().decide({ id: created.id, optionId: "yes", decidedByUserId: null,
+      userActor: { ...actor, companyId: randomUUID() }, chiefRelay })).rejects.toThrow("Chief relay submitter or company mismatch");
+    expect(await service().get(created.id)).toMatchObject({ status: "open", decidedAt: null });
+    expect(await db.select().from(issueComments).where(eq(issueComments.issueId, targetIssueId))).toHaveLength(0);
+  });
+
+  it("retains the origin-agent permission intersection for authenticated relay effects", async () => {
+    const created = await service().create({ companyId, actor: agentActor(), agentId, runId, title: "Update?", body: "Body",
+      options: [{ id: "yes", label: "Yes", effects: [{ type: "update_issue_status", targetIssueId, staleness: "lenient", status: "in_progress" }] }] });
+    const { chiefRelay, actor } = await relayContext();
+    await db.update(companyMemberships).set({ membershipRole: "viewer" }).where(eq(companyMemberships.principalId, originResponsibleUserId));
+    const result = await service().decide({ id: created.id, optionId: "yes", decidedByUserId: null, userActor: actor, chiefRelay });
+    expect(result.executions[0]).toMatchObject({ status: "failed", error: "deny_decision_intersection" });
   });
 
   it("allows one double-decide winner and rejects the loser", async () => {

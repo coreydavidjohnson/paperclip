@@ -99,8 +99,13 @@ credentials/run context; inspect its result and applicable persistence/attributi
 Assert the relevant denied actor, owner, company or mode from Policy. Review the
 remaining operations before qualifying the whole capability.
 
-Gaps: Queue browsing/managing may be allowed; governed approval decisions still have
-separate board/resolver boundaries.
+Gaps: Queue browsing/managing may be allowed; governed approval decisions retain
+separate board/resolver boundaries. PER-1498 adds `POST /api/chief-relay/answers`
+for the configured Chief's verbatim attestation only, using native decision choice
+and dismissal validation with actual agent attribution and stored relay proof.
+See the [relay access boundary](questions-and-approvals.md). Native decision
+endpoints remain board-only for ordinary agents; the deployed Chief MCP binding
+and live pending-card resolution must be qualified separately.
 
 ## `search`
 

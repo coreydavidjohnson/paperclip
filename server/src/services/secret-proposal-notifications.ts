@@ -15,7 +15,8 @@ type ProposalResolutionNotification = {
 export async function notifySecretProposalResolution(input: {
   proposal: ProposalResolutionNotification;
   status: "approved" | "rejected";
-  userId: string;
+  userId?: string | null;
+  agentId?: string | null;
   reason?: string | null;
   issues: Pick<ReturnType<typeof issueService>, "getById" | "addComment">;
   heartbeat: IssueAssignmentWakeupDeps;
@@ -35,7 +36,7 @@ export async function notifySecretProposalResolution(input: {
       await input.issues.addComment(
         issue.id,
         `Secret proposal resolution\n\n- Proposal: ${subject}\n- Status: **${input.status}**${configPath}${reason}`,
-        { userId: input.userId },
+        input.agentId ? { agentId: input.agentId } : { userId: input.userId ?? "board" },
       );
     } catch (err) {
       logger.warn(
@@ -49,8 +50,8 @@ export async function notifySecretProposalResolution(input: {
       reason: "secret_proposal_resolved",
       mutation: `secret_proposal_${input.status}`,
       contextSource: "secret.proposal.resolution",
-      requestedByActorType: "user",
-      requestedByActorId: input.userId,
+      requestedByActorType: input.agentId ? "agent" : "user",
+      requestedByActorId: input.agentId ?? input.userId ?? "board",
     });
   } catch (err) {
     logger.warn(

@@ -1,3 +1,5 @@
+import type { ChiefRelay } from "../services/chief-relay-types.js";
+import { forbidden } from "../errors.js";
 import { Router, type Request } from "express";
 import { eq } from "drizzle-orm";
 import { heartbeatRuns, type Db } from "@paperclipai/db";
@@ -83,6 +85,15 @@ export function approvalRoutes(
     };
   }
 
+  function resolutionActor(req: Request) {
+    if (req.chiefRelay) {
+      if (req.actor.type !== "agent" || req.actor.agentId !== req.chiefRelay.agentId) throw forbidden("Chief relay submitter mismatch");
+      return { actorType: "agent" as const, actorId: req.chiefRelay.agentId, agentId: req.chiefRelay.agentId, runId: req.actor.runId ?? null, responsibleUserIdOverride: null };
+    }
+    assertBoard(req);
+    return { actorType: "user" as const, actorId: req.actor.userId ?? "board" };
+  }
+
   async function queueAdditionalApprovalReviewPathWakes(input: {
     approvalId: string;
     approvalStatus: string;
@@ -90,7 +101,8 @@ export function approvalRoutes(
     linkedIssues: Awaited<ReturnType<typeof issueApprovalsSvc.listIssuesForApproval>>;
     lostIssueIds: Set<string>;
     alreadyWoken?: { agentId: string; issueId: string } | null;
-    requestedByUserId: string;
+    actor: ReturnType<typeof resolutionActor>;
+    chiefRelay?: ChiefRelay;
   }) {
     for (const issue of input.linkedIssues) {
       if (!input.lostIssueIds.has(issue.id) || !issue.assigneeAgentId) continue;
@@ -108,15 +120,17 @@ export function approvalRoutes(
           idempotencyKey: `approval-review-path:${input.approvalId}:${issue.id}:${input.approvalStatus}`,
           payload: {
             approvalId: input.approvalId,
+            ...(input.chiefRelay ? { chiefRelay: input.chiefRelay } : {}),
             approvalStatus: input.approvalStatus,
             issueId: issue.id,
             ...approvalReviewPathContext(input.approvalId),
           },
-          requestedByActorType: "user",
-          requestedByActorId: input.requestedByUserId,
+          requestedByActorType: input.actor.actorType,
+          requestedByActorId: input.actor.actorId,
           contextSnapshot: {
             source: `approval.${input.approvalStatus}`,
             approvalId: input.approvalId,
+            ...(input.chiefRelay ? { chiefRelay: input.chiefRelay } : {}),
             approvalStatus: input.approvalStatus,
             issueId: issue.id,
             taskId: issue.id,
@@ -127,12 +141,12 @@ export function approvalRoutes(
 
         await logActivity(db, {
           companyId: input.companyId,
-          actorType: "user",
-          actorId: input.requestedByUserId,
+          ...input.actor,
           action: "approval.review_path_wakeup_queued",
           entityType: "approval",
           entityId: input.approvalId,
           details: {
+            ...(input.chiefRelay ? { chiefRelay: input.chiefRelay } : {}),
             approvalStatus: input.approvalStatus,
             issueId: issue.id,
             assigneeAgentId: issue.assigneeAgentId,
@@ -146,12 +160,12 @@ export function approvalRoutes(
         );
         await logActivity(db, {
           companyId: input.companyId,
-          actorType: "user",
-          actorId: input.requestedByUserId,
+          ...input.actor,
           action: "approval.review_path_wakeup_failed",
           entityType: "approval",
           entityId: input.approvalId,
           details: {
+            ...(input.chiefRelay ? { chiefRelay: input.chiefRelay } : {}),
             approvalStatus: input.approvalStatus,
             issueId: issue.id,
             assigneeAgentId: issue.assigneeAgentId,
@@ -294,14 +308,16 @@ export function approvalRoutes(
   });
 
   router.post("/approvals/:id/approve", validate(resolveApprovalSchema), async (req, res) => {
-    assertBoard(req);
+    const actor = resolutionActor(req);
+    const chiefRelay = req.chiefRelay;
     const id = req.params.id as string;
     if (!(await requireApprovalAccess(req, id))) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied } = await svc.approve(id, decidedByUserId, req.body.decisionNote);
+    if (chiefRelay && !(await assertApprovalMutationAllowedByRunContext(req, res, chiefRelay.companyId))) return;
+    const decidedByUserId = chiefRelay ? null : req.actor.userId ?? "board";
+    const { approval, applied } = await (chiefRelay ? svc.approve(id, null, req.body.decisionNote, chiefRelay, req.actor.runId ?? null) : svc.approve(id, decidedByUserId, req.body.decisionNote));
 
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
@@ -314,12 +330,12 @@ export function approvalRoutes(
 
       await logActivity(db, {
         companyId: approval.companyId,
-        actorType: "user",
-        actorId: req.actor.userId ?? "board",
+        ...actor,
         action: "approval.approved",
         entityType: "approval",
         entityId: approval.id,
         details: {
+          ...(chiefRelay ? { chiefRelay } : {}),
           type: approval.type,
           requestedByAgentId: approval.requestedByAgentId,
           linkedIssueIds,
@@ -340,8 +356,8 @@ export function approvalRoutes(
               issueIds: linkedIssueIds,
               ...(primaryReviewPathContext ?? {}),
             },
-            requestedByActorType: "user",
-            requestedByActorId: req.actor.userId ?? "board",
+            requestedByActorType: actor.actorType,
+            requestedByActorId: actor.actorId,
             contextSnapshot: {
               source: "approval.approved",
               approvalId: approval.id,
@@ -357,12 +373,12 @@ export function approvalRoutes(
 
           await logActivity(db, {
             companyId: approval.companyId,
-            actorType: "user",
-            actorId: req.actor.userId ?? "board",
+            ...actor,
             action: "approval.requester_wakeup_queued",
             entityType: "approval",
             entityId: approval.id,
             details: {
+              ...(chiefRelay ? { chiefRelay } : {}),
               requesterAgentId: approval.requestedByAgentId,
               wakeRunId: wakeRun?.id ?? null,
               linkedIssueIds,
@@ -379,12 +395,12 @@ export function approvalRoutes(
           );
           await logActivity(db, {
             companyId: approval.companyId,
-            actorType: "user",
-            actorId: req.actor.userId ?? "board",
+            ...actor,
             action: "approval.requester_wakeup_failed",
             entityType: "approval",
             entityId: approval.id,
             details: {
+              ...(chiefRelay ? { chiefRelay } : {}),
               requesterAgentId: approval.requestedByAgentId,
               linkedIssueIds,
               error: err instanceof Error ? err.message : String(err),
@@ -402,7 +418,8 @@ export function approvalRoutes(
         alreadyWoken: primaryReviewPathWakeCovered && approval.requestedByAgentId && primaryIssueId
           ? { agentId: approval.requestedByAgentId, issueId: primaryIssueId }
           : null,
-        requestedByUserId: req.actor.userId ?? "board",
+        actor,
+        chiefRelay,
       });
     }
 
@@ -410,26 +427,30 @@ export function approvalRoutes(
   });
 
   router.post("/approvals/:id/reject", validate(resolveApprovalSchema), async (req, res) => {
-    assertBoard(req);
+    const actor = resolutionActor(req);
+    const chiefRelay = req.chiefRelay;
     const id = req.params.id as string;
     if (!(await requireApprovalAccess(req, id))) {
       res.status(404).json({ error: "Approval not found" });
       return;
     }
-    const decidedByUserId = req.actor.userId ?? "board";
-    const { approval, applied } = await svc.reject(id, decidedByUserId, req.body.decisionNote);
+    if (chiefRelay && !(await assertApprovalMutationAllowedByRunContext(req, res, chiefRelay.companyId))) return;
+    const decidedByUserId = chiefRelay ? null : req.actor.userId ?? "board";
+    const { approval, applied } = await (chiefRelay ? svc.reject(id, null, req.body.decisionNote, chiefRelay, req.actor.runId ?? null) : svc.reject(id, decidedByUserId, req.body.decisionNote));
 
     if (applied) {
       const linkedIssues = await issueApprovalsSvc.listIssuesForApproval(approval.id);
       const lostReviewIssueIds = await lostReviewPathIssueIds(approval.companyId, linkedIssues);
       await logActivity(db, {
         companyId: approval.companyId,
-        actorType: "user",
-        actorId: req.actor.userId ?? "board",
+        ...actor,
         action: "approval.rejected",
         entityType: "approval",
         entityId: approval.id,
-        details: { type: approval.type },
+        details: {
+          ...(chiefRelay ? { chiefRelay } : {}),
+          type: approval.type,
+        },
       });
       await queueAdditionalApprovalReviewPathWakes({
         approvalId: approval.id,
@@ -437,7 +458,8 @@ export function approvalRoutes(
         companyId: approval.companyId,
         linkedIssues,
         lostIssueIds: lostReviewIssueIds,
-        requestedByUserId: req.actor.userId ?? "board",
+        actor,
+        chiefRelay,
       });
     }
 

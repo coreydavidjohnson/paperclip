@@ -192,6 +192,18 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/live-events-readiness-db.test.ts \
     src/__tests__/issue-interactions-read-only-contract.test.ts \
     src/__tests__/chat-approval.test.ts \
+    src/__tests__/chief-relay.test.ts \
+    src/__tests__/chief-relay-types.test.ts \
+    src/__tests__/chief-relay-secret-proposals.test.ts \
+    src/__tests__/approval-relay-records.test.ts \
+    src/__tests__/budgets-service.test.ts \
+    src/__tests__/tool-access-policy-service.test.ts \
+    src/__tests__/approval-routes-idempotency.test.ts \
+    src/__tests__/decisions-service.test.ts \
+    src/__tests__/decision-wakeup.test.ts \
+    src/__tests__/issue-thread-interaction-routes.test.ts \
+    src/services/issue-thread-interaction-resolution.test.ts \
+    src/modules/agent-lifecycle/__tests__/lifecycle.test.ts \
     src/__tests__/confirmation-comment-resolution.test.ts \
     src/__tests__/better-auth-credential-signup.integration.test.ts \
     src/__tests__/heartbeat-wake-pool-starvation.test.ts \
@@ -239,6 +251,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/heartbeat-session-preparation.test.ts \
     src/services/explicit-native-continuation.test.ts \
     src/services/execution-continuation.test.ts \
+    src/services/continuation-budget.test.ts \
     src/services/heartbeat/retries.test.ts \
     src/modules/run-dispatch/domain/policy.test.ts \
     src/modules/run-dispatch/adapters/postgres.test.ts \
@@ -269,6 +282,9 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/__tests__/run-context-keys-db.test.ts \
     src/services/conversation-continuation.test.ts \
     src/services/native-runtime/native-safe-replacement.test.ts \
+  && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
+    --hookTimeout=120000 --testTimeout=60000 \
+    src/__tests__/tool-gateway-service.test.ts -t 'Chief relay' \
   && chown -R root:root /app
 
 # Remote OpenCode and ACPX runs require a controller-owned provider pack to

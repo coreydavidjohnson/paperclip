@@ -45,7 +45,7 @@ export function boundExecutionContinuation(envelope: ExecutionContinuationEnvelo
     originCommentIds: [],
     objective: "Read the current issue description, complete human direction, pending interactions and saved work from the task thread before taking action. Missing inline history is not approval or permission to repeat completed work.",
     objectiveSource: envelope.objectiveSource,
-    messages: [], humanResponses: [], interactionOutcomes: [],
+    messages: [], humanResponses: [], relayedResponses: [], interactionOutcomes: [],
     completedActions: [], completedWork: null,
     unresolvedInteractionIds: envelope.unresolvedInteractionIds.slice(0, 100),
     coverage: {

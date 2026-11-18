@@ -3435,7 +3435,7 @@ export function issueRoutes(
       interactionId?: string;
       actionRequestId: string;
       reason?: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; runId?: string | null; chiefRelay?: import("../services/chief-relay-types.js").ChiefRelay };
     }) => Promise<unknown>;
     approveToolActionRequest?: (input: {
       rememberAction?: boolean;
@@ -3443,14 +3443,14 @@ export function issueRoutes(
       issueId: string;
       interactionId: string;
       actionRequestId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; runId?: string | null; chiefRelay?: import("../services/chief-relay-types.js").ChiefRelay };
     }) => Promise<unknown>;
     approveSecretProposal?: (input: {
       companyId: string;
       issueId: string;
       interactionId: string;
       proposalId: string;
-      actor: { agentId?: string | null; userId?: string | null };
+      actor: { agentId?: string | null; userId?: string | null; runId?: string | null; chiefRelay?: import("../services/chief-relay-types.js").ChiefRelay };
     }) => Promise<unknown>;
   } = {},
 ) {
@@ -3708,6 +3708,9 @@ export function issueRoutes(
     kind: CrossIssueInfluenceKind,
   ) {
     if (req.actor.type !== "agent") return true;
+    // Interactive Chief relay has no invented task run. Actual run-bound calls
+    // retain the normal per-run influence budget and cancellation enforcement.
+    if (req.chiefRelay && !req.actor.runId) return true;
     if (!req.actor.agentId || !req.actor.runId)
       throw crossIssueInfluenceRunContextError();
 
@@ -5894,6 +5897,7 @@ export function issueRoutes(
   ) {
     if (req.actor.type !== "agent") return null;
     const runId = req.actor.runId?.trim();
+    if (req.chiefRelay && !runId) return null;
     if (!req.actor.agentId || !runId) {
       return denyIssueThreadInteractionResolution(res, {
         status: 422,
@@ -6044,7 +6048,10 @@ export function issueRoutes(
     const decision: IssueThreadInteractionResolverAudienceDecision =
       evaluateIssueThreadInteractionResolverAudience({
         actor:
-          actor.actorType === "agent"
+          req.chiefRelay
+            ? { type: "chief_relay", agentId: req.chiefRelay.agentId,
+                representedUserId: req.chiefRelay.representedUserId, runId: actor.runId }
+            : actor.actorType === "agent"
             ? {
                 type: "agent",
                 agentId: actor.agentId,
@@ -6098,6 +6105,8 @@ export function issueRoutes(
     if (issue.conversationAgentId && req.actor.type === "board" && req.actor.userId !== issue.conversationUserId) {
       throw forbidden("Only the conversation owner can respond to chat interactions");
     }
+    if (req.chiefRelay && issue.conversationAgentId && issue.conversationUserId !== req.chiefRelay.representedUserId)
+      throw forbidden("Only the conversation owner can respond to chat interactions");
     // Actor-only gates deliberately precede the interaction lookup. An actor
     // outside the issue's trusted/watchdog scope must not learn whether an
     // interaction id exists on that issue.
@@ -6305,7 +6314,9 @@ export function issueRoutes(
     const actor = getActorInfo(req);
     await assertIssueReviewVerdictActorAllowed(db, {
       issue,
-      actor: { type: actor.actorType, id: actor.actorId },
+      actor: req.chiefRelay
+        ? { type: "user", id: req.chiefRelay.representedUserId }
+        : { type: actor.actorType, id: actor.actorId },
     });
   }
 
@@ -17277,6 +17288,7 @@ export function issueRoutes(
           rememberAction: req.body.rememberAction === true,
           actor: {
             agentId: actor.agentId,
+            ...(req.chiefRelay ? { chiefRelay: req.chiefRelay, runId: actor.runId } : {}),
             userId: actor.actorType === "user" ? actor.actorId : null,
           },
         });
@@ -17290,6 +17302,7 @@ export function issueRoutes(
       const { interaction, createdIssues, continuationIssue } =
         await interactionSvc.acceptInteraction(issue, interactionId, req.body, {
           agentId: actor.agentId,
+          chiefRelay: req.chiefRelay,
           runId: actor.runId,
           userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
@@ -17326,6 +17339,7 @@ export function issueRoutes(
           actionRequestId: toolAction.actionRequestId,
           actor: {
             agentId: actor.agentId,
+            ...(req.chiefRelay ? { chiefRelay: req.chiefRelay, runId: actor.runId } : {}),
             userId: actor.actorType === "user" ? actor.actorId : null,
           },
         });
@@ -17354,7 +17368,7 @@ export function issueRoutes(
         typeof secretProposal?.proposalId === "string"
       ) {
         const resolvedByUserId =
-          actor.actorType === "user" ? actor.actorId : "board";
+          actor.actorType === "user" ? actor.actorId : null;
         try {
           if (opts.approveSecretProposal) {
             await opts.approveSecretProposal({
@@ -17364,6 +17378,7 @@ export function issueRoutes(
               proposalId: secretProposal.proposalId,
               actor: {
                 agentId: actor.agentId,
+                ...(req.chiefRelay ? { chiefRelay: req.chiefRelay, runId: actor.runId } : {}),
                 userId: actor.actorType === "user" ? actor.actorId : null,
               },
             });
@@ -17381,19 +17396,22 @@ export function issueRoutes(
               throw notFound("Secret proposal not found");
             }
             await secretProposals.approve(issue.companyId, proposal.id, {
-              resolvedByUserId,
+              ...(req.chiefRelay ? { actor: { agentId: actor.agentId, runId: actor.runId, chiefRelay: req.chiefRelay } }
+                : { resolvedByUserId: resolvedByUserId ?? "board" }),
               assertCanResolve: (lockedProposal, txDb) =>
                 assertCanResolveProposal({
                   db: txDb,
                   actor: req.actor,
                   companyId: issue.companyId,
                   proposal: lockedProposal,
+                  chiefRelay: req.chiefRelay,
                 }),
             });
             await notifySecretProposalResolution({
               proposal,
               status: "approved",
-              userId: resolvedByUserId,
+              userId: req.chiefRelay ? null : resolvedByUserId ?? "board",
+              agentId: req.chiefRelay?.agentId,
               issues: svc,
               heartbeat,
             });
@@ -17427,7 +17445,7 @@ export function issueRoutes(
               await svc.addComment(
                 issue.id,
                 `Secret binding execution failed\n\n- Config path: \`${configPath}\`\n- Error code: \`${errorCode}\`\n- Binding created: **no**`,
-                { userId: resolvedByUserId },
+                req.chiefRelay ? { agentId: req.chiefRelay.agentId, runId: actor.runId } : { userId: resolvedByUserId ?? "board" },
               );
             } catch (commentError) {
               logger.warn(
@@ -17463,6 +17481,7 @@ export function issueRoutes(
           interactionKind: interaction.kind,
           interactionStatus: interaction.status,
           resolutionActorKind: actor.actorType,
+          chiefRelay: req.chiefRelay,
           requestedResolverPolicy: interaction.requestedResolverPolicy,
           effectiveResolverPolicy: interaction.effectiveResolverPolicy,
           resolverPolicyProvenance: interaction.resolverPolicyProvenance,
@@ -17593,6 +17612,7 @@ export function issueRoutes(
           reason: req.body.reason,
           actor: {
             agentId: actor.agentId,
+            ...(req.chiefRelay ? { chiefRelay: req.chiefRelay, runId: actor.runId } : {}),
             userId: actor.actorType === "user" ? actor.actorId : null,
           },
         });
@@ -17605,6 +17625,7 @@ export function issueRoutes(
         req.body,
         {
           agentId: actor.agentId,
+          chiefRelay: req.chiefRelay,
           runId: actor.runId,
           userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
@@ -17630,6 +17651,7 @@ export function issueRoutes(
           interactionKind: interaction.kind,
           interactionStatus: interaction.status,
           resolutionActorKind: actor.actorType,
+          chiefRelay: req.chiefRelay,
           requestedResolverPolicy: interaction.requestedResolverPolicy,
           effectiveResolverPolicy: interaction.effectiveResolverPolicy,
           resolverPolicyProvenance: interaction.resolverPolicyProvenance,
@@ -17693,6 +17715,7 @@ export function issueRoutes(
         req.body,
         {
           agentId: actor.agentId,
+          chiefRelay: req.chiefRelay,
           runId: actor.runId,
           userId: actor.actorType === "user" ? actor.actorId : null,
           resolverPolicyRestriction:
@@ -17715,6 +17738,7 @@ export function issueRoutes(
           interactionKind: interaction.kind,
           interactionStatus: interaction.status,
           resolutionActorKind: actor.actorType,
+          chiefRelay: req.chiefRelay,
           requestedResolverPolicy: interaction.requestedResolverPolicy,
           effectiveResolverPolicy: interaction.effectiveResolverPolicy,
           resolverPolicyProvenance: interaction.resolverPolicyProvenance,
@@ -17775,6 +17799,7 @@ export function issueRoutes(
           req.body,
           {
             agentId: actor.agentId,
+            ...(req.chiefRelay ? { chiefRelay: req.chiefRelay } : {}),
             runId: actor.runId,
             userId: actor.actorType === "user" ? actor.actorId : null,
             resolverPolicyRestriction:
@@ -17800,6 +17825,7 @@ export function issueRoutes(
           interactionKind: interaction.kind,
           interactionStatus: interaction.status,
           resolutionActorKind: actor.actorType,
+          chiefRelay: req.chiefRelay,
           requestedResolverPolicy: interaction.requestedResolverPolicy,
           effectiveResolverPolicy: interaction.effectiveResolverPolicy,
           resolverPolicyProvenance: interaction.resolverPolicyProvenance,
@@ -17873,6 +17899,7 @@ export function issueRoutes(
         req.body,
         {
           agentId: actor.agentId,
+          chiefRelay: req.chiefRelay,
           runId: actor.runId,
           userId: actor.actorType === "user" ? actor.actorId : null,
         },
@@ -17958,20 +17985,23 @@ export function issueRoutes(
         "Issue not found",
       );
       if (!issue) return;
-      if (req.actor.type === "agent") {
+      if (req.actor.type === "agent" && !req.chiefRelay) {
         res.status(403).json({
           error:
             "Agent actors cannot skip issue-thread interactions through this board-only route",
         });
         return;
       }
-      assertBoard(req);
+      if (req.chiefRelay) {
+        if (!await getIssueThreadInteractionResolutionAuthorization(req, res, issue, interactionId)) return;
+      } else assertBoard(req);
 
       const actor = getActorInfo(req);
       const interaction = await issueThreadInteractionService(
         db,
       ).skipInteraction(issue, interactionId, req.body, {
         agentId: actor.agentId,
+        chiefRelay: req.chiefRelay,
         runId: actor.runId,
         userId: actor.actorType === "user" ? actor.actorId : null,
       });

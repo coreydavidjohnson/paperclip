@@ -42,12 +42,13 @@ import type {
   ToolRiskLevel,
 } from "@paperclipai/shared";
 import { toolPolicyConditionsSchema } from "@paperclipai/shared";
-import { badRequest, conflict, notFound, unprocessable } from "../errors.js";
+import { badRequest, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import {
   effectiveToolProfileBindings,
   profileIdsInBindingOrder,
 } from "./tool-profile-binding-precedence.js";
 import { recordToolRuntimeAuditWriteFailure } from "./tool-runtime-metrics.js";
+import { readChiefRelay, type ChiefRelay } from "./chief-relay-types.js";
 
 type ToolAccessContext = {
   companyId: string;
@@ -1822,8 +1823,13 @@ export function toolAccessPolicyService(db: Db) {
     companyId: string;
     actionRequestId: string;
     body: CreateToolTrustRuleFromActionRequest;
-    actor?: { agentId?: string | null; userId?: string | null };
+    actor?: { agentId?: string | null; userId?: string | null; chiefRelay?: ChiefRelay };
   }) {
+    const relay = readChiefRelay(input.actor?.chiefRelay);
+    if (input.actor?.chiefRelay && (!relay || !input.actor.agentId || input.actor.userId
+      || relay.agentId !== input.actor.agentId || relay.companyId !== input.companyId)) {
+      throw forbidden("Chief relay does not match the trust rule actor or company");
+    }
     const [actionRequest] = await db
       .select()
       .from(toolActionRequests)
@@ -1864,8 +1870,8 @@ export function toolAccessPolicyService(db: Db) {
       scope: input.body.scope,
     });
     assertReviewedTrustRuleSelectors(selectors, reviewedSelectors);
-    if (input.body.argumentMode === "action" && (input.actor?.agentId || !invocation.agentId || !invocation.connectionId || actionRequest.approvalId)) {
-      throw unprocessable("Action-wide permission requires a human-approved agent connection action without a formal approval gate");
+    if (input.body.argumentMode === "action" && ((input.actor?.agentId && !relay) || !invocation.agentId || !invocation.connectionId || actionRequest.approvalId)) {
+      throw unprocessable("Action-wide permission requires a human-approved or explicit Chief-relayed agent connection action without a formal approval gate");
     }
     const filters = input.body.argumentMode === "action"
       ? { allowAny: true }
@@ -1928,6 +1934,7 @@ export function toolAccessPolicyService(db: Db) {
         policyId: policy.id,
         actionRequestId: actionRequest.id,
         invocationId: invocation.id,
+        ...(relay ? { chiefRelay: relay } : {}),
         approvalThreshold,
         approvedCount,
         selectors,
@@ -1956,7 +1963,7 @@ export function toolAccessPolicyService(db: Db) {
       argumentsSummary: invocation.argumentsSummary,
       requestHash: invocation.argumentsHash,
       requestSummary: invocation.argumentsSummary,
-      metadata: { approvalThreshold, approvedCount, selectors, expiresAt },
+      metadata: { approvalThreshold, approvedCount, selectors, expiresAt, ...(relay ? { chiefRelay: relay } : {}) },
     });
     return policy;
   }

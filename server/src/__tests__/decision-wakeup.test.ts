@@ -25,4 +25,9 @@ describe("createDecisionWakeOriginAgent", () => {
       payload: { issueId: "issue-1", decisionId: "decision-1", outcome: "decided" },
     });
   });
+  it("keeps the relaying agent as the continuation requester", async () => {
+    const wakeup = vi.fn().mockResolvedValue(null);
+    await createDecisionWakeOriginAgent(wakeup)({ ...input, requestedByActorType: "agent", requestedByActorId: "chief-1" });
+    expect(wakeup).toHaveBeenCalledWith("agent-1", expect.objectContaining({ requestedByActorType: "agent", requestedByActorId: "chief-1" }));
+  });
 });

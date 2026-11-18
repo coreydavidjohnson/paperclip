@@ -1,3 +1,4 @@
+import type { ChiefRelay } from "../services/chief-relay-types.js";
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -94,7 +95,7 @@ function createRouteDb(contextSnapshot: Record<string, unknown> = {}, runId = "r
   } as any;
 }
 
-async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown> } = {}) {
+async function createAgentApp(options: { runId?: string; contextSnapshot?: Record<string, unknown>; chiefRelay?: ChiefRelay } = {}) {
   const { errorHandler, approvalRoutes } = routeModules.value;
   const app = express();
   app.use(express.json());
@@ -109,6 +110,7 @@ async function createAgentApp(options: { runId?: string; contextSnapshot?: Recor
     };
     next();
   });
+  app.use((req, _res, next) => { req.chiefRelay = options.chiefRelay; next(); });
   app.use("/api", approvalRoutes(createRouteDb(options.contextSnapshot, options.runId ?? "run-1")));
   app.use(errorHandler);
   return app;
@@ -319,6 +321,43 @@ describe("approval routes idempotent retries", () => {
       "user-1",
       "Need changes",
     );
+  });
+
+  const relayProof: ChiefRelay = { agentId: "agent-1", companyId: "company-1", representedUserId: "local-board", sourceSessionId: "source-session",
+    sourceMessageId: "source-message", exactQuote: "Approve this card.", scope: "This card", idempotencyKey: "relay-1", requestFingerprint: "request-1" };
+
+  it.each(["approve", "reject"] as const)("keeps Chief as native %s submitter and logs actor attribution", async action => {
+    const approval = { id: "approval-relay", companyId: "company-1", type: "request_board_approval", status: "pending", payload: {}, requestedByAgentId: "requester-1" };
+    mockApprovalService.getById.mockResolvedValue(approval);
+    mockApprovalService[action].mockResolvedValue({ approval: { ...approval, status: action === "approve" ? "approved" : "rejected", decidedByUserId: null }, applied: true });
+    const response = await request(await createAgentApp({ chiefRelay: relayProof })).post(`/api/approvals/${approval.id}/${action}`).send({ decisionNote: "Explicit instruction", decidedByUserId: "spoofed" });
+    expect(response.status).toBe(200);
+    expect(mockApprovalService[action]).toHaveBeenCalledWith(approval.id, null, "Explicit instruction", relayProof, "run-1");
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ actorType: "agent", actorId: "agent-1", agentId: "agent-1", details: expect.objectContaining({ chiefRelay: relayProof }) }));
+    if (action === "approve") expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith("requester-1", expect.objectContaining({ requestedByActorType: "agent", requestedByActorId: "agent-1" }));
+  });
+
+  it("does not duplicate native effects on an authenticated relay retry", async () => {
+    const approval = { id: "approval-relay", companyId: "company-1", type: "request_board_approval", status: "approved", payload: {}, requestedByAgentId: "requester-1" };
+    mockApprovalService.getById.mockResolvedValue(approval);
+    mockApprovalService.approve.mockResolvedValue({ approval, applied: false });
+    expect((await request(await createAgentApp({ chiefRelay: relayProof })).post(`/api/approvals/${approval.id}/approve`).send({})).status).toBe(200);
+    expect(mockHeartbeatService.wakeup).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+  });
+
+  it("does not authorize a normal agent through caller-supplied relay identity", async () => {
+    const response = await request(await createAgentApp()).post("/api/approvals/approval-1/approve").send({ chiefRelay: relayProof });
+    expect(response.status).toBe(403);
+    expect(mockApprovalService.approve).not.toHaveBeenCalled();
+  });
+
+  it("retains the status-only run mutation guard for relay approvals", async () => {
+    mockApprovalService.getById.mockResolvedValue({ id: "approval-1", companyId: "company-1", payload: {} });
+    const response = await request(await createAgentApp({ chiefRelay: relayProof, contextSnapshot: { recoveryIntent: "status_only", allowDeliverableWork: false, allowDocumentUpdates: false, resumeRequiresNormalModel: true } }))
+      .post("/api/approvals/approval-1/approve").send({});
+    expect(response.status).toBe(403);
+    expect(mockApprovalService.approve).not.toHaveBeenCalled();
   });
 
   it("lets agents create generic issue-linked board approval requests", async () => {

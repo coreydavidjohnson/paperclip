@@ -37,6 +37,28 @@ export interface ExecutionContinuationEnvelope {
     resolvedAt: string;
     result: unknown;
   }>;
+  /** Server-authorized Chief attestations, never authenticated human responses.
+   * The envelope supplies company/task scope. Card records use the native card id;
+   * per-item winners use a stable composite id plus interactionId/itemId.
+   * Only exactQuote within scope represents user direction, not generated result text.
+   */
+  relayedResponses?: Array<{
+    id: string;
+    /** Native card and item IDs for independently scoped verdict winners. */
+    interactionId?: string;
+    itemId?: string;
+    kind: string;
+    status: string;
+    resolvedByAgentId: string;
+    resolvedByRunId: string | null;
+    resolvedAt: string;
+    representedUserId: string;
+    sourceSessionId: string;
+    sourceMessageId: string;
+    exactQuote: string;
+    scope: string;
+    result: unknown;
+  }>;
   interactionOutcomes: Array<{
     id: string;
     kind: string;
@@ -50,6 +72,10 @@ export interface ExecutionContinuationEnvelope {
     /** Omitted component means its prior baseline is unknown: send a snapshot. */
     humanResponses?: {
       updated: NonNullable<ExecutionContinuationEnvelope["humanResponses"]>;
+      removedIds: string[];
+    };
+    relayedResponses?: {
+      updated: NonNullable<ExecutionContinuationEnvelope["relayedResponses"]>;
       removedIds: string[];
     };
     interactionOutcomes?: {

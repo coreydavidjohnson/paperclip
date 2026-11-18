@@ -1,3 +1,4 @@
+import type { ChiefRelay } from "../../../services/chief-relay-types.js";
 import type { LifecycleFailure } from "../application/ports.js";
 import type { Db } from "@paperclipai/db";
 import type { budgetPolicies } from "@paperclipai/db";
@@ -12,7 +13,7 @@ export interface LifecycleEffects {
   completeConfiguration(db: Db, before: AgentConfigurationRecord, after: AgentConfigurationRecord, patch: AgentConfigurationPatch, options: UpdateAgentOptions | undefined, publications: ActivityPublication[]): Promise<void>;
   transaction<T>(db: Db, companyId: string, work: (tx: Db, publications: ActivityPublication[]) => Promise<T>): Promise<T>;
   policyBlocks(db: Db, policy: typeof budgetPolicies.$inferSelect): Promise<boolean>;
-  setAgentBudget(db: Db, publications: ActivityPublication[], companyId: string, agentId: string, amount: number, userId: string | null, isActive?: boolean): Promise<unknown>;
+  setAgentBudget(db: Db, publications: ActivityPublication[], companyId: string, agentId: string, amount: number, userId: string | null, isActive?: boolean, chiefRelay?: ChiefRelay, actorRunId?: string | null): Promise<unknown>;
   enforceBudget(db: Db, companyId: string, agentId: string): Promise<void>;
   recordCreation(db: Db, companyId: string, agentId: string): Promise<void>;
   recordStatus(db: Db, companyId: string, agentId: string, before: string, after: string): Promise<void>;

@@ -15,9 +15,11 @@ import {
 } from "@paperclipai/db";
 import type { SecretProvider } from "@paperclipai/shared";
 import { badRequest, conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
+import { assertChiefRelayRunWriteAllowed } from "../lib/chief-relay-run.js";
 import { getSecretProvider } from "../secrets/provider-registry.js";
 import { agentService } from "./agents.js";
 import { logActivity } from "./activity-log.js";
+import { readChiefRelay, type ChiefRelay } from "./chief-relay-types.js";
 import { normalizeSecretKey, secretService } from "./secrets.js";
 
 const CONFIG_PATH_RE = /^(?:env\.[A-Za-z_][A-Za-z0-9_]*|access\.[A-Za-z_][A-Za-z0-9_]*)$/;
@@ -36,6 +38,45 @@ export type ProposalRunContext = {
   heartbeatRunId: string;
   registerForRedaction: (value: string) => void | Promise<void>;
 };
+
+type SecretProposalResolutionActor = {
+  runId?: string | null;
+  agentId?: string | null;
+  userId?: string | null;
+  chiefRelay?: ChiefRelay;
+};
+
+type ProposalApprovalIdentity = {
+  resolvedByUserId: string | null;
+  resolvedByAgentId: string | null;
+  resolvedByRunId: string | null;
+  chiefRelay?: ChiefRelay;
+};
+
+function approvalIdentity(companyId: string, input: {
+  resolvedByUserId?: string | null;
+  actor?: SecretProposalResolutionActor;
+}): ProposalApprovalIdentity {
+  const actor = input.actor;
+  const relay = readChiefRelay(actor?.chiefRelay);
+  if (actor?.chiefRelay) {
+    if (!relay || !actor.agentId || actor.userId || input.resolvedByUserId
+      || relay.agentId !== actor.agentId || relay.companyId !== companyId) {
+      throw forbidden("Chief relay does not match the secret proposal actor or company");
+    }
+    return { resolvedByUserId: null, resolvedByAgentId: actor.agentId, resolvedByRunId: actor.runId ?? null, chiefRelay: relay };
+  }
+  if (actor?.agentId) throw forbidden("Only a human can approve a secret proposal");
+  const userId = actor?.userId ?? input.resolvedByUserId;
+  if (!userId) throw forbidden("A human or explicit Chief relay is required to approve a secret proposal");
+  return { resolvedByUserId: userId, resolvedByAgentId: null, resolvedByRunId: null };
+}
+
+function approvalActivityActor(identity: ProposalApprovalIdentity) {
+  return identity.resolvedByAgentId
+    ? { actorType: "agent" as const, actorId: identity.resolvedByAgentId }
+    : { actorType: "user" as const, actorId: identity.resolvedByUserId! };
+}
 
 type Proposal = typeof companySecretProposals.$inferSelect;
 
@@ -257,7 +298,7 @@ export function createSecretProposalsService(db: Db) {
     txDb: Db,
     proposal: Proposal,
     outcome: "approved" | "rejected" | "withdrawn" | "expired",
-    input: { resolvedByUserId?: string | null; reason?: string | null } = {},
+    input: { resolvedByUserId?: string | null; resolvedByAgentId?: string | null; resolvedByRunId?: string | null; chiefRelay?: ChiefRelay; reason?: string | null } = {},
   ) {
     if (!proposal.interactionId) return;
     const current = await txDb
@@ -297,13 +338,16 @@ export function createSecretProposalsService(db: Db) {
           version: 1,
           outcome: resultOutcome,
           ...(input.reason ? { reason: input.reason } : {}),
+          ...(input.chiefRelay ? { chiefRelay: input.chiefRelay } : {}),
           secretProposal: {
             version: 1,
             status: outcome === "approved" ? "executed" : outcome,
             updatedAt: now.toISOString(),
           },
         },
-        resolvedByUserId: input.resolvedByUserId ?? current.resolvedByUserId ?? null,
+        resolvedByUserId: input.chiefRelay ? null : input.resolvedByUserId ?? current.resolvedByUserId ?? null,
+        resolvedByAgentId: input.chiefRelay ? input.resolvedByAgentId : current.resolvedByAgentId,
+        resolvedByRunId: input.chiefRelay ? input.resolvedByRunId ?? null : current.resolvedByRunId,
         resolvedAt: current.resolvedAt ?? now,
         updatedAt: now,
       })
@@ -565,8 +609,7 @@ export function createSecretProposalsService(db: Db) {
     }
   }
 
-  async function applySecretApproval(txDb: Db, proposal: Proposal, input: {
-    resolvedByUserId: string;
+  async function applySecretApproval(txDb: Db, proposal: Proposal, input: ProposalApprovalIdentity & {
     overrides?: { name?: string; description?: string | null; providerConfigId?: string | null };
   }) {
     if (!proposal.valueCiphertext) throw conflict("Proposed secret value is no longer available");
@@ -597,24 +640,22 @@ export function createSecretProposalsService(db: Db) {
           ? proposal.proposedDescription
           : input.overrides.description,
       },
-      { userId: input.resolvedByUserId, agentId: proposal.proposedByAgentId },
+      { userId: input.resolvedByUserId, agentId: input.resolvedByAgentId ?? proposal.proposedByAgentId },
     );
     await logActivity(txDb, {
       companyId: proposal.companyId,
-      actorType: "user",
-      actorId: input.resolvedByUserId,
+      ...approvalActivityActor(input),
       action: "secret.created",
       entityType: "secret",
       entityId: created.id,
-      agentId: proposal.proposedByAgentId,
-      runId: proposal.originRunId,
+      agentId: input.resolvedByAgentId ?? proposal.proposedByAgentId,
+      runId: input.chiefRelay ? input.resolvedByRunId : proposal.originRunId,
       details: { name: created.name, provider: created.provider, proposalId: proposal.id },
     });
     return created;
   }
 
-  async function markApproved(txDb: Db, proposal: Proposal, input: {
-    resolvedByUserId: string;
+  async function markApproved(txDb: Db, proposal: Proposal, input: ProposalApprovalIdentity & {
     createdSecretId?: string | null;
     appliedBindingConfigPath?: string | null;
   }) {
@@ -635,13 +676,12 @@ export function createSecretProposalsService(db: Db) {
     if (!updated) throw conflict("Proposal is no longer pending");
     await logActivity(txDb, {
       companyId: proposal.companyId,
-      actorType: "user",
-      actorId: input.resolvedByUserId,
+      ...approvalActivityActor(input),
       action: "secret.proposal.approved",
       entityType: "company_secret_proposal",
       entityId: proposal.id,
-      agentId: proposal.proposedByAgentId,
-      runId: proposal.originRunId,
+      agentId: input.resolvedByAgentId ?? proposal.proposedByAgentId,
+      runId: input.chiefRelay ? input.resolvedByRunId : proposal.originRunId,
       details: {
         issueId: proposal.originIssueId,
         createdSecretId: input.createdSecretId ?? null,
@@ -649,9 +689,7 @@ export function createSecretProposalsService(db: Db) {
         ciphertextScrubbed: true,
       },
     });
-    await reflectProposalLifecycleOnInteraction(txDb, proposal, "approved", {
-      resolvedByUserId: input.resolvedByUserId,
-    });
+    await reflectProposalLifecycleOnInteraction(txDb, proposal, "approved", input);
     return updated;
   }
 
@@ -659,7 +697,7 @@ export function createSecretProposalsService(db: Db) {
     txDb: Db,
     proposal: Proposal,
     secret: typeof companySecrets.$inferSelect,
-    resolvedByUserId: string,
+    identity: ProposalApprovalIdentity,
   ) {
     if (!proposal.targetId || !proposal.configPath) throw conflict("Binding proposal is incomplete");
     const agentSvc = agentService(txDb);
@@ -701,28 +739,33 @@ export function createSecretProposalsService(db: Db) {
       adapterConfig[proposal.configPath] = binding;
     }
     const updated = await updateAgentConfigurationInTransaction(txDb, target.id, { adapterConfig }, {
-      recordRevision: { createdByUserId: resolvedByUserId, source: "patch" },
+      recordRevision: { createdByUserId: identity.resolvedByUserId, createdByAgentId: identity.resolvedByAgentId, source: "patch" },
     });
     if (!updated) throw notFound("Target agent not found");
     await logActivity(txDb, {
       companyId: proposal.companyId,
-      actorType: "user",
-      actorId: resolvedByUserId,
+      ...approvalActivityActor(identity),
       action: "agent.updated",
       entityType: "agent",
       entityId: target.id,
+      ...(identity.chiefRelay ? { agentId: identity.resolvedByAgentId, runId: identity.resolvedByRunId } : {}),
       details: { adapterConfig: true, proposalId: proposal.id, configPath: proposal.configPath },
     });
   }
 
   async function approve(companyId: string, proposalId: string, input: {
-    resolvedByUserId: string;
+    resolvedByUserId?: string | null;
+    actor?: SecretProposalResolutionActor;
     cascade?: boolean;
     overrides?: { name?: string; description?: string | null; providerConfigId?: string | null };
     assertCanResolve?: (proposal: Proposal, txDb: Db) => Promise<void>;
   }) {
+    const identity = approvalIdentity(companyId, input);
+    const approvalInput = { ...input, ...identity };
     const loadForApproval = async (txDb: Db) => {
       const proposal = await requirePending(companyId, proposalId, txDb, true);
+      // Each phase must serialize its effects with cancellation of the actual Chief run.
+      if (identity.chiefRelay) await assertChiefRelayRunWriteAllowed(txDb, identity.chiefRelay, identity.resolvedByRunId);
       assertNotExpired(proposal);
       await input.assertCanResolve?.(proposal, txDb);
       await assertBindingSnapshotCurrent(proposal, txDb, true);
@@ -732,9 +775,9 @@ export function createSecretProposalsService(db: Db) {
       const txDb = tx as unknown as Db;
       const proposal = await loadForApproval(txDb);
       if (proposal.kind === "secret") {
-        const created = await applySecretApproval(txDb, proposal, input);
+        const created = await applySecretApproval(txDb, proposal, approvalInput);
         return { kind: "secret" as const, proposal: await markApproved(txDb, proposal, {
-          resolvedByUserId: input.resolvedByUserId,
+          ...identity,
           createdSecretId: created.id,
         }) };
       }
@@ -753,9 +796,9 @@ export function createSecretProposalsService(db: Db) {
             throw conflict(`Binding proposal requires pending secret proposal ${dependency.id}; retry with cascade=true`);
           }
           assertNotExpired(dependency);
-          const created = await applySecretApproval(txDb, dependency, input);
+          const created = await applySecretApproval(txDb, dependency, approvalInput);
           await markApproved(txDb, dependency, {
-            resolvedByUserId: input.resolvedByUserId,
+            ...identity,
             createdSecretId: created.id,
           });
           secretId = created.id;
@@ -774,9 +817,9 @@ export function createSecretProposalsService(db: Db) {
       if (!liveSecret || liveSecret.companyId !== companyId || liveSecret.status !== "active") {
         throw conflict("Binding proposal secret is not active");
       }
-      await applyBindingApproval(txDb, proposal, liveSecret, input.resolvedByUserId);
+      await applyBindingApproval(txDb, proposal, liveSecret, identity);
       return markApproved(txDb, proposal, {
-        resolvedByUserId: input.resolvedByUserId,
+        ...identity,
         appliedBindingConfigPath: proposal.configPath,
       });
     });
