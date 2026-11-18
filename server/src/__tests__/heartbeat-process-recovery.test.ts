@@ -648,7 +648,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     const localServiceSupervisor = await vi.importActual<
       typeof import("../services/local-service-supervisor.js")
     >("../services/local-service-supervisor.js");
-    mockTerminateLocalService.mockImplementation(
+    // Clear unused one-shot Stop gates after a fixture fails before dispatch.
+    mockTerminateLocalService.mockReset().mockImplementation(
       localServiceSupervisor.terminateLocalService,
     );
     mockAdapterExecute.mockImplementation(async () => ({
@@ -9149,6 +9150,7 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
 
   it.each(([
     { mode: "signal", graceful: false, failure: null },
+    { mode: "slow preparation", graceful: false, failure: null },
     { mode: "graceful exit", graceful: true, failure: null },
     { mode: "adapter exception", graceful: false, failure: null },
     { mode: "termination error", graceful: false, failure: "termination" },
@@ -9200,6 +9202,9 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       });
       mockAdapterExecute.mockImplementationOnce((async (input: unknown) => {
         const context = input as Parameters<typeof actualProcess.execute>[0];
+        if (mode === "slow preparation") {
+          await new Promise((resolve) => setTimeout(resolve, 3_500));
+        }
         observedResult = await actualProcess.execute({
           ...context,
           onLog: async (stream, text) => {
@@ -9242,24 +9247,32 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         })
         .where(eq(agents.id, agentId));
       const heartbeat = heartbeatService(db);
-      await heartbeat.resumeQueuedRuns();
-      const running = await waitForValue(async () =>
-        runningProcesses.get(runId),
-      );
-      expect(running?.child.pid).toBeTruthy();
-      await ready;
-      const cancellation = heartbeat
-        .cancelRun(runId, "Stopped by test operator")
-        .then(
-          (run) => ({ run, error: null as Error | null }),
-          (error: Error) => ({ run: null, error }),
-        );
-      let duplicate: typeof cancellation | undefined;
+      type CancellationResult = {
+        run: Awaited<ReturnType<typeof heartbeat.cancelRun>>;
+        error: Error | null;
+      };
+      let cancellation: Promise<CancellationResult> | undefined;
+      let duplicate: typeof cancellation;
       let duplicateSettled = false;
       let writeSpy: ReturnType<typeof vi.spyOn> | undefined;
-      let first!: Awaited<typeof cancellation>;
-      let second: Awaited<typeof cancellation> | undefined;
+      let first: CancellationResult | undefined;
+      let second: CancellationResult | undefined;
       try {
+        await heartbeat.resumeQueuedRuns();
+        // Real accounting and workspace preparation can exceed the generic 3s
+        // poll on CI. This is still bounded by the enclosing test timeout.
+        const running = await waitForValue(
+          async () => runningProcesses.get(runId),
+          10_000,
+        );
+        expect(running?.child.pid).toBeTruthy();
+        await ready;
+        cancellation = heartbeat
+          .cancelRun(runId, "Stopped by test operator")
+          .then(
+            (run) => ({ run, error: null as Error | null }),
+            (error: Error) => ({ run: null, error }),
+          );
         await terminated;
         expect(await waitForValue(async () => observedResult)).toMatchObject(
           graceful
@@ -9299,21 +9312,21 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
         releaseResult();
       }
       if (failure) {
-        expect(first.error?.message).toContain(
+        expect(first?.error?.message).toContain(
           failure === "write"
             ? "cancellation write unavailable"
             : "termination unconfirmed",
         );
-        expect(second?.error).toBe(first.error);
+        expect(second?.error).toBe(first?.error);
         expect((await waitForRunToSettle(heartbeat, runId))?.status).toBe(
           "failed",
         );
         // The failed owner did not leave an unresolved barrier behind.
         expect((await heartbeat.cancelRun(runId))?.status).toBe("failed");
       } else {
-        expect(first.error).toBeNull();
+        expect(first?.error).toBeNull();
         expect(second?.error).toBeNull();
-        expect(first.run?.status).toBe("cancelled");
+        expect(first?.run?.status).toBe("cancelled");
         expect(second?.run?.status).toBe("cancelled");
       }
       expect(mockTerminateLocalService).toHaveBeenCalledTimes(1);

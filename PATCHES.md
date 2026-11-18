@@ -461,6 +461,12 @@ heartbeat.ts.
 
 - Raises embedded-PostgreSQL setup timeouts in five test files so the image
   gate is stable on shared BuildKit nodes. Test-only.
+- PER-1498 image qualification exposed a three-second process-start poll in the
+  real Stop fixture. Wait up to ten seconds for preparation, release fixture
+  gates even when startup fails, and clear unused one-shot Stop mocks between
+  cases. Explicit slow-preparation cases preserve the cancellation assertions.
+  Server image gates report each case and stop at the first failure, so one
+  failed fixture cannot hide behind hours of later cleanup timeouts.
 
 ## 16. Image gate
 

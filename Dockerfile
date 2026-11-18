@@ -182,7 +182,7 @@ RUN pnpm --filter @paperclipai/ui exec vitest run \
 RUN pnpm --filter @paperclipai/adapter-utils exec vitest run src/server-utils.test.ts
 RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home \
   && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
-    --hookTimeout=120000 --testTimeout=60000 \
+    --hookTimeout=120000 --testTimeout=60000 --reporter=verbose --bail=1 \
     src/controller-drain.test.ts \
     src/__tests__/db-errors.test.ts \
     src/__tests__/heartbeat-queued-run-claim-isolation.test.ts \
@@ -283,7 +283,7 @@ RUN mkdir -p /tmp/luma-test-home && chown -R node:node /app /tmp/luma-test-home 
     src/services/conversation-continuation.test.ts \
     src/services/native-runtime/native-safe-replacement.test.ts \
   && gosu node env HOME=/tmp/luma-test-home pnpm --filter @paperclipai/server exec vitest run \
-    --hookTimeout=120000 --testTimeout=60000 \
+    --hookTimeout=120000 --testTimeout=60000 --reporter=verbose --bail=1 \
     src/__tests__/tool-gateway-service.test.ts -t 'Chief relay' \
   && chown -R root:root /app
 
